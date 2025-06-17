@@ -2,39 +2,14 @@ use core::error::Error;
 use hex;
 use hmac::{Hmac, Mac};
 use reqwest::Url;
-use serde::Deserialize;
-use serde::de::{self, Deserializer};
-use serde_json::Value;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tap::Pipe;
 
+pub mod model;
+use model::*;
+
 type HmacSha256 = Hmac<Sha256>;
-
-#[derive(Debug, Deserialize)]
-pub struct Kline {
-    #[serde(deserialize_with = "de_f64_or_string_as_f64")]
-    pub open: f64,
-    #[serde(deserialize_with = "de_f64_or_string_as_f64")]
-    pub high: f64,
-    #[serde(deserialize_with = "de_f64_or_string_as_f64")]
-    pub low: f64,
-    #[serde(deserialize_with = "de_f64_or_string_as_f64")]
-    pub close: f64,
-    #[serde(deserialize_with = "de_f64_or_string_as_f64")]
-    pub volume: f64,
-    pub time: i64,
-}
-
-fn de_f64_or_string_as_f64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
-    Ok(match Value::deserialize(deserializer)? {
-        Value::String(s) => s.parse().map_err(de::Error::custom)?,
-        Value::Number(num) => num
-            .as_f64()
-            .ok_or_else(|| de::Error::custom("Invalid number"))?,
-        _ => return Err(de::Error::custom("wrong type")),
-    })
-}
 
 #[derive(Clone)]
 pub struct BingXClient {

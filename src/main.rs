@@ -1,4 +1,5 @@
 use algotrap::BingXClient;
+use algotrap::model::IterToDataFrameKline;
 use cli_candlestick_chart::{Candle, Chart};
 
 #[tokio::main]
@@ -11,11 +12,14 @@ async fn main() {
     // Fetch 15-minute candles for BTC-USDT perpetual
     match client.get_futures_klines("BTC-USDT", "15m", 1440).await {
         Ok(klines) => {
-            println!("Fetched {} candles:", klines.len());
             let candles = klines
                 .iter()
                 .map(|k| Candle::new(k.open, k.high, k.low, k.close, Some(k.volume), Some(k.time)))
                 .collect::<Vec<_>>();
+
+            let df = klines.into_iter().to_dataframe().unwrap();
+            println!("{df:?}");
+
             // Create and display the chart
             let mut chart = Chart::new(&candles);
 
