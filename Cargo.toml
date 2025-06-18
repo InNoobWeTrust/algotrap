@@ -16,5 +16,9 @@ cli-candlestick-chart = "0.4.1"
 polars = { version = "0.46.0", default-features = false, features = [
 	"lazy",
 	"fmt",
+	"polars-ops",
+	"diff",
+	"dynamic_group_by",
+	"rolling_window",
 ] }
 polars-row-derive = "0.1.0"
