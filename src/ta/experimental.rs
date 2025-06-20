@@ -6,6 +6,7 @@ use crate::ta::{common, rsi};
 /// Experimental index of relative strength based on `open + bar_bias`
 pub fn rssi(ohlc: &[Expr; 4], len: usize) -> Expr {
     let bias = common::bar_bias(ohlc);
+    let bar_pwr = ohlc[0].clone() + bias;
 
-    rsi(&bias, len)
+    rsi(&bar_pwr, len)
 }
