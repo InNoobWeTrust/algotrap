@@ -21,6 +21,7 @@ polars = { version = "0.46.0", default-features = false, features = [
 	"rolling_window",
 	"ewma",
 	"dtype-array",
+	"json",
 ] }
 polars-row-derive = "0.1.0"
 chrono = "0.4.41"

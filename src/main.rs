@@ -2,6 +2,7 @@ use algotrap::prelude::*;
 use core::error::Error;
 use minijinja::render;
 use polars::prelude::*;
+use std::io::Cursor;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -11,7 +12,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match client.get_futures_klines("BTC-USDT", "15m", 1440).await {
         Ok(klines) => {
             let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-            let df_with_indicators = df
+            let mut df_with_indicators = df
                 .lazy()
                 .with_columns([
                     col("time")
@@ -20,15 +21,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             Some("UTC".into()),
                         ))
                         .alias("Date"),
-                    concat_arr(vec![col("close"), col("open"), col("low"), col("high")])
-                        .unwrap()
-                        .alias("colh"),
                     ta::experimental::bias_reversion_smoothed(
                         &[col("open"), col("high"), col("low"), col("close")],
                         9,
                     )
                     .alias("Bias_Reversion"),
-                    ta::rsi(&col("close"), 14).alias("RSI"),
                     ta::experimental::rssi(
                         &[col("open"), col("high"), col("low"), col("close")],
                         14,
@@ -38,25 +35,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .collect()
                 .unwrap();
             println!("{df_with_indicators:?}");
-            let candles: Vec<Vec<f64>> = df_with_indicators
-                .column("colh")?
-                .array()?
-                .into_iter()
-                .map(|opt_series| {
-                    // Each opt_series is an Option<Series>
-                    opt_series
-                        .map(|s| s.f64().unwrap().into_no_null_iter().collect())
-                        .unwrap_or_default()
-                })
-                .collect();
-            let dates: Vec<String> = df_with_indicators
-                .column("Date")?
-                .datetime()?
-                .strftime("%Y-%m-%d %H:%M:%S")?
-                .into_no_null_iter()
-                .map(|s| s.to_string())
-                .collect();
-            let echarts_opts = dump_echarts_opts(dates.clone(), candles.clone());
+            let mut file = Cursor::new(Vec::new());
+            JsonWriter::new(&mut file)
+                .with_json_format(JsonFormat::Json)
+                .finish(&mut df_with_indicators)
+                .unwrap();
+            let df_json = String::from_utf8(file.into_inner()).unwrap();
+            let echarts_opts = dump_echarts_opts(df_json, df_with_indicators.get_column_names_owned().into_iter().map(|s| s.to_string()).collect());
             let echarts_html = render_raw(echarts_opts);
             tokio::fs::write("echarts.html", echarts_html).await?;
             Ok(())
@@ -68,8 +53,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn dump_echarts_opts(dates: Vec<String>, candles: Vec<Vec<f64>>) -> String {
-    render!(ECHARTS_OPTS_TEMPLATE, dates => dates, candles => candles)
+fn dump_echarts_opts(json_data: String, legend: Vec<String>) -> String {
+    render!(ECHARTS_OPTS_TEMPLATE, json_data => json_data, legend => legend)
 }
 
 fn render_raw(echarts_opts: String) -> String {
@@ -82,62 +67,110 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
     "trigger": "axis",
     "axisPointer": {
       "type": "cross",
-      "animation": false,
-      "lineStyle": {
-        "color": "/#376df4",
-        "width": 2.0,
-        "opacity": 1.0
+      "animation": false
+    }
+  },
+  "toolbox": {
+    "feature": {
+      "dataZoom": {
+        "yAxisIndex": false
       }
     }
   },
   "grid": [
     {
-      "bottom": 80
+      "height": "80%",
+      "bottom": "20%"
+    },
+    {
+      "height": "20%",
+      "bottom": "0%"
     }
   ],
-  "xAxis": {
-    "data": {{ dates }}
-  },
-  "yAxis": {
-    "scale": true
-  },
+  "xAxis": [
+    {
+      "type": "category",
+      "boundaryGap": false,
+      "axisLine": { "onZero": false },
+      "splitLine": { "show": false },
+      "min": "dataMin",
+      "max": "dataMax"
+    },
+    {
+      "type": "category",
+      "gridIndex": 1,
+      "boundaryGap": false,
+      "axisLine": { "onZero": false },
+      "axisTick": { "show": false },
+      "axisLabel": { "show": false },
+      "splitLine": { "show": false },
+      "min": "dataMin",
+      "max": "dataMax"
+    }
+  ],
+  "yAxis": [
+    {
+      "scale": true,
+      "splitArea": {
+        "show": true
+      }
+    },
+    {
+      "scale": true,
+      "gridIndex": 1,
+      "splitArea": {
+        "show": true
+      }
+    }
+  ],
   "dataZoom": [
     {
       "type": "inside",
-      "dataBackground": {
-        "lineStyle": {
-          "color": "/#8392A5",
-          "opacity": 0.8
-        },
-        "areaStyle": {
-          "color": "/#8392A5"
-        }
-      },
-      "textStyle": {
-        "color": "/#8392A5"
-      },
+      "xAxisIndex": [0, 1],
+      "start": 80,
+      "end": 100,
       "brushSelect": true
     },
     {
-      "dataBackground": {
-        "lineStyle": {
-          "color": "/#8392A5",
-          "opacity": 0.8
-        },
-        "areaStyle": {
-          "color": "'/#8392A5"
-        }
-      },
-      "textStyle": {
-        "color": "/#8392A5"
-      },
+      "show": true,
+      "xAxisIndex": [0, 1],
+      "type": "slider",
+      "start": 80,
+      "end": 100,
       "brushSelect": true
     }
   ],
+  "dataset": {
+    "source": {{ json_data }}
+  },
+  "legend": {
+    "data": {{ legend }}
+  },
   "series": [
     {
       "type": "candlestick",
-      "data": {{ candles }}
+      "encode": {
+        "x": "Date",
+        "y": ["close", "open", "low", "high"]
+      }
+    },
+    {
+      "name": "Bias_Reversion",
+      "type": "line",
+      "encode": {
+        "x": "Date",
+        "y": "Bias_Reversion"
+      }
+    },
+    {
+      "name": "RSSI",
+      "type": "line",
+      "xAxisIndex": 1,
+      "yAxisIndex": 1,
+      "encode": {
+        "x": "Date",
+        "y": "RSSI"
+      }
     }
   ]
 }
