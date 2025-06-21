@@ -1,5 +1,7 @@
 use polars::prelude::*;
 
+use crate::ta::rma;
+
 /// Calculate RSI value from a source column in dataframe
 pub fn rsi(src: &Expr, len: usize) -> Expr {
     // Diff
@@ -17,20 +19,8 @@ pub fn rsi(src: &Expr, len: usize) -> Expr {
         .otherwise(lit(0));
 
     // Rolling mean for gains and losses
-    let avg_gain = gains.rolling_mean(RollingOptionsFixedWindow {
-        window_size: len,
-        min_periods: len,
-        weights: None,
-        center: false,
-        fn_params: None,
-    });
-    let avg_loss = losses.rolling_mean(RollingOptionsFixedWindow {
-        window_size: len,
-        min_periods: len,
-        weights: None,
-        center: false,
-        fn_params: None,
-    });
+    let avg_gain = rma(&gains, len);
+    let avg_loss = rma(&losses, len);
 
     // RS calculation
     let rs = avg_gain / avg_loss;

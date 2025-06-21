@@ -19,10 +19,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Fetch 15-minute candles for BTC-USDT perpetual
     match client.get_futures_klines("BTC-USDT", "15m", 1440).await {
         Ok(klines) => {
-            let df = klines.iter().cloned().to_dataframe().unwrap();
+            let df = klines.iter().rev().cloned().to_dataframe().unwrap();
             let df_with_indicators = df
                 .lazy()
                 .with_columns([
+                    col("time")
+                        .cast(DataType::Datetime(
+                            TimeUnit::Milliseconds,
+                            Some("UTC".into()),
+                        ))
+                        .alias("Date"),
+                    ta::experimental::bias_reversion_smoothed(
+                        &[col("open"), col("high"), col("low"), col("close")],
+                        9,
+                    )
+                    .alias("Bias_Reversion"),
                     ta::rsi(&col("close"), 14).alias("RSI"),
                     ta::experimental::rssi(
                         &[col("open"), col("high"), col("low"), col("close")],
@@ -77,26 +88,28 @@ fn render(klines: &[Kline]) {
         )
         .x_axis(
             Axis::new()
-                //.type_(charming::element::AxisType::Category)
+                //.type_(charming::element::AxisType::Time)
                 .data(
                     klines
                         .iter()
+                        .rev()
                         .cloned()
+                        //.map(|k| format!("{}", Utc.timestamp_opt(k.time / 1000, 0).unwrap().format("%F %T")))
                         .map(|k| Utc.timestamp_opt(k.time / 1000, 0).unwrap().to_string())
                         .collect(),
                 ),
         )
         .y_axis(
             Axis::new()
-                .scale(true)
-                .split_line(SplitLine::new().show(false)),
+                .scale(true),
         )
         .series(
             Candlestick::new().data(
                 klines
                     .iter()
+                    .rev()
                     .cloned()
-                    .map(|k| vec![k.open, k.close, k.low, k.high])
+                    .map(|k| vec![k.close, k.open, k.low, k.high])
                     .collect(),
             ),
         );
