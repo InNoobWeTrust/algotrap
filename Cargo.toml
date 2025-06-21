@@ -20,8 +20,8 @@ polars = { version = "0.46.0", default-features = false, features = [
 	"dynamic_group_by",
 	"rolling_window",
 	"ewma",
+	"dtype-array",
 ] }
 polars-row-derive = "0.1.0"
-charming = { version = "0.6.0", features = ["ssr", "ssr-raster"] }
-viuer = { version = "0.9.1", features = ["print-file"] }
 chrono = "0.4.41"
+minijinja = "2.10.2"

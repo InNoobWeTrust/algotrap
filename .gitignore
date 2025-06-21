@@ -2,5 +2,4 @@
 .DS_Store
 Cargo.lock
 .bacon-locations
-chart.html
-chart.png
+echarts.html

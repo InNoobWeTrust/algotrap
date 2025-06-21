@@ -1,15 +1,6 @@
 use algotrap::prelude::*;
-use charming::{
-    Chart, HtmlRenderer, ImageFormat, ImageRenderer,
-    component::{Axis, DataZoom, DataZoomType, Grid},
-    element::{
-        AreaStyle, AxisPointer, AxisPointerType, DataBackground, LineStyle, SplitLine, TextStyle,
-        Tooltip, Trigger,
-    },
-    series::Candlestick,
-};
-use chrono::prelude::*;
 use core::error::Error;
+use minijinja::render;
 use polars::prelude::*;
 
 #[tokio::main]
@@ -29,6 +20,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             Some("UTC".into()),
                         ))
                         .alias("Date"),
+                    concat_arr(vec![col("close"), col("open"), col("low"), col("high")])
+                        .unwrap()
+                        .alias("colh"),
                     ta::experimental::bias_reversion_smoothed(
                         &[col("open"), col("high"), col("low"), col("close")],
                         9,
@@ -43,8 +37,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ])
                 .collect()
                 .unwrap();
-            render(&klines);
             println!("{df_with_indicators:?}");
+            let candles: Vec<Vec<f64>> = df_with_indicators
+                .column("colh")?
+                .array()?
+                .into_iter()
+                .map(|opt_series| {
+                    // Each opt_series is an Option<Series>
+                    opt_series
+                        .map(|s| s.f64().unwrap().into_no_null_iter().collect())
+                        .unwrap_or_default()
+                })
+                .collect();
+            let dates: Vec<String> = df_with_indicators
+                .column("Date")?
+                .datetime()?
+                .strftime("%Y-%m-%d %H:%M:%S")?
+                .into_no_null_iter()
+                .map(|s| s.to_string())
+                .collect();
+            let echarts_opts = dump_echarts_opts(dates.clone(), candles.clone());
+            let echarts_html = render_raw(echarts_opts);
+            tokio::fs::write("echarts.html", echarts_html).await?;
             Ok(())
         }
         Err(e) => {
@@ -54,79 +68,104 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn render(klines: &[Kline]) {
-    let chart = Chart::new()
-        .tooltip(
-            Tooltip::new().trigger(Trigger::Axis).axis_pointer(
-                AxisPointer::new()
-                    .animation(false)
-                    .type_(AxisPointerType::Cross)
-                    .line_style(LineStyle::new().color("#376df4").width(2).opacity(1)),
-            ),
-        )
-        .grid(Grid::new().bottom(80))
-        .data_zoom(
-            DataZoom::new()
-                .text_style(TextStyle::new().color("#8392A5"))
-                .data_background(
-                    DataBackground::new()
-                        .area_style(AreaStyle::new().color("#8392A5"))
-                        .line_style(LineStyle::new().color("#8392A5").opacity(0.8)),
-                )
-                .brush_select(true)
-                .type_(DataZoomType::Inside),
-        )
-        .data_zoom(
-            DataZoom::new()
-                .text_style(TextStyle::new().color("#8392A5"))
-                .data_background(
-                    DataBackground::new()
-                        .area_style(AreaStyle::new().color("#8392A5"))
-                        .line_style(LineStyle::new().color("#8392A5").opacity(0.8)),
-                )
-                .brush_select(true),
-        )
-        .x_axis(
-            Axis::new()
-                //.type_(charming::element::AxisType::Time)
-                .data(
-                    klines
-                        .iter()
-                        .rev()
-                        .cloned()
-                        //.map(|k| format!("{}", Utc.timestamp_opt(k.time / 1000, 0).unwrap().format("%F %T")))
-                        .map(|k| Utc.timestamp_opt(k.time / 1000, 0).unwrap().to_string())
-                        .collect(),
-                ),
-        )
-        .y_axis(
-            Axis::new()
-                .scale(true),
-        )
-        .series(
-            Candlestick::new().data(
-                klines
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .map(|k| vec![k.close, k.open, k.low, k.high])
-                    .collect(),
-            ),
-        );
-
-    HtmlRenderer::new("BTC/USDT", 1280, 720)
-        .theme(charming::theme::Theme::Walden)
-        .save(&chart, "chart.html")
-        .expect("Failed to save html");
-    ImageRenderer::new(640, 480)
-        .theme(charming::theme::Theme::Walden)
-        .save_format(ImageFormat::Png, &chart, "chart.png")
-        .expect("Failed to save image");
-    viuer::print_from_file(
-        "chart.png",
-        &viuer::Config {
-            ..Default::default()
-        },
-    )
-    .expect("Image printing failed");
+fn dump_echarts_opts(dates: Vec<String>, candles: Vec<Vec<f64>>) -> String {
+    render!(ECHARTS_OPTS_TEMPLATE, dates => dates, candles => candles)
 }
+
+fn render_raw(echarts_opts: String) -> String {
+    render!(ECHARTS_HTML_TEMPLATE, echarts_opts => echarts_opts)
+}
+
+const ECHARTS_OPTS_TEMPLATE: &str = r#"
+{
+  "tooltip": {
+    "trigger": "axis",
+    "axisPointer": {
+      "type": "cross",
+      "animation": false,
+      "lineStyle": {
+        "color": "/#376df4",
+        "width": 2.0,
+        "opacity": 1.0
+      }
+    }
+  },
+  "grid": [
+    {
+      "bottom": 80
+    }
+  ],
+  "xAxis": {
+    "data": {{ dates }}
+  },
+  "yAxis": {
+    "scale": true
+  },
+  "dataZoom": [
+    {
+      "type": "inside",
+      "dataBackground": {
+        "lineStyle": {
+          "color": "/#8392A5",
+          "opacity": 0.8
+        },
+        "areaStyle": {
+          "color": "/#8392A5"
+        }
+      },
+      "textStyle": {
+        "color": "/#8392A5"
+      },
+      "brushSelect": true
+    },
+    {
+      "dataBackground": {
+        "lineStyle": {
+          "color": "/#8392A5",
+          "opacity": 0.8
+        },
+        "areaStyle": {
+          "color": "'/#8392A5"
+        }
+      },
+      "textStyle": {
+        "color": "/#8392A5"
+      },
+      "brushSelect": true
+    }
+  ],
+  "series": [
+    {
+      "type": "candlestick",
+      "data": {{ candles }}
+    }
+  ]
+}
+"#;
+
+const ECHARTS_HTML_TEMPLATE: &str = r#"
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ECharts</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+  </head>
+  <body>
+    <div id="main" style="width: 100dvw;height:100dvh;"></div>
+    <script id="data" type="application/json">
+        {{ echarts_opts }}
+    </script>
+    <script type="text/javascript">
+      // Initialize the echarts instance based on the prepared dom
+      var myChart = echarts.init(document.getElementById('main'));
+
+      // Specify the configuration items and data for the chart
+      var option = JSON.parse(document.getElementById('data').textContent);
+
+      // Display the chart using the configuration items and data just specified.
+      myChart.setOption(option);
+    </script>
+  </body>
+</html>
+"#;
