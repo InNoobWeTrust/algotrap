@@ -176,14 +176,14 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
   "dataZoom": [
     {
       "type": "inside",
-      "xAxisIndex": [0, 1],
+      "xAxisIndex": [0, 1, 2],
       "start": 80,
       "end": 100,
       "brushSelect": true
     },
     {
       "show": true,
-      "xAxisIndex": [0, 1],
+      "xAxisIndex": [0, 1, 2],
       "type": "slider",
       "start": 80,
       "end": 100,
