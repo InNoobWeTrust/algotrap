@@ -25,7 +25,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         &[col("open"), col("high"), col("low"), col("close")],
                         9,
                     )
-                    .alias("Bias_Reversion"),
+                    .alias("Bias Reversion"),
+                    ta::experimental::atr_band(
+                        &[col("open"), col("high"), col("low"), col("close")],
+                        42,
+                        1.618,
+                    )[0]
+                    .clone()
+                    .alias("ATR Upperband"),
+                    ta::experimental::atr_band(
+                        &[col("open"), col("high"), col("low"), col("close")],
+                        42,
+                        1.618,
+                    )[1]
+                    .clone()
+                    .alias("ATR Lowerband"),
+                    ta::experimental::atr_reversion_percent(
+                        &[col("open"), col("high"), col("low"), col("close")],
+                        9,
+                        42,
+                        1.618,
+                    )
+                    .alias("ATR Reversion Percent"),
                     ta::experimental::rssi(
                         &[col("open"), col("high"), col("low"), col("close")],
                         14,
@@ -41,7 +62,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .finish(&mut df_with_indicators)
                 .unwrap();
             let df_json = String::from_utf8(file.into_inner()).unwrap();
-            let echarts_opts = dump_echarts_opts(df_json, df_with_indicators.get_column_names_owned().into_iter().map(|s| s.to_string()).collect());
+            let echarts_opts = dump_echarts_opts(
+                df_json,
+                df_with_indicators
+                    .get_column_names_owned()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            );
             let echarts_html = render_raw(echarts_opts);
             tokio::fs::write("echarts.html", echarts_html).await?;
             Ok(())
@@ -83,7 +111,11 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       "bottom": "20%"
     },
     {
-      "height": "20%",
+      "height": "10%",
+      "bottom": "10%"
+    },
+    {
+      "height": "10%",
       "bottom": "0%"
     }
   ],
@@ -106,6 +138,17 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       "splitLine": { "show": false },
       "min": "dataMin",
       "max": "dataMax"
+    },
+    {
+      "type": "category",
+      "gridIndex": 2,
+      "boundaryGap": false,
+      "axisLine": { "onZero": false },
+      "axisTick": { "show": false },
+      "axisLabel": { "show": false },
+      "splitLine": { "show": false },
+      "min": "dataMin",
+      "max": "dataMax"
     }
   ],
   "yAxis": [
@@ -118,6 +161,13 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
     {
       "scale": true,
       "gridIndex": 1,
+      "splitArea": {
+        "show": true
+      }
+    },
+    {
+      "scale": true,
+      "gridIndex": 2,
       "splitArea": {
         "show": true
       }
@@ -155,11 +205,27 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       }
     },
     {
-      "name": "Bias_Reversion",
+      "name": "Bias Reversion",
       "type": "line",
       "encode": {
         "x": "Date",
-        "y": "Bias_Reversion"
+        "y": "Bias Reversion"
+      }
+    },
+    {
+      "name": "ATR Upperband",
+      "type": "line",
+      "encode": {
+        "x": "Date",
+        "y": "ATR Upperband"
+      }
+    },
+    {
+      "name": "ATR Lowerband",
+      "type": "line",
+      "encode": {
+        "x": "Date",
+        "y": "ATR Lowerband"
       }
     },
     {
@@ -170,6 +236,16 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       "encode": {
         "x": "Date",
         "y": "RSSI"
+      }
+    },
+    {
+      "name": "ATR Reversion Percent",
+      "type": "line",
+      "xAxisIndex": 2,
+      "yAxisIndex": 2,
+      "encode": {
+        "x": "Date",
+        "y": "ATR Reversion Percent"
       }
     }
   ]

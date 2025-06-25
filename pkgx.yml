@@ -1,5 +1,5 @@
 dependencies:
   neovim.io: ^0.11
   hx: ^25
-  #rust-lang.org: ^1.87
+  rust-lang.org: ^1.87
   #cargo: ^1.87.0
