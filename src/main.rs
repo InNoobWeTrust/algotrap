@@ -8,78 +8,89 @@ use std::io::Cursor;
 async fn main() -> Result<(), Box<dyn Error>> {
     let client = ext::bingx::BingXClient::default();
 
-    // Fetch 15-minute candles for BTC-USDT perpetual
-    match client.get_futures_klines("BTC-USDT", "15m", 1440).await {
-        Ok(klines) => {
-            let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-            let mut df_with_indicators = df
-                .lazy()
-                .with_columns([
-                    col("time")
-                        .cast(DataType::Datetime(
-                            TimeUnit::Milliseconds,
-                            Some("UTC".into()),
-                        ))
-                        .alias("Date"),
-                    ta::experimental::bias_reversion_smoothed(
-                        &[col("open"), col("high"), col("low"), col("close")],
-                        9,
-                    )
-                    .alias("Bias Reversion"),
-                    ta::experimental::atr_band(
-                        &[col("open"), col("high"), col("low"), col("close")],
-                        42,
-                        1.618,
-                    )[0]
-                    .clone()
-                    .alias("ATR Upperband"),
-                    ta::experimental::atr_band(
-                        &[col("open"), col("high"), col("low"), col("close")],
-                        42,
-                        1.618,
-                    )[1]
-                    .clone()
-                    .alias("ATR Lowerband"),
-                    ta::experimental::atr_reversion_percent(
-                        &[col("open"), col("high"), col("low"), col("close")],
-                        9,
-                        42,
-                        1.618,
-                    )
-                    .alias("ATR Reversion Percent"),
-                    ta::experimental::rssi(
-                        &[col("open"), col("high"), col("low"), col("close")],
-                        14,
-                    )
-                    .alias("RSSI"),
-                ])
-                .collect()
-                .unwrap();
-            println!("{df_with_indicators:?}");
-            let mut file = Cursor::new(Vec::new());
-            JsonWriter::new(&mut file)
-                .with_json_format(JsonFormat::Json)
-                .finish(&mut df_with_indicators)
-                .unwrap();
-            let df_json = String::from_utf8(file.into_inner()).unwrap();
-            let echarts_opts = dump_echarts_opts(
-                df_with_indicators
-                    .get_column_names_owned()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            );
-            let echarts_html = render_echarts_html(df_json.clone(), echarts_opts);
-            tokio::fs::write("echarts.html", echarts_html).await?;
-            let tdv_html = render_tdv_html(df_json);
-            tokio::fs::write("tdv.html", tdv_html).await?;
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            Err(e)
-        }
+    for tf in ["5m", "15m", "1h", "4h"] {
+        // Fetch 15-minute candles for BTC-USDT perpetual
+        match client.get_futures_klines("BTC-USDT", tf, 1440).await {
+            Ok(klines) => {
+                process_charts(&klines, "BingX.BTC-USDT", tf).await?;
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                Err(e)
+            }
+        }?;
     }
+    Ok(())
+}
+
+async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), Box<dyn Error>> {
+    let df = klines.iter().rev().cloned().to_dataframe().unwrap();
+    let mut df_with_indicators = df
+        .lazy()
+        .with_columns([
+            col("time")
+                .cast(DataType::Datetime(
+                    TimeUnit::Milliseconds,
+                    Some("UTC".into()),
+                ))
+                .alias("Date"),
+            ta::ema(&col("close"), 200).alias("EMA200"),
+            ta::experimental::bias_reversion_smoothed(
+                &[col("open"), col("high"), col("low"), col("close")],
+                9,
+            )
+            .alias("Bias Reversion"),
+            ta::experimental::atr_band(
+                &[col("open"), col("high"), col("low"), col("close")],
+                42,
+                1.618,
+            )[0]
+            .clone()
+            .alias("ATR Upperband"),
+            ta::experimental::atr_band(
+                &[col("open"), col("high"), col("low"), col("close")],
+                42,
+                1.618,
+            )[1]
+            .clone()
+            .alias("ATR Lowerband"),
+            ta::experimental::atr_reversion_percent(
+                &[col("open"), col("high"), col("low"), col("close")],
+                9,
+                42,
+                1.618,
+            )
+            .alias("ATR Reversion Percent"),
+            ta::experimental::rssi(&[col("open"), col("high"), col("low"), col("close")], 14)
+                .alias("RSSI"),
+            ta::ema(
+                &ta::experimental::rssi(&[col("open"), col("high"), col("low"), col("close")], 14),
+                9,
+            )
+            .alias("RSSI MA"),
+        ])
+        .collect()
+        .unwrap();
+    println!("{df_with_indicators:?}");
+    let mut file = Cursor::new(Vec::new());
+    JsonWriter::new(&mut file)
+        .with_json_format(JsonFormat::Json)
+        .finish(&mut df_with_indicators)
+        .unwrap();
+    let df_json = String::from_utf8(file.into_inner()).unwrap();
+    let echarts_opts = dump_echarts_opts(
+        df_with_indicators
+            .get_column_names_owned()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
+    let echarts_html = render_echarts_html(df_json.clone(), echarts_opts);
+    tokio::fs::write(format!("echarts.{symbol}.{tf}.html"), echarts_html).await?;
+    let tdv_html = render_tdv_html(df_json, format!("{symbol} {tf}"));
+    tokio::fs::write(format!("tdv.{symbol}.{tf}.html"), tdv_html).await?;
+    Ok(())
 }
 
 fn dump_echarts_opts(legend: Vec<String>) -> String {
@@ -90,8 +101,8 @@ fn render_echarts_html(data: String, echarts_options: String) -> String {
     render!(ECHARTS_HTML_TEMPLATE, data => data, echarts_options => echarts_options)
 }
 
-fn render_tdv_html(data: String) -> String {
-    render!(TDV_HTML_TEMPLATE, data => data)
+fn render_tdv_html(data: String, watermark: String) -> String {
+    render!(TDV_HTML_TEMPLATE, data => data, watermark => watermark)
 }
 
 const ECHARTS_OPTS_TEMPLATE: &str = r#"
@@ -202,6 +213,14 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       }
     },
     {
+      "name": "EMA200",
+      "type": "line",
+      "encode": {
+        "x": "Date",
+        "y": "EMA200"
+      }
+    },
+    {
       "name": "Bias Reversion",
       "type": "line",
       "encode": {
@@ -233,6 +252,16 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       "encode": {
         "x": "Date",
         "y": "RSSI"
+      }
+    },
+    {
+      "name": "RSSI MA",
+      "type": "line",
+      "xAxisIndex": 1,
+      "yAxisIndex": 1,
+      "encode": {
+        "x": "Date",
+        "y": "RSSI MA"
       }
     },
     {
@@ -316,33 +345,64 @@ const TDV_HTML_TEMPLATE: &str = r#"
         });
         const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
         candlestickSeries.setData(data);
-        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B080' });
+        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, { color: '#B2B5BE4C' });
+        ema200Series.setData(data.map(d => ({
+            time: d.time,
+            value: d['EMA200'],
+        })));
+        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B04C' });
         biasRevSeries.setData(data.map(d => ({
             time: d.time,
-            value: d["Bias Reversion"],
+            value: d['Bias Reversion'],
         })));
-        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4CAF5080' });
+        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4CAF504C' });
         atrUpperBandSeries.setData(data.map(d => ({
             time: d.time,
-            value: d["ATR Upperband"],
+            value: d['ATR Upperband'],
         })));
-        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#F2364580' });
+        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#F236454C' });
         atrLowerBandSeries.setData(data.map(d => ({
             time: d.time,
-            value: d["ATR Lowerband"],
+            value: d['ATR Lowerband'],
         })));
         const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 1);
         rssiSeries.setData(data.map(d => ({
             time: d.time,
-            value: d["RSSI"],
-            color: d["RSSI"] > 69 ? '#4CAF5080' : d["RSSI"] < 31 ? '#F2364580': '#2962FF80'
+            value: d['RSSI'],
+            color: d['RSSI'] > 54 ? '#4CAF5080' : d['RSSI'] < 46 ? '#F2364580': '#2962FF4C'
+        })));
+        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 1);
+        rssiMaSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d['RSSI MA'],
+            color: '#FDD83580'
         })));
         const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
         atrRevSeries.setData(data.map(d => ({
             time: d.time,
-            value: d["ATR Reversion Percent"],
-            color: d["ATR Reversion Percent"] > 199 ? '#4CAF5080' : d["ATR Reversion Percent"] < -199 ? '#F2364580': '#2962FF80'
+            value: d['ATR Reversion Percent'],
+            color: d['ATR Reversion Percent'] > 99 ? '#4CAF5080' : d['ATR Reversion Percent'] < -99 ? '#F2364580': '#2962FF4C'
         })));
+        const reversionUp = (d) => (d['RSSI'] < 46 && d['ATR Reversion Percent'] > 99);
+        const reversionDown = (d) => (d['RSSI'] > 54 && d['ATR Reversion Percent'] < -99);
+        const markers = data.filter(d => reversionUp(d) || reversionDown(d)).map(d => ({
+            time: d.time,
+            position: reversionUp(d) ? 'belowBar' : 'aboveBar',
+            color: reversionUp(d) ? '#2196F3' : '#e91e63',
+            shape: reversionUp(d) ? 'arrowUp' : 'arrowDown',
+        }))
+        LightweightCharts.createSeriesMarkers(candlestickSeries, markers);
+        LightweightCharts.createTextWatermark(chart.panes()[0], {
+            horzAlign: 'center',
+            vertAlign: 'top',
+            lines: [
+                {
+                    text: '{{ watermark }}',
+                    color: 'rgba(178, 181, 190, 0.5)',
+                    fontSize: 24,
+                },
+            ],
+        });
     </script>
   </body>
 </html>

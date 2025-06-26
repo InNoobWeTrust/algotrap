@@ -1,0 +1,7 @@
+[tasks.run]
+command = "cargo"
+args = ["run"]
+
+[tasks.clean_html]
+command = "find"
+args = [".", "-name", "*.html", "-delete"]
