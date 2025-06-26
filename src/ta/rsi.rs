@@ -30,3 +30,14 @@ pub fn rsi(src: &Expr, len: usize) -> Expr {
     // Normalize nan
     when(rsi.clone().is_nan()).then(lit(50)).otherwise(rsi)
 }
+
+pub trait ExprRsi {
+    fn rsi(&self, len: usize) -> Self;
+}
+
+/// Chaining
+impl ExprRsi for Expr {
+    fn rsi(&self, len: usize) -> Self {
+        rsi(self, len)
+    }
+}

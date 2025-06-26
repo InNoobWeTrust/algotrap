@@ -30,3 +30,22 @@ pub fn ema(src: &Expr, len: usize) -> Expr {
         ..Default::default()
     })
 }
+
+pub trait ExprMa {
+    fn sma(&self, len: usize) -> Self;
+    fn rma(&self, len: usize) -> Self;
+    fn ema(&self, len: usize) -> Self;
+}
+
+/// Chaining
+impl ExprMa for Expr {
+    fn sma(&self, len: usize) -> Self {
+        sma(self, len)
+    }
+    fn rma(&self, len: usize) -> Self {
+        rma(self, len)
+    }
+    fn ema(&self, len: usize) -> Self {
+        ema(self, len)
+    }
+}

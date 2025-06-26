@@ -1,4 +1,4 @@
-use algotrap::prelude::*;
+use algotrap::{prelude::*, ta::ExprMa};
 use core::error::Error;
 use minijinja::render;
 use polars::prelude::*;
@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), Box<dyn Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
+    let ohlc = [col("open"), col("high"), col("low"), col("close")];
     let mut df_with_indicators = df
         .lazy()
         .with_columns([
@@ -35,40 +36,21 @@ async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), 
                     Some("UTC".into()),
                 ))
                 .alias("Date"),
-            ta::ema(&col("close"), 200).alias("EMA200"),
-            ta::experimental::bias_reversion_smoothed(
-                &[col("open"), col("high"), col("low"), col("close")],
-                9,
-            )
-            .alias("Bias Reversion"),
-            ta::experimental::atr_band(
-                &[col("open"), col("high"), col("low"), col("close")],
-                42,
-                1.618,
-            )[0]
-            .clone()
-            .alias("ATR Upperband"),
-            ta::experimental::atr_band(
-                &[col("open"), col("high"), col("low"), col("close")],
-                42,
-                1.618,
-            )[1]
-            .clone()
-            .alias("ATR Lowerband"),
-            ta::experimental::atr_reversion_percent(
-                &[col("open"), col("high"), col("low"), col("close")],
-                9,
-                42,
-                1.618,
-            )
-            .alias("ATR Reversion Percent"),
-            ta::experimental::rssi(&[col("open"), col("high"), col("low"), col("close")], 14)
-                .alias("RSSI"),
-            ta::ema(
-                &ta::experimental::rssi(&[col("open"), col("high"), col("low"), col("close")], 14),
-                9,
-            )
-            .alias("RSSI MA"),
+            col("volume").sma(20).alias("Volume SMA"),
+            col("close").ema(200).alias("EMA200"),
+            ta::experimental::bias_reversion_smoothed(&ohlc, 9).alias("Bias Reversion"),
+            ta::experimental::atr_band(&ohlc, 42, 1.618)[0]
+                .clone()
+                .alias("ATR Upperband"),
+            ta::experimental::atr_band(&ohlc, 42, 1.618)[1]
+                .clone()
+                .alias("ATR Lowerband"),
+            ta::experimental::atr_reversion_percent(&ohlc, 9, 42, 1.618)
+                .alias("ATR Reversion Percent"),
+            ta::experimental::rssi(&ohlc, 14).alias("RSSI"),
+            ta::experimental::rssi(&ohlc, 14).ema(9).alias("RSSI MA"),
+            ta::bar_bias(&ohlc).rma(9).alias("Structure Power"),
+            ta::bar_bias(&ohlc).rma(9).sma(42).alias("Structure Power SMA"),
         ])
         .collect()
         .unwrap();
@@ -115,6 +97,10 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
   "grid": [
     {
       "top": "10%",
+      "bottom": "40%"
+    },
+    {
+      "top": "60%",
       "bottom": "30%"
     },
     {
@@ -129,7 +115,7 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
   "axisPointer": {
     "link": [
       {
-        "xAxisIndex": [0, 1, 2]
+        "xAxisIndex": [0, 1, 2, 3]
       }
     ]
   },
@@ -140,13 +126,13 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       "end": 100,
       "height": "2.5%",
       "top": "5%",
-      "xAxisIndex": [0, 1, 2]
+      "xAxisIndex": [0, 1, 2, 3]
     },
     {
       "type": "inside",
       "start": 85,
       "end": 100,
-      "xAxisIndex": [0, 1, 2]
+      "xAxisIndex": [0, 1, 2, 3]
     }
   ],
   "xAxis": [
@@ -179,6 +165,19 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       "type": "category",
       "min": "dataMin",
       "max": "dataMax",
+      "splitLine": { "show": false },
+      "axisLabel": { "show": false },
+      "axisTick": { "show": false },
+      "axisPointer": {
+        "show": true,
+        "label": { "show": false }
+      }
+    },
+    {
+      "gridIndex": 3,
+      "type": "category",
+      "min": "dataMin",
+      "max": "dataMax",
       "axisPointer": {
         "show": true,
         "label": { "show": false },
@@ -201,6 +200,10 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
     {
       "scale": true,
       "gridIndex": 2
+    },
+    {
+      "scale": true,
+      "gridIndex": 3
     }
   ],
   "series": [
@@ -245,10 +248,20 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
       }
     },
     {
-      "name": "RSSI",
-      "type": "line",
+      "name": "Volume",
+      "type": "bar",
       "xAxisIndex": 1,
       "yAxisIndex": 1,
+      "encode": {
+        "x": "Date",
+        "y": "volume"
+      }
+    },
+    {
+      "name": "RSSI",
+      "type": "line",
+      "xAxisIndex": 2,
+      "yAxisIndex": 2,
       "encode": {
         "x": "Date",
         "y": "RSSI"
@@ -257,8 +270,8 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
     {
       "name": "RSSI MA",
       "type": "line",
-      "xAxisIndex": 1,
-      "yAxisIndex": 1,
+      "xAxisIndex": 2,
+      "yAxisIndex": 2,
       "encode": {
         "x": "Date",
         "y": "RSSI MA"
@@ -267,8 +280,8 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
     {
       "name": "ATR Reversion Percent",
       "type": "line",
-      "xAxisIndex": 2,
-      "yAxisIndex": 2,
+      "xAxisIndex": 3,
+      "yAxisIndex": 3,
       "encode": {
         "x": "Date",
         "y": "ATR Reversion Percent"
@@ -319,7 +332,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
     <title>ECharts</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   </head>
-  <body>
+  <body style="width: 100dvw;height:100dvh;margin: 0;">
     <div id="container" style="width: 100%;height:100%;"></div>
     <script id="data" type="application/json">
         {{ data }}
@@ -345,12 +358,50 @@ const TDV_HTML_TEMPLATE: &str = r#"
         });
         const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
         candlestickSeries.setData(data);
-        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, { color: '#B2B5BE4C' });
+        const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
+            priceFormat: {
+                type: 'volume',
+            },
+            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
+        });
+        volumeSeries.priceScale().applyOptions({
+            // set the positioning of the volume series
+            scaleMargins: {
+                top: 0.8, // highest point of the series will be 80% away from the top
+                bottom: 0,
+            },
+        });
+        volumeSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.volume,
+            color: d.close >= d.open ? '#4CAF504C' : '#F236454C'
+        })));
+        const volumeSmaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
+            lineColor: '#00000000',
+            topColor: '#FDD8354C',
+            bottomColor: '#FDD8352F',
+            priceFormat: {
+                type: 'volume',
+            },
+            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
+        });
+        volumeSmaSeries.priceScale().applyOptions({
+            // set the positioning of the volume series
+            scaleMargins: {
+                top: 0.8, // highest point of the series will be 80% away from the top
+                bottom: 0,
+            },
+        });
+        volumeSmaSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d['Volume SMA'],
+        })));
+        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B080' });
         ema200Series.setData(data.map(d => ({
             time: d.time,
-            value: d['EMA200'],
+            value: d.EMA200,
         })));
-        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B04C' });
+        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#B2B5BE4C' });
         biasRevSeries.setData(data.map(d => ({
             time: d.time,
             value: d['Bias Reversion'],
@@ -365,26 +416,45 @@ const TDV_HTML_TEMPLATE: &str = r#"
             time: d.time,
             value: d['ATR Lowerband'],
         })));
-        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 1);
+        const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
+        structurePwrSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d['Structure Power'],
+            color: d['Structure Power'] >= 0 ? '#00897B80' : '#880E4F80'
+        })));
+        const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 0 },
+            topLineColor: '#00897B00',
+            topFillColor1: '#00897B4C',
+            topFillColor2: '#00897B80',
+            bottomLineColor: '#880E4F00',
+            bottomFillColor1: '#880E4F4C',
+            bottomFillColor2: '#880E4F80',
+        }, 1);
+        structurePwrSmaSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d['Structure Power SMA'],
+        })));
+        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
         rssiSeries.setData(data.map(d => ({
             time: d.time,
-            value: d['RSSI'],
-            color: d['RSSI'] > 54 ? '#4CAF5080' : d['RSSI'] < 46 ? '#F2364580': '#2962FF4C'
+            value: d.RSSI,
+            color: d.RSSI > 54 ? '#4CAF5080' : d.RSSI < 46 ? '#F2364580': '#2962FF4C'
         })));
-        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 1);
+        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
         rssiMaSeries.setData(data.map(d => ({
             time: d.time,
             value: d['RSSI MA'],
             color: '#FDD83580'
         })));
-        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
         atrRevSeries.setData(data.map(d => ({
             time: d.time,
             value: d['ATR Reversion Percent'],
             color: d['ATR Reversion Percent'] > 99 ? '#4CAF5080' : d['ATR Reversion Percent'] < -99 ? '#F2364580': '#2962FF4C'
         })));
-        const reversionUp = (d) => (d['RSSI'] < 46 && d['ATR Reversion Percent'] > 99);
-        const reversionDown = (d) => (d['RSSI'] > 54 && d['ATR Reversion Percent'] < -99);
+        const reversionUp = (d) => (d.RSSI < 46 && d['ATR Reversion Percent'] > 99);
+        const reversionDown = (d) => (d.RSSI > 54 && d['ATR Reversion Percent'] < -99);
         const markers = data.filter(d => reversionUp(d) || reversionDown(d)).map(d => ({
             time: d.time,
             position: reversionUp(d) ? 'belowBar' : 'aboveBar',
@@ -393,7 +463,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
         }))
         LightweightCharts.createSeriesMarkers(candlestickSeries, markers);
         LightweightCharts.createTextWatermark(chart.panes()[0], {
-            horzAlign: 'center',
+            horzAlign: 'left',
             vertAlign: 'top',
             lines: [
                 {
@@ -403,6 +473,41 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 },
             ],
         });
+        LightweightCharts.createTextWatermark(chart.panes()[1], {
+            horzAlign: 'left',
+            vertAlign: 'top',
+            lines: [
+                {
+                    text: 'Structure Power',
+                    color: 'rgba(178, 181, 190, 0.5)',
+                    fontSize: 18,
+                },
+            ],
+        });
+        LightweightCharts.createTextWatermark(chart.panes()[2], {
+            horzAlign: 'left',
+            vertAlign: 'top',
+            lines: [
+                {
+                    text: 'RSSI',
+                    color: 'rgba(178, 181, 190, 0.5)',
+                    fontSize: 18,
+                },
+            ],
+        });
+        LightweightCharts.createTextWatermark(chart.panes()[3], {
+            horzAlign: 'left',
+            vertAlign: 'top',
+            lines: [
+                {
+                    text: 'ATR Reversion',
+                    color: 'rgba(178, 181, 190, 0.5)',
+                    fontSize: 18,
+                },
+            ],
+        });
+        chart.timeScale().setVisibleLogicalRange({ from: data.length - 147, to: data.length });
+        chart.panes()[0].setHeight(600);
     </script>
   </body>
 </html>
