@@ -50,7 +50,10 @@ async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), 
             ta::experimental::rssi(&ohlc, 14).alias("RSSI"),
             ta::experimental::rssi(&ohlc, 14).ema(9).alias("RSSI MA"),
             ta::bar_bias(&ohlc).rma(9).alias("Structure Power"),
-            ta::bar_bias(&ohlc).rma(9).sma(42).alias("Structure Power SMA"),
+            ta::bar_bias(&ohlc)
+                .rma(9)
+                .sma(42)
+                .alias("Structure Power SMA"),
         ])
         .collect()
         .unwrap();
@@ -61,269 +64,14 @@ async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), 
         .finish(&mut df_with_indicators)
         .unwrap();
     let df_json = String::from_utf8(file.into_inner()).unwrap();
-    let echarts_opts = dump_echarts_opts(
-        df_with_indicators
-            .get_column_names_owned()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
-    );
-    let echarts_html = render_echarts_html(df_json.clone(), echarts_opts);
-    tokio::fs::write(format!("echarts.{symbol}.{tf}.html"), echarts_html).await?;
     let tdv_html = render_tdv_html(df_json, format!("{symbol} {tf}"));
     tokio::fs::write(format!("tdv.{symbol}.{tf}.html"), tdv_html).await?;
     Ok(())
 }
 
-fn dump_echarts_opts(legend: Vec<String>) -> String {
-    render!(ECHARTS_OPTS_TEMPLATE, legend => legend)
-}
-
-fn render_echarts_html(data: String, echarts_options: String) -> String {
-    render!(ECHARTS_HTML_TEMPLATE, data => data, echarts_options => echarts_options)
-}
-
 fn render_tdv_html(data: String, watermark: String) -> String {
     render!(TDV_HTML_TEMPLATE, data => data, watermark => watermark)
 }
-
-const ECHARTS_OPTS_TEMPLATE: &str = r#"
-{
-  "animation": false,
-  "legend": {
-    "data": {{ legend }}
-  },
-  "tooltip": {},
-  "grid": [
-    {
-      "top": "10%",
-      "bottom": "40%"
-    },
-    {
-      "top": "60%",
-      "bottom": "30%"
-    },
-    {
-      "top": "70%",
-      "bottom": "20%"
-    },
-    {
-      "top": "80%",
-      "bottom": "10%"
-    }
-  ],
-  "axisPointer": {
-    "link": [
-      {
-        "xAxisIndex": [0, 1, 2, 3]
-      }
-    ]
-  },
-  "dataZoom": [
-    {
-      "type": "slider",
-      "start": 85,
-      "end": 100,
-      "height": "2.5%",
-      "top": "5%",
-      "xAxisIndex": [0, 1, 2, 3]
-    },
-    {
-      "type": "inside",
-      "start": 85,
-      "end": 100,
-      "xAxisIndex": [0, 1, 2, 3]
-    }
-  ],
-  "xAxis": [
-    {
-      "type": "category",
-      "min": "dataMin",
-      "max": "dataMax",
-      "splitLine": { "show": false },
-      "axisLabel": { "show": false },
-      "axisTick": { "show": false },
-      "axisPointer": {
-        "show": true
-      }
-    },
-    {
-      "gridIndex": 1,
-      "type": "category",
-      "min": "dataMin",
-      "max": "dataMax",
-      "splitLine": { "show": false },
-      "axisLabel": { "show": false },
-      "axisTick": { "show": false },
-      "axisPointer": {
-        "show": true,
-        "label": { "show": false }
-      }
-    },
-    {
-      "gridIndex": 2,
-      "type": "category",
-      "min": "dataMin",
-      "max": "dataMax",
-      "splitLine": { "show": false },
-      "axisLabel": { "show": false },
-      "axisTick": { "show": false },
-      "axisPointer": {
-        "show": true,
-        "label": { "show": false }
-      }
-    },
-    {
-      "gridIndex": 3,
-      "type": "category",
-      "min": "dataMin",
-      "max": "dataMax",
-      "axisPointer": {
-        "show": true,
-        "label": { "show": false },
-        "handle": {
-          "show": true,
-          "triggerTooltip": true,
-          "margin": 30
-        }
-      }
-    }
-  ],
-  "yAxis": [
-    {
-      "scale": true
-    },
-    {
-      "scale": true,
-      "gridIndex": 1
-    },
-    {
-      "scale": true,
-      "gridIndex": 2
-    },
-    {
-      "scale": true,
-      "gridIndex": 3
-    }
-  ],
-  "series": [
-    {
-      "name": "Kline",
-      "type": "candlestick",
-      "encode": {
-        "x": "Date",
-        "y": ["close", "open", "low", "high"]
-      }
-    },
-    {
-      "name": "EMA200",
-      "type": "line",
-      "encode": {
-        "x": "Date",
-        "y": "EMA200"
-      }
-    },
-    {
-      "name": "Bias Reversion",
-      "type": "line",
-      "encode": {
-        "x": "Date",
-        "y": "Bias Reversion"
-      }
-    },
-    {
-      "name": "ATR Upperband",
-      "type": "line",
-      "encode": {
-        "x": "Date",
-        "y": "ATR Upperband"
-      }
-    },
-    {
-      "name": "ATR Lowerband",
-      "type": "line",
-      "encode": {
-        "x": "Date",
-        "y": "ATR Lowerband"
-      }
-    },
-    {
-      "name": "Volume",
-      "type": "bar",
-      "xAxisIndex": 1,
-      "yAxisIndex": 1,
-      "encode": {
-        "x": "Date",
-        "y": "volume"
-      }
-    },
-    {
-      "name": "RSSI",
-      "type": "line",
-      "xAxisIndex": 2,
-      "yAxisIndex": 2,
-      "encode": {
-        "x": "Date",
-        "y": "RSSI"
-      }
-    },
-    {
-      "name": "RSSI MA",
-      "type": "line",
-      "xAxisIndex": 2,
-      "yAxisIndex": 2,
-      "encode": {
-        "x": "Date",
-        "y": "RSSI MA"
-      }
-    },
-    {
-      "name": "ATR Reversion Percent",
-      "type": "line",
-      "xAxisIndex": 3,
-      "yAxisIndex": 3,
-      "encode": {
-        "x": "Date",
-        "y": "ATR Reversion Percent"
-      }
-    }
-  ]
-}
-"#;
-
-const ECHARTS_HTML_TEMPLATE: &str = r#"
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>ECharts</title>
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
-  </head>
-  <body>
-    <div id="main" style="width: 100%;height:100%;"></div>
-    <script id="data" type="application/json">
-        {{ data }}
-    </script>
-    <script id="echarts_options" type="application/json">
-        {{ echarts_options }}
-    </script>
-    <script type="text/javascript">
-      // Initialize the echarts instance based on the prepared dom
-      var myChart = echarts.init(document.getElementById('main'));
-      window.addEventListener('resize', function() {
-        myChart.resize();
-      });
-      // Specify the configuration items and data for the chart
-      var option = JSON.parse(document.getElementById('echarts_options').textContent);
-      var data = JSON.parse(document.getElementById('data').textContent);
-      option.dataset = ({
-        source: data
-      });
-      // Display the chart using the configuration items and data just specified.
-      myChart.setOption(option);
-    </script>
-  </body>
-</html>
-"#;
 
 const TDV_HTML_TEMPLATE: &str = r#"
 <html>
@@ -439,7 +187,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
         rssiSeries.setData(data.map(d => ({
             time: d.time,
             value: d.RSSI,
-            color: d.RSSI > 54 ? '#4CAF5080' : d.RSSI < 46 ? '#F2364580': '#2962FF4C'
+            color: d.RSSI > 59 ? '#4CAF5080' : d.RSSI < 41 ? '#F2364580': '#2962FF4C'
         })));
         const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
         rssiMaSeries.setData(data.map(d => ({
@@ -507,7 +255,8 @@ const TDV_HTML_TEMPLATE: &str = r#"
             ],
         });
         chart.timeScale().setVisibleLogicalRange({ from: data.length - 147, to: data.length });
-        chart.panes()[0].setHeight(600);
+        const containerHeight = document.getElementById("container").getClientRects()[0].height;
+        chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
     </script>
   </body>
 </html>
