@@ -63,14 +63,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
             let df_json = String::from_utf8(file.into_inner()).unwrap();
             let echarts_opts = dump_echarts_opts(
-                df_json,
                 df_with_indicators
                     .get_column_names_owned()
                     .into_iter()
                     .map(|s| s.to_string())
                     .collect(),
             );
-            let echarts_html = render_raw(echarts_opts);
+            let echarts_html = render_raw(df_json, echarts_opts);
             tokio::fs::write("echarts.html", echarts_html).await?;
             Ok(())
         }
@@ -81,123 +80,115 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn dump_echarts_opts(json_data: String, legend: Vec<String>) -> String {
-    render!(ECHARTS_OPTS_TEMPLATE, json_data => json_data, legend => legend)
+fn dump_echarts_opts(legend: Vec<String>) -> String {
+    render!(ECHARTS_OPTS_TEMPLATE, legend => legend)
 }
 
-fn render_raw(echarts_opts: String) -> String {
-    render!(ECHARTS_HTML_TEMPLATE, echarts_opts => echarts_opts)
+fn render_raw(dataset: String, echarts_options: String) -> String {
+    render!(ECHARTS_HTML_TEMPLATE, dataset => dataset, echarts_options => echarts_options)
 }
 
 const ECHARTS_OPTS_TEMPLATE: &str = r#"
 {
-  "tooltip": {
-    "trigger": "axis",
-    "axisPointer": {
-      "type": "cross",
-      "animation": false
-    }
+  "animation": false,
+  "legend": {
+    "data": {{ legend }}
   },
-  "toolbox": {
-    "feature": {
-      "dataZoom": {
-        "yAxisIndex": false
-      }
-    }
-  },
+  "tooltip": {},
   "grid": [
     {
-      "height": "80%",
+      "top": "10%",
+      "bottom": "30%"
+    },
+    {
+      "top": "70%",
       "bottom": "20%"
     },
     {
-      "height": "10%",
+      "top": "80%",
       "bottom": "10%"
+    }
+  ],
+  "axisPointer": {
+    "link": [
+      {
+        "xAxisIndex": [0, 1, 2]
+      }
+    ]
+  },
+  "dataZoom": [
+    {
+      "type": "slider",
+      "start": 85,
+      "end": 100,
+      "height": "2.5%",
+      "top": "5%",
+      "xAxisIndex": [0, 1, 2]
     },
     {
-      "height": "10%",
-      "bottom": "0%"
+      "type": "inside",
+      "start": 85,
+      "end": 100,
+      "xAxisIndex": [0, 1, 2]
     }
   ],
   "xAxis": [
     {
       "type": "category",
-      "boundaryGap": false,
-      "axisLine": { "onZero": false },
-      "splitLine": { "show": false },
       "min": "dataMin",
-      "max": "dataMax"
+      "max": "dataMax",
+      "splitLine": { "show": false },
+      "axisLabel": { "show": false },
+      "axisTick": { "show": false },
+      "axisPointer": {
+        "show": true
+      }
     },
     {
-      "type": "category",
       "gridIndex": 1,
-      "boundaryGap": false,
-      "axisLine": { "onZero": false },
-      "axisTick": { "show": false },
-      "axisLabel": { "show": false },
-      "splitLine": { "show": false },
+      "type": "category",
       "min": "dataMin",
-      "max": "dataMax"
+      "max": "dataMax",
+      "splitLine": { "show": false },
+      "axisLabel": { "show": false },
+      "axisTick": { "show": false },
+      "axisPointer": {
+        "show": true,
+        "label": { "show": false }
+      }
     },
     {
-      "type": "category",
       "gridIndex": 2,
-      "boundaryGap": false,
-      "axisLine": { "onZero": false },
-      "axisTick": { "show": false },
-      "axisLabel": { "show": false },
-      "splitLine": { "show": false },
+      "type": "category",
       "min": "dataMin",
-      "max": "dataMax"
+      "max": "dataMax",
+      "axisPointer": {
+        "show": true,
+        "label": { "show": false },
+        "handle": {
+          "show": true,
+          "triggerTooltip": true,
+          "margin": 30
+        }
+      }
     }
   ],
   "yAxis": [
     {
-      "scale": true,
-      "splitArea": {
-        "show": true
-      }
+      "scale": true
     },
     {
       "scale": true,
-      "gridIndex": 1,
-      "splitArea": {
-        "show": true
-      }
+      "gridIndex": 1
     },
     {
       "scale": true,
-      "gridIndex": 2,
-      "splitArea": {
-        "show": true
-      }
+      "gridIndex": 2
     }
   ],
-  "dataZoom": [
-    {
-      "type": "inside",
-      "xAxisIndex": [0, 1, 2],
-      "start": 80,
-      "end": 100,
-      "brushSelect": true
-    },
-    {
-      "show": true,
-      "xAxisIndex": [0, 1, 2],
-      "type": "slider",
-      "start": 80,
-      "end": 100,
-      "brushSelect": true
-    }
-  ],
-  "dataset": {
-    "source": {{ json_data }}
-  },
-  "legend": {
-    "data": {{ legend }}
-  },
   "series": [
     {
+      "name": "Kline",
       "type": "candlestick",
       "encode": {
         "x": "Date",
@@ -253,7 +244,6 @@ const ECHARTS_OPTS_TEMPLATE: &str = r#"
 "#;
 
 const ECHARTS_HTML_TEMPLATE: &str = r#"
-<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -262,16 +252,24 @@ const ECHARTS_HTML_TEMPLATE: &str = r#"
   </head>
   <body>
     <div id="main" style="width: 100dvw;height:100dvh;"></div>
-    <script id="data" type="application/json">
-        {{ echarts_opts }}
+    <script id="dataset" type="application/json">
+        {{ dataset }}
+    </script>
+    <script id="echarts_options" type="application/json">
+        {{ echarts_options }}
     </script>
     <script type="text/javascript">
       // Initialize the echarts instance based on the prepared dom
       var myChart = echarts.init(document.getElementById('main'));
-
+      window.addEventListener('resize', function() {
+        myChart.resize();
+      });
       // Specify the configuration items and data for the chart
-      var option = JSON.parse(document.getElementById('data').textContent);
-
+      var option = JSON.parse(document.getElementById('echarts_options').textContent);
+      var dataset = JSON.parse(document.getElementById('dataset').textContent);
+      option.dataset = ({
+        source: dataset
+      });
       // Display the chart using the configuration items and data just specified.
       myChart.setOption(option);
     </script>

@@ -67,8 +67,13 @@ pub fn atr_reversion(ohlc: &[Expr; 4], bias_len: usize, atr_len: usize, atr_mult
 
 /// ATR Reversion as percentage of ATR
 /// @returns the ATR reversion distance as percentage of ATR
-pub fn atr_reversion_percent(ohlc: &[Expr; 4], bias_len: usize, atr_len: usize, atr_mult: f64) -> Expr {
-    let atr_val = atr(ohlc, atr_len);
+pub fn atr_reversion_percent(
+    ohlc: &[Expr; 4],
+    bias_len: usize,
+    atr_len: usize,
+    atr_mult: f64,
+) -> Expr {
+    let atr_val = atr(ohlc, atr_len) * lit(atr_mult);
     let atr_rev_val = atr_reversion(ohlc, bias_len, atr_len, atr_mult);
     lit(100) * atr_rev_val / atr_val
 }
