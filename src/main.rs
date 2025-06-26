@@ -69,8 +69,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map(|s| s.to_string())
                     .collect(),
             );
-            let echarts_html = render_raw(df_json, echarts_opts);
+            let echarts_html = render_echarts_html(df_json.clone(), echarts_opts);
             tokio::fs::write("echarts.html", echarts_html).await?;
+            let tdv_html = render_tdv_html(df_json);
+            tokio::fs::write("tdv.html", tdv_html).await?;
             Ok(())
         }
         Err(e) => {
@@ -84,8 +86,12 @@ fn dump_echarts_opts(legend: Vec<String>) -> String {
     render!(ECHARTS_OPTS_TEMPLATE, legend => legend)
 }
 
-fn render_raw(dataset: String, echarts_options: String) -> String {
-    render!(ECHARTS_HTML_TEMPLATE, dataset => dataset, echarts_options => echarts_options)
+fn render_echarts_html(data: String, echarts_options: String) -> String {
+    render!(ECHARTS_HTML_TEMPLATE, data => data, echarts_options => echarts_options)
+}
+
+fn render_tdv_html(data: String) -> String {
+    render!(TDV_HTML_TEMPLATE, data => data)
 }
 
 const ECHARTS_OPTS_TEMPLATE: &str = r#"
@@ -251,9 +257,9 @@ const ECHARTS_HTML_TEMPLATE: &str = r#"
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
   </head>
   <body>
-    <div id="main" style="width: 100dvw;height:100dvh;"></div>
-    <script id="dataset" type="application/json">
-        {{ dataset }}
+    <div id="main" style="width: 100%;height:100%;"></div>
+    <script id="data" type="application/json">
+        {{ data }}
     </script>
     <script id="echarts_options" type="application/json">
         {{ echarts_options }}
@@ -266,12 +272,77 @@ const ECHARTS_HTML_TEMPLATE: &str = r#"
       });
       // Specify the configuration items and data for the chart
       var option = JSON.parse(document.getElementById('echarts_options').textContent);
-      var dataset = JSON.parse(document.getElementById('dataset').textContent);
+      var data = JSON.parse(document.getElementById('data').textContent);
       option.dataset = ({
-        source: dataset
+        source: data
       });
       // Display the chart using the configuration items and data just specified.
       myChart.setOption(option);
+    </script>
+  </body>
+</html>
+"#;
+
+const TDV_HTML_TEMPLATE: &str = r#"
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ECharts</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  </head>
+  <body>
+    <div id="container" style="width: 100%;height:100%;"></div>
+    <script id="data" type="application/json">
+        {{ data }}
+    </script>
+    <script type="text/javascript">
+        const data = JSON.parse(document.getElementById('data').textContent).map(d => ({
+            ...d,
+            time: Math.floor(d.time / 1000),
+        }));
+        const chart = LightweightCharts.createChart(document.getElementById('container'), {
+            autoSize: true,
+            layout: {
+                background: { color: '#222' },
+                textColor: '#DDD',
+            },
+            grid: {
+                vertLines: { color: '#444' },
+                horzLines: { color: '#444' },
+            },
+            timeScale: {
+                timeVisible: true,
+            },
+        });
+        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
+        candlestickSeries.setData(data);
+        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B080' });
+        biasRevSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d["Bias Reversion"],
+        })));
+        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4CAF5080' });
+        atrUpperBandSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d["ATR Upperband"],
+        })));
+        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#F2364580' });
+        atrLowerBandSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d["ATR Lowerband"],
+        })));
+        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 1);
+        rssiSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d["RSSI"],
+            color: d["RSSI"] > 69 ? '#4CAF5080' : d["RSSI"] < 31 ? '#F2364580': '#2962FF80'
+        })));
+        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        atrRevSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d["ATR Reversion Percent"],
+            color: d["ATR Reversion Percent"] > 199 ? '#4CAF5080' : d["ATR Reversion Percent"] < -199 ? '#F2364580': '#2962FF80'
+        })));
     </script>
   </body>
 </html>

@@ -25,5 +25,8 @@ pub fn rsi(src: &Expr, len: usize) -> Expr {
     // RS calculation
     let rs = avg_gain / avg_loss;
     // RSI
-    lit(100) - (lit(100) / (lit(1) + rs))
+    let rsi = lit(100) - (lit(100) / (lit(1) + rs));
+
+    // Normalize nan
+    when(rsi.clone().is_nan()).then(lit(50)).otherwise(rsi)
 }

@@ -29,13 +29,12 @@ pub fn bias_reversion_smoothed(ohlc: &[Expr; 4], len: usize) -> Expr {
 }
 
 /// ATR bands
+/// Anchor is at open price
 pub fn atr_band(ohlc: &[Expr; 4], len: usize, mult: f64) -> [Expr; 2] {
     let atr_raw = atr(ohlc, len);
     let atr_osc = atr_raw * lit(mult);
-    let prev_high = ohlc[1].clone().shift(lit(1));
-    let prev_low = ohlc[1].clone().shift(lit(1));
-    let upper_band = prev_high + atr_osc.clone();
-    let lower_band = prev_low - atr_osc.clone();
+    let upper_band = ohlc[0].clone() + atr_osc.clone();
+    let lower_band = ohlc[0].clone() - atr_osc.clone();
 
     [upper_band, lower_band]
 }
