@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .collect::<HashMap<_, _>>();
     let df_json = serde_json::to_string(&all_dfs)?;
     let tfs_json = serde_json::to_string(&tfs)?;
-    process_chart(&df_json, "BingX.BTC-USDT", &tfs_json).await?;
+    process_chart(&df_json, "BingX.BTC-USDT", &tfs_json, tfs[1]).await?;
     Ok(())
 }
 
@@ -77,14 +77,19 @@ fn process_data(klines: &[Kline]) -> (DataFrame, String) {
     (df_with_indicators, df_json)
 }
 
-async fn process_chart(dataset: &str, symbol: &str, tfs: &str) -> Result<(), Box<dyn Error>> {
-    let tdv_html = render_tdv_html(&dataset, symbol, tfs);
+async fn process_chart(
+    dataset: &str,
+    symbol: &str,
+    tfs: &str,
+    default_tf: &str,
+) -> Result<(), Box<dyn Error>> {
+    let tdv_html = render_tdv_html(&dataset, symbol, tfs, default_tf);
     tokio::fs::write(format!("tdv.{symbol}.html"), tdv_html).await?;
     Ok(())
 }
 
-fn render_tdv_html(dataset: &str, symbol: &str, tfs: &str) -> String {
-    render!(TDV_HTML_TEMPLATE, dataset => dataset, symbol => symbol, tfs => tfs)
+fn render_tdv_html(dataset: &str, symbol: &str, tfs: &str, default_tf: &str) -> String {
+    render!(TDV_HTML_TEMPLATE, dataset => dataset, symbol => symbol, tfs => tfs, default_tf => default_tf)
         .trim()
         .to_string()
 }
@@ -132,7 +137,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
     </style>
   </head>
   <body>
-    <div id="container"></div>
+    <div id="container" data-tf="{{ default_tf }}"></div>
     <div id="tf_btns"></div>
     <script id="dataset" type="application/json">
         {{ dataset }}
@@ -351,7 +356,8 @@ const TDV_HTML_TEMPLATE: &str = r#"
             });
             tf_btns.appendChild(tf_btn);
         });
-        tf_btns.children[0].click()
+        // Click default timeframe
+        [...tf_btns.children].find(b => b.textContent == container.dataset.tf)?.click();
         onSizeUpdate();
     </script>
   </body>
