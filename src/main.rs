@@ -121,18 +121,56 @@ const TDV_HTML_TEMPLATE: &str = r#"
             background: lightblue;
         }
 
-        #tf_btns {
+        #tf-btns {
             position: absolute;
             top: 5%;
             left: 2%;
+            z-index: 9999;
+        }
+        #fullscreen-btn {
+            position: absolute;
+            bottom: 1%;
+            right: 1%;
             z-index: 9999;
         }
     </style>
   </head>
   <body>
     <div id="container" data-tf="{{ default_tf }}"></div>
-    <sl-radio-group id="tf_btns">
-    </sl-radio-group>
+    <sl-radio-group id="tf-btns"></sl-radio-group>
+    <sl-icon-button
+      id="fullscreen-btn"
+      name="fullscreen"
+      label="Toggle Fullscreen"
+      style="font-size: 2rem;"
+      onclick="toggleFullscreen()">
+    </sl-icon-button>
+    <script>
+      const fullscreenButton = document.getElementById('fullscreen-btn');
+
+      // Function to request or exit fullscreen
+      function toggleFullscreen() {
+        if (!document.fullscreenElement) {
+          const elem = document.documentElement;
+          elem.requestFullscreen?.();
+          elem.webkitRequestFullscreen?.();
+          elem.msRequestFullscreen?.();
+        } else {
+          document.exitFullscreen?.();
+          document.webkitExitFullscreen?.();
+          document.msExitFullscreen?.();
+        }
+      }
+
+      // Listen for changes in fullscreen state to update the icon
+      document.addEventListener('fullscreenchange', () => {
+        if (document.fullscreenElement) {
+          fullscreenButton.name = 'fullscreen-exit';
+        } else {
+          fullscreenButton.name = 'fullscreen';
+        }
+      });
+    </script>
     <script id="dataset" type="application/json">
         {{ dataset }}
     </script>
@@ -146,7 +184,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
             ).map(([key, value]) => [key, JSON.parse(value)])
         );
         const tfs = JSON.parse(document.getElementById('tfs').textContent);
-        const tf_btns = document.getElementById('tf_btns');
+        const tf_btns = document.getElementById('tf-btns');
         const container = document.getElementById('container');
         const chart = LightweightCharts.createChart(container, {
             autoSize: true,
