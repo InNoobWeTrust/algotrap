@@ -1,30 +1,40 @@
 use algotrap::{prelude::*, ta::ExprMa};
 use core::error::Error;
+use futures::future::join_all;
 use minijinja::render;
 use polars::prelude::*;
+use std::collections::HashMap;
 use std::io::Cursor;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let client = ext::bingx::BingXClient::default();
 
-    for tf in ["5m", "15m", "1h", "4h"] {
+    let tfs = ["1m", "5m", "15m", "1h", "4h"];
+    let all_dfs = join_all(tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for BTC-USDT perpetual
-        match client.get_futures_klines("BTC-USDT", tf, 1440).await {
-            Ok(klines) => {
-                process_charts(&klines, "BingX.BTC-USDT", tf).await?;
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                Err(e)
-            }
-        }?;
-    }
+        client
+            .get_futures_klines("BTC-USDT", tf, 1440)
+            .await
+            .map(|k| (tf.to_string(), k))
+    }))
+    .await
+    .into_iter()
+    .filter_map(|res| match res {
+        Ok((tf, klines)) => Some((tf, process_data(&klines).1)),
+        Err(err) => {
+            eprintln!("Error: {:?}", err);
+            None
+        }
+    })
+    .collect::<HashMap<_, _>>();
+    let df_json = serde_json::to_string(&all_dfs)?;
+    let tfs_json = serde_json::to_string(&tfs)?;
+    process_chart(&df_json, "BingX.BTC-USDT", &tfs_json).await?;
     Ok(())
 }
 
-async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), Box<dyn Error>> {
+fn process_data(klines: &[Kline]) -> (DataFrame, String) {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
     let ohlc = [col("open"), col("high"), col("low"), col("close")];
     let mut df_with_indicators = df
@@ -64,33 +74,82 @@ async fn process_charts(klines: &[Kline], symbol: &str, tf: &str) -> Result<(), 
         .finish(&mut df_with_indicators)
         .unwrap();
     let df_json = String::from_utf8(file.into_inner()).unwrap();
-    let tdv_html = render_tdv_html(df_json, format!("{symbol} {tf}"));
-    tokio::fs::write(format!("tdv.{symbol}.{tf}.html"), tdv_html).await?;
+    (df_with_indicators, df_json)
+}
+
+async fn process_chart(dataset: &str, symbol: &str, tfs: &str) -> Result<(), Box<dyn Error>> {
+    let tdv_html = render_tdv_html(&dataset, symbol, tfs);
+    tokio::fs::write(format!("tdv.{symbol}.html"), tdv_html).await?;
     Ok(())
 }
 
-fn render_tdv_html(data: String, watermark: String) -> String {
-    render!(TDV_HTML_TEMPLATE, data => data, watermark => watermark)
+fn render_tdv_html(dataset: &str, symbol: &str, tfs: &str) -> String {
+    render!(TDV_HTML_TEMPLATE, dataset => dataset, symbol => symbol, tfs => tfs)
+        .trim()
+        .to_string()
 }
 
 const TDV_HTML_TEMPLATE: &str = r#"
+<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
     <title>ECharts</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            min-height: 100%;
+            box-sizing: border-box;
+            background: #222;
+        }
+
+        #container {
+            height: 100%;
+            background: lightblue;
+        }
+
+        #tf_btns {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            height: 20px;
+            z-index: 9999;
+            border: 1px solid #ccc;
+            background: darkgray;
+            cursor: pointer;
+        }
+        #tf_btns.active {
+            background-color: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+    </style>
   </head>
-  <body style="width: 100dvw;height:100dvh;margin: 0;">
-    <div id="container" style="width: 100%;height:100%;"></div>
-    <script id="data" type="application/json">
-        {{ data }}
+  <body>
+    <div id="container"></div>
+    <div id="tf_btns"></div>
+    <script id="dataset" type="application/json">
+        {{ dataset }}
+    </script>
+    <script id="tfs" type="application/json">
+        {{ tfs }}
     </script>
     <script type="text/javascript">
-        const data = JSON.parse(document.getElementById('data').textContent).map(d => ({
-            ...d,
-            time: Math.floor(d.time / 1000),
-        }));
-        const chart = LightweightCharts.createChart(document.getElementById('container'), {
+        const dataset = Object.fromEntries(
+            Object.entries(
+                JSON.parse(document.getElementById('dataset').textContent)
+            ).map(([key, value]) => [key, JSON.parse(value)])
+        );
+        const tfs = JSON.parse(document.getElementById('tfs').textContent);
+        const tf_btns = document.getElementById('tf_btns');
+        const container = document.getElementById('container');
+        const chart = LightweightCharts.createChart(container, {
             autoSize: true,
             layout: {
                 background: { color: '#222' },
@@ -105,7 +164,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
             },
         });
         const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
-        candlestickSeries.setData(data);
         const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: {
                 type: 'volume',
@@ -119,11 +177,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 bottom: 0,
             },
         });
-        volumeSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d.volume,
-            color: d.close >= d.open ? '#4CAF504C' : '#F236454C'
-        })));
         const volumeSmaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
             lineColor: '#00000000',
             topColor: '#FDD8354C',
@@ -140,123 +193,166 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 bottom: 0,
             },
         });
-        volumeSmaSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['Volume SMA'],
-        })));
         const ema200Series = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B080' });
-        ema200Series.setData(data.map(d => ({
-            time: d.time,
-            value: d.EMA200,
-        })));
         const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#B2B5BE4C' });
-        biasRevSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['Bias Reversion'],
-        })));
         const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4CAF504C' });
-        atrUpperBandSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['ATR Upperband'],
-        })));
         const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#F236454C' });
-        atrLowerBandSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['ATR Lowerband'],
-        })));
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
-        structurePwrSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['Structure Power'],
-            color: d['Structure Power'] >= 0 ? '#00897B80' : '#880E4F80'
-        })));
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
-            topLineColor: '#00897B00',
-            topFillColor1: '#00897B4C',
-            topFillColor2: '#00897B80',
-            bottomLineColor: '#880E4F00',
-            bottomFillColor1: '#880E4F4C',
-            bottomFillColor2: '#880E4F80',
+            topLineColor: 'rgba(76, 175, 80, 0.1)',
+            topFillColor1: 'rgba(76, 175, 80, 0.2)',
+            topFillColor2: 'rgba(76, 175, 80, 0.5)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.2)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.5)',
         }, 1);
-        structurePwrSmaSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['Structure Power SMA'],
-        })));
         const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        rssiSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d.RSSI,
-            color: d.RSSI > 59 ? '#4CAF5080' : d.RSSI < 41 ? '#F2364580': '#2962FF4C'
-        })));
         const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        rssiMaSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['RSSI MA'],
-            color: '#FDD83580'
-        })));
         const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
-        atrRevSeries.setData(data.map(d => ({
-            time: d.time,
-            value: d['ATR Reversion Percent'],
-            color: d['ATR Reversion Percent'] > 99 ? '#4CAF5080' : d['ATR Reversion Percent'] < -99 ? '#F2364580': '#2962FF4C'
-        })));
-        const reversionUp = (d) => (d.RSSI < 46 && d['ATR Reversion Percent'] > 99);
-        const reversionDown = (d) => (d.RSSI > 54 && d['ATR Reversion Percent'] < -99);
-        const markers = data.filter(d => reversionUp(d) || reversionDown(d)).map(d => ({
-            time: d.time,
-            position: reversionUp(d) ? 'belowBar' : 'aboveBar',
-            color: reversionUp(d) ? '#2196F3' : '#e91e63',
-            shape: reversionUp(d) ? 'arrowUp' : 'arrowDown',
-        }))
-        LightweightCharts.createSeriesMarkers(candlestickSeries, markers);
-        LightweightCharts.createTextWatermark(chart.panes()[0], {
-            horzAlign: 'left',
-            vertAlign: 'top',
-            lines: [
+        const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
+        const textWatermarks = [
+            LightweightCharts.createTextWatermark(chart.panes()[0], {}),
+            LightweightCharts.createTextWatermark(chart.panes()[1], {}),
+            LightweightCharts.createTextWatermark(chart.panes()[2], {}),
+            LightweightCharts.createTextWatermark(chart.panes()[3], {}),
+        ];
+
+        const onIntervalUpdate = (tf) => { 
+            const data = dataset[tf].map(d => ({
+                ...d,
+                time: Math.floor(d.time / 1000),
+            }));
+            candlestickSeries.setData(data);
+            volumeSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.volume,
+                color: d.close >= d.open ? 'rgba(76, 175, 80, 0.3)' : 'rgba(242, 54, 69, 0.3)'
+            })));
+            volumeSmaSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Volume SMA'],
+            })));
+            ema200Series.setData(data.map(d => ({
+                time: d.time,
+                value: d.EMA200,
+            })));
+            biasRevSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Bias Reversion'],
+            })));
+            atrUpperBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['ATR Upperband'],
+            })));
+            atrLowerBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['ATR Lowerband'],
+            })));
+            structurePwrSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Structure Power'],
+                color: d['Structure Power'] >= 0 ? '#00897B80' : '#880E4F80'
+            })));
+            structurePwrSmaSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Structure Power SMA'],
+            })));
+            rssiSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.RSSI,
+                color: d.RSSI > 59 ? '#4CAF5080' : d.RSSI < 41 ? '#F2364580': '#2962FF4C'
+            })));
+            rssiMaSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['RSSI MA'],
+                color: '#FDD83580'
+            })));
+            atrRevSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['ATR Reversion Percent'],
+                color: d['ATR Reversion Percent'] > 99 ? '#4CAF5080' : d['ATR Reversion Percent'] < -99 ? '#F2364580': '#2962FF4C'
+            })));
+            const reversionUp = (d) => (d.RSSI < 46 && d['ATR Reversion Percent'] > 99);
+            const reversionDown = (d) => (d.RSSI > 54 && d['ATR Reversion Percent'] < -99);
+            const markers = data.filter(d => reversionUp(d) || reversionDown(d)).map(d => ({
+                time: d.time,
+                position: reversionUp(d) ? 'belowBar' : 'aboveBar',
+                color: reversionUp(d) ? '#2196F3' : '#e91e63',
+                shape: reversionUp(d) ? 'arrowUp' : 'arrowDown',
+            }))
+            markersSeries.setMarkers(markers);
+        }
+        const watermarkUpdate = () => {
+            const watermarks = [
                 {
-                    text: '{{ watermark }}',
-                    color: 'rgba(178, 181, 190, 0.5)',
-                    fontSize: 24,
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: `{{ symbol }} ${container.dataset.tf || tfs[0]}`,
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 24,
+                        },
+                    ],
                 },
-            ],
-        });
-        LightweightCharts.createTextWatermark(chart.panes()[1], {
-            horzAlign: 'left',
-            vertAlign: 'top',
-            lines: [
                 {
-                    text: 'Structure Power',
-                    color: 'rgba(178, 181, 190, 0.5)',
-                    fontSize: 18,
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: 'Structure Power',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
                 },
-            ],
-        });
-        LightweightCharts.createTextWatermark(chart.panes()[2], {
-            horzAlign: 'left',
-            vertAlign: 'top',
-            lines: [
                 {
-                    text: 'RSSI',
-                    color: 'rgba(178, 181, 190, 0.5)',
-                    fontSize: 18,
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: 'ATR Reversion',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
                 },
-            ],
+            ];
+            Object.entries(textWatermarks).forEach(([k,v]) => {
+                v.applyOptions(watermarks[k]);
+            });
+        }
+        const onSizeUpdate = () => {
+            const tmpSeries = chart.panes()[0].getSeries()[0];
+            const len = tmpSeries.data().length;
+            chart.timeScale().setVisibleLogicalRange({ from: len - 144, to: len + 5 });
+            const containerHeight = document.getElementById("container").getClientRects()[0].height;
+            chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
+            watermarkUpdate();
+        }
+        const resizeObserver = new ResizeObserver((entries) => {
+            requestAnimationFrame(() => {
+                onSizeUpdate();
+            });
         });
-        LightweightCharts.createTextWatermark(chart.panes()[3], {
-            horzAlign: 'left',
-            vertAlign: 'top',
-            lines: [
-                {
-                    text: 'ATR Reversion',
-                    color: 'rgba(178, 181, 190, 0.5)',
-                    fontSize: 18,
-                },
-            ],
+        resizeObserver.observe(container);
+        tfs.forEach(tf => {
+            const tf_btn = document.createElement('button');
+            tf_btn.innerText = tf;
+            tf_btn.addEventListener('click', () => {
+                container.dataset.tf = tf;
+                // Remove active from all buttons
+                [...tf_btns.children].forEach(btn => btn.classList.remove('active'));
+                // Add active to clicked button
+                tf_btn.classList.add('active');
+                onIntervalUpdate(tf);
+                watermarkUpdate();
+            });
+            tf_btns.appendChild(tf_btn);
         });
-        chart.timeScale().setVisibleLogicalRange({ from: data.length - 147, to: data.length });
-        const containerHeight = document.getElementById("container").getClientRects()[0].height;
-        chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
+        tf_btns.children[0].click()
+        onSizeUpdate();
     </script>
   </body>
 </html>
