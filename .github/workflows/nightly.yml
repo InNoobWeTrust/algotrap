@@ -1,0 +1,105 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Build binary
+        run: cargo build --release --all-targets
+
+      - name: Archive binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            7z a algotrap-${{ runner.os }}.zip target/release/algotrap.exe
+            echo "ASSET=algotrap-${{ runner.os }}.zip" >> $GITHUB_ENV
+          else
+            tar -czf algotrap-${{ runner.os }}.tar.gz -C target/release algotrap
+            echo "ASSET=algotrap-${{ runner.os }}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: algotrap-${{ runner.os }}
+          path: ${{ env.ASSET }}
+
+  create-release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+        with:
+          tag_name: nightly-${{ github.run_id }}
+          release_name: Nightly Build ${{ github.run_id }}
+          draft: false
+          prerelease: true
+
+      - name: Upload Release Assets (Ubuntu)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/algotrap-ubuntu-latest/algotrap-ubuntu-latest.tar.gz
+          asset_name: algotrap-ubuntu-latest.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Release Assets (macOS)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/algotrap-macos-latest/algotrap-macos-latest.tar.gz
+          asset_name: algotrap-macos-latest.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Release Assets (Windows)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/algotrap-windows-latest/algotrap-windows-latest.zip
+          asset_name: algotrap-windows-latest.zip
+          asset_content_type: application/zip
+          
+      - name: Upload Release Assets (Android)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/algotrap-aarch64-linux-android/algotrap-aarch64-linux-android.tar.gz
+          asset_name: algotrap-aarch64-linux-android.tar.gz
+          asset_content_type: application/gzip
