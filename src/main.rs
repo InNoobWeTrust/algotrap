@@ -96,11 +96,13 @@ fn render_tdv_html(dataset: &str, symbol: &str, tfs: &str, default_tf: &str) -> 
 
 const TDV_HTML_TEMPLATE: &str = r#"
 <!DOCTYPE html>
-<html>
+<html class="sl-theme-dark">
   <head>
     <meta charset="utf-8" />
     <title>ECharts</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
     <style>
         html, body {
             height: 100%;
@@ -121,24 +123,16 @@ const TDV_HTML_TEMPLATE: &str = r#"
 
         #tf_btns {
             position: absolute;
-            bottom: 20px;
-            left: 20px;
-            height: 20px;
+            top: 5%;
+            left: 2%;
             z-index: 9999;
-            border: 1px solid #ccc;
-            background: darkgray;
-            cursor: pointer;
-        }
-        #tf_btns.active {
-            background-color: #007bff;
-            color: white;
-            border-color: #007bff;
         }
     </style>
   </head>
   <body>
     <div id="container" data-tf="{{ default_tf }}"></div>
-    <div id="tf_btns"></div>
+    <sl-radio-group id="tf_btns">
+    </sl-radio-group>
     <script id="dataset" type="application/json">
         {{ dataset }}
     </script>
@@ -295,7 +289,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
                     vertAlign: 'top',
                     lines: [
                         {
-                            text: `{{ symbol }} ${container.dataset.tf || tfs[0]}`,
+                            text: `{{ symbol }} ${tf_btns.value || container.dataset.tf || tfs[0]}`,
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 24,
                         },
@@ -307,6 +301,17 @@ const TDV_HTML_TEMPLATE: &str = r#"
                     lines: [
                         {
                             text: 'Structure Power',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+                {
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: 'RSSI',
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 18,
                         },
@@ -343,21 +348,19 @@ const TDV_HTML_TEMPLATE: &str = r#"
         });
         resizeObserver.observe(container);
         tfs.forEach(tf => {
-            const tf_btn = document.createElement('button');
+            const tf_btn = document.createElement('sl-radio-button');
             tf_btn.innerText = tf;
+            tf_btn.value = tf
             tf_btn.addEventListener('click', () => {
-                container.dataset.tf = tf;
-                // Remove active from all buttons
-                [...tf_btns.children].forEach(btn => btn.classList.remove('active'));
-                // Add active to clicked button
-                tf_btn.classList.add('active');
                 onIntervalUpdate(tf);
                 watermarkUpdate();
             });
             tf_btns.appendChild(tf_btn);
         });
         // Click default timeframe
-        [...tf_btns.children].find(b => b.textContent == container.dataset.tf)?.click();
+        requestAnimationFrame(() => {
+            [...tf_btns.children].find(b => b.textContent == container.dataset.tf)?.click();
+        })
         onSizeUpdate();
     </script>
   </body>
