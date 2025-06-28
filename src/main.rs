@@ -62,7 +62,7 @@ fn process_data(klines: &[Kline]) -> (DataFrame, String) {
             ta::bar_bias(&ohlc).rma(9).alias("Structure Power"),
             ta::bar_bias(&ohlc)
                 .rma(9)
-                .sma(42)
+                .sma(16)
                 .alias("Structure Power SMA"),
         ])
         .collect()
@@ -255,7 +255,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
             LightweightCharts.createTextWatermark(chart.panes()[3], {}),
         ];
 
-        const onIntervalUpdate = (tf) => { 
+        const onIntervalUpdate = (tf) => {
             const data = dataset[tf].map(d => ({
                 ...d,
                 time: Math.floor(d.time / 1000),
