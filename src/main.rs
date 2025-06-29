@@ -255,6 +255,58 @@ const TDV_HTML_TEMPLATE: &str = r#"
             LightweightCharts.createTextWatermark(chart.panes()[3], {}),
         ];
 
+        const watermarkUpdate = () => {
+            const watermarks = [
+                {
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: `{{ symbol }} ${tf_btns.value || container.dataset.tf || tfs[0]}`,
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 24,
+                        },
+                    ],
+                },
+                {
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: 'Structure Power',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+                {
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: 'RSSI',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+                {
+                    horzAlign: 'left',
+                    vertAlign: 'top',
+                    lines: [
+                        {
+                            text: 'ATR Reversion',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+            ];
+            Object.entries(textWatermarks).forEach(([k,v]) => {
+                v.applyOptions(watermarks[k]);
+            });
+        }
+
         const onIntervalUpdate = (tf) => {
             const data = dataset[tf].map(d => ({
                 ...d,
@@ -319,62 +371,12 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 shape: reversionUp(d) ? 'arrowUp' : 'arrowDown',
             }))
             markersSeries.setMarkers(markers);
-        }
-        const watermarkUpdate = () => {
-            const watermarks = [
-                {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
-                    lines: [
-                        {
-                            text: `{{ symbol }} ${tf_btns.value || container.dataset.tf || tfs[0]}`,
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 24,
-                        },
-                    ],
-                },
-                {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
-                    lines: [
-                        {
-                            text: 'Structure Power',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
-                    lines: [
-                        {
-                            text: 'RSSI',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
-                    lines: [
-                        {
-                            text: 'ATR Reversion',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-            ];
-            Object.entries(textWatermarks).forEach(([k,v]) => {
-                v.applyOptions(watermarks[k]);
-            });
+            watermarkUpdate();
         }
         const onSizeUpdate = () => {
             const tmpSeries = chart.panes()[0].getSeries()[0];
             const len = tmpSeries.data().length;
-            chart.timeScale().setVisibleLogicalRange({ from: len - 144, to: len + 5 });
+            chart.timeScale().setVisibleLogicalRange({ from: len - 128, to: len + 5 });
             const containerHeight = document.getElementById("container").getClientRects()[0].height;
             chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
             watermarkUpdate();
@@ -390,8 +392,9 @@ const TDV_HTML_TEMPLATE: &str = r#"
             tf_btn.innerText = tf;
             tf_btn.value = tf
             tf_btn.addEventListener('click', () => {
-                onIntervalUpdate(tf);
-                watermarkUpdate();
+                requestAnimationFrame(() => {
+                    onIntervalUpdate(tf);
+                });
             });
             tf_btns.appendChild(tf_btn);
         });
@@ -399,7 +402,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
         requestAnimationFrame(() => {
             [...tf_btns.children].find(b => b.textContent == container.dataset.tf)?.click();
         })
-        onSizeUpdate();
     </script>
   </body>
 </html>
