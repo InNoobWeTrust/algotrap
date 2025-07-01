@@ -1,6 +1,6 @@
 use polars::prelude::*;
 
-use crate::ta::rma;
+use super::prelude::*;
 
 /// Calculate RSI value from a source column in dataframe
 pub fn rsi(src: &Expr, len: usize) -> Expr {

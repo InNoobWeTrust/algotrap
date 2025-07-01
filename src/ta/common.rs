@@ -1,6 +1,6 @@
 use polars::prelude::*;
 
-use super::Ohlc;
+use super::prelude::*;
 
 pub fn bar_bias(ohlc: &Ohlc) -> Expr {
     let [open, high, low, close] = ohlc;

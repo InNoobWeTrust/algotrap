@@ -1,7 +1,7 @@
 use polars::prelude::*;
 use tap::Pipe;
 
-use crate::ta::{Ohlc, bar_bias, rma, rsi, sma};
+use super::prelude::*;
 
 /// Relative Structure Strength Index
 /// Experimental index of relative strength based on `open + bar_bias`
@@ -9,7 +9,7 @@ pub fn rssi(ohlc: &Ohlc, len: usize) -> Expr {
     let bias = bar_bias(ohlc);
     let bar_pwr = ohlc[0].clone() + bias;
 
-    rsi(&bar_pwr, len)
+    bar_pwr.rsi(len)
 }
 
 /// Bias reversion

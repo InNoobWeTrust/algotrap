@@ -1,11 +1,11 @@
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
 use algotrap::ta::prelude::*;
-use serde_json::Value;
 use core::error::Error;
 use futures::future::join_all;
 use minijinja::render;
 use polars::prelude::*;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -392,10 +392,10 @@ const TDV_HTML_TEMPLATE: &str = r#"
             atrRevSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d['ATR Reversion Percent'],
-                color: d['ATR Reversion Percent'] > 99 ? '#4CAF5080' : d['ATR Reversion Percent'] < -99 ? '#F2364580': '#2962FF4C'
+                color: d['ATR Reversion Percent'] > 50 ? '#4CAF5080' : d['ATR Reversion Percent'] < -50 ? '#F2364580': '#2962FF4C'
             })));
-            const reversionUp = (d) => (d.RSSI < 46 && d['ATR Reversion Percent'] > 99);
-            const reversionDown = (d) => (d.RSSI > 54 && d['ATR Reversion Percent'] < -99);
+            const reversionUp = (d) => (d.RSSI < 46 && d['ATR Reversion Percent'] > 50);
+            const reversionDown = (d) => (d.RSSI > 54 && d['ATR Reversion Percent'] < -50);
             const markers = data.filter(d => reversionUp(d) || reversionDown(d)).map(d => ({
                 time: d.time,
                 position: reversionUp(d) ? 'belowBar' : 'aboveBar',

@@ -1,6 +1,6 @@
 use polars::prelude::*;
 
-use super::*;
+use super::prelude::*;
 
 pub type Ohlc = [Expr; 4];
 

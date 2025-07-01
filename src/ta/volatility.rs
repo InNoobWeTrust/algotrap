@@ -1,7 +1,7 @@
 use polars::lazy::dsl::max_horizontal;
 use polars::prelude::*;
 
-use super::{Ohlc, rma};
+use super::prelude::*;
 
 /// True Range
 pub fn true_range(ohlc: &Ohlc) -> Expr {
