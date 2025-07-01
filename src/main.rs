@@ -1,10 +1,17 @@
-use algotrap::{prelude::*, ta::ExprMa};
+use algotrap::prelude::*;
+use algotrap::ta::experimental::OhlcExperimental;
+use algotrap::ta::prelude::*;
+use serde_json::Value;
 use core::error::Error;
 use futures::future::join_all;
 use minijinja::render;
 use polars::prelude::*;
 use std::collections::HashMap;
 use std::io::Cursor;
+
+const SYMBOL: &str = "BTC-USDT";
+const SL_PERCENT: f64 = 0.1;
+const TOL_PERCENT: f64 = 0.618;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -14,14 +21,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let all_dfs = join_all(tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for BTC-USDT perpetual
         client
-            .get_futures_klines("BTC-USDT", tf, 1440)
+            .get_futures_klines(SYMBOL, tf, 1440)
             .await
             .map(|k| (tf.to_string(), k))
     }))
     .await
     .into_iter()
     .filter_map(|res| match res {
-        Ok((tf, klines)) => Some((tf, process_data(&klines).1)),
+        Ok((tf, klines)) => Some((tf, process_data(&klines).expect("Failed to process data").1)),
         Err(err) => {
             eprintln!("Error: {:?}", err);
             None
@@ -30,13 +37,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .collect::<HashMap<_, _>>();
     let df_json = serde_json::to_string(&all_dfs)?;
     let tfs_json = serde_json::to_string(&tfs)?;
-    process_chart(&df_json, "BingX.BTC-USDT", &tfs_json, tfs[1]).await?;
+    let html_vars = TdvHtmlVars {
+        dataset: df_json,
+        symbol: "BingX:BTC-USDT".to_string(),
+        tfs: tfs_json,
+        default_tf: "5m".to_string(),
+        sl_percent: format!("{:.0}", SL_PERCENT * 100.),
+        tol_percent: format!("{:.2}", TOL_PERCENT * 100.),
+    };
+    let tdv_html = render_tdv_html(&html_vars);
+    tokio::fs::write(format!("tdv.BingX.{SYMBOL}.html"), tdv_html).await?;
     Ok(())
 }
 
-fn process_data(klines: &[Kline]) -> (DataFrame, String) {
+fn process_data(klines: &[Kline]) -> Result<(DataFrame, Value), Box<dyn Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let ohlc = [col("open"), col("high"), col("low"), col("close")];
+    let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
+    let lvrg_adjust = SL_PERCENT / (1. + TOL_PERCENT);
     let mut df_with_indicators = df
         .lazy()
         .with_columns([
@@ -46,24 +63,24 @@ fn process_data(klines: &[Kline]) -> (DataFrame, String) {
                     Some("UTC".into()),
                 ))
                 .alias("Date"),
-            col("volume").sma(20).alias("Volume SMA"),
-            col("close").ema(200).alias("EMA200"),
-            ta::experimental::bias_reversion_smoothed(&ohlc, 9).alias("Bias Reversion"),
-            ta::experimental::atr_band(&ohlc, 42, 1.618)[0]
-                .clone()
-                .alias("ATR Upperband"),
-            ta::experimental::atr_band(&ohlc, 42, 1.618)[1]
-                .clone()
-                .alias("ATR Lowerband"),
-            ta::experimental::atr_reversion_percent(&ohlc, 9, 42, 1.618)
+            col("volume").ema(20).alias("Volume SMA"),
+            ohlc.bias_reversion_smoothed(9).alias("Bias Reversion"),
+            ohlc.atr(42).alias("ATR"),
+            ohlc.rssi(14).alias("RSSI"),
+            ohlc.bar_bias().rma(9).alias("Structure Power"),
+        ])
+        .with_columns([
+            (col("ATR") * lit(1.618)).alias("ATR Oscillation"),
+            (col("ATR") / ohlc[0].clone()).alias("ATR Percent"), // For calculating leverage
+        ])
+        .with_columns([
+            (ohlc[0].clone() + col("ATR Oscillation")).alias("ATR Upperband"),
+            (ohlc[0].clone() - col("ATR Oscillation")).alias("ATR Lowerband"),
+            ohlc.band_reversion_percent(&col("ATR Oscillation"), &col("Bias Reversion"))
                 .alias("ATR Reversion Percent"),
-            ta::experimental::rssi(&ohlc, 14).alias("RSSI"),
-            ta::experimental::rssi(&ohlc, 14).ema(9).alias("RSSI MA"),
-            ta::bar_bias(&ohlc).rma(9).alias("Structure Power"),
-            ta::bar_bias(&ohlc)
-                .rma(9)
-                .sma(16)
-                .alias("Structure Power SMA"),
+            col("RSSI").ema(9).alias("RSSI MA"),
+            col("Structure Power").sma(16).alias("Structure Power SMA"),
+            (lit(lvrg_adjust) * ohlc[0].clone() / col("ATR")).alias("Leverage"),
         ])
         .collect()
         .unwrap();
@@ -73,23 +90,22 @@ fn process_data(klines: &[Kline]) -> (DataFrame, String) {
         .with_json_format(JsonFormat::Json)
         .finish(&mut df_with_indicators)
         .unwrap();
-    let df_json = String::from_utf8(file.into_inner()).unwrap();
-    (df_with_indicators, df_json)
+    //let df_json = String::from_utf8(file.into_inner()).unwrap();
+    let df_json = serde_json::from_slice(&file.into_inner())?;
+    Ok((df_with_indicators, df_json))
 }
 
-async fn process_chart(
-    dataset: &str,
-    symbol: &str,
-    tfs: &str,
-    default_tf: &str,
-) -> Result<(), Box<dyn Error>> {
-    let tdv_html = render_tdv_html(&dataset, symbol, tfs, default_tf);
-    tokio::fs::write(format!("tdv.{symbol}.html"), tdv_html).await?;
-    Ok(())
+struct TdvHtmlVars {
+    dataset: String,
+    symbol: String,
+    tfs: String,
+    default_tf: String,
+    sl_percent: String,  // formatted, max 2 decimals
+    tol_percent: String, // formatted, max 2 decimals
 }
 
-fn render_tdv_html(dataset: &str, symbol: &str, tfs: &str, default_tf: &str) -> String {
-    render!(TDV_HTML_TEMPLATE, dataset => dataset, symbol => symbol, tfs => tfs, default_tf => default_tf)
+fn render_tdv_html(vars: &TdvHtmlVars) -> String {
+    render!(TDV_HTML_TEMPLATE, dataset => vars.dataset, symbol => vars.symbol, tfs => vars.tfs, default_tf => vars.default_tf, sl_percent => vars.sl_percent, tol_percent => vars.tol_percent)
         .trim()
         .to_string()
 }
@@ -121,11 +137,14 @@ const TDV_HTML_TEMPLATE: &str = r#"
             background: lightblue;
         }
 
-        #tf-btns {
+        #overlay {
             position: absolute;
             top: 5%;
             left: 2%;
             z-index: 9999;
+        }
+        #tf-btns {
+            display: inline-block;
         }
         #fullscreen-btn {
             position: absolute;
@@ -137,7 +156,16 @@ const TDV_HTML_TEMPLATE: &str = r#"
   </head>
   <body>
     <div id="container" data-tf="{{ default_tf }}"></div>
-    <sl-radio-group id="tf-btns"></sl-radio-group>
+    <div id="overlay">
+        <div id="badges">
+            <sl-badge variant="danger" pill>SL: {{ sl_percent }}%</sl-badge>
+            <sl-badge variant="success" pill>Tol: {{ tol_percent }}%</sl-badge>
+            <sl-badge id="atr-percent" variant="warning" pill>ATR: -</sl-badge>
+            <sl-badge id="leverage" variant="primary" pill>Lvrg: -</sl-badge>
+        </div>
+        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
+        <sl-radio-group id="tf-btns"></sl-radio-group>
+    </div>
     <sl-icon-button
       id="fullscreen-btn"
       name="fullscreen"
@@ -178,14 +206,13 @@ const TDV_HTML_TEMPLATE: &str = r#"
         {{ tfs }}
     </script>
     <script type="text/javascript">
-        const dataset = Object.fromEntries(
-            Object.entries(
-                JSON.parse(document.getElementById('dataset').textContent)
-            ).map(([key, value]) => [key, JSON.parse(value)])
-        );
+        const dataset = JSON.parse(document.getElementById('dataset').textContent);
         const tfs = JSON.parse(document.getElementById('tfs').textContent);
         const tf_btns = document.getElementById('tf-btns');
         const container = document.getElementById('container');
+        const atr_badge = document.getElementById('atr-percent');
+        const lvrg_badge = document.getElementById('leverage');
+
         const chart = LightweightCharts.createChart(container, {
             autoSize: true,
             layout: {
@@ -256,13 +283,18 @@ const TDV_HTML_TEMPLATE: &str = r#"
         ];
 
         const watermarkUpdate = () => {
+            const tf = tf_btns.value || container.dataset.tf || tfs[0];
+            const atr = +(dataset[tf].slice(-1)[0]["ATR Percent"] * 100).toFixed(2);
+            const lvrg = Math.floor(dataset[tf].slice(-1)[0]["Leverage"]);
+            atr_badge.innerHTML = `ATR: ${atr}%`;
+            lvrg_badge.innerHTML = `x${lvrg}`;
             const watermarks = [
                 {
                     horzAlign: 'left',
                     vertAlign: 'top',
                     lines: [
                         {
-                            text: `{{ symbol }} ${tf_btns.value || container.dataset.tf || tfs[0]}`,
+                            text: `{{ symbol }} ${tf}`,
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 24,
                         },
