@@ -1,6 +1,8 @@
 use polars::prelude::*;
 
-pub fn bar_bias(ohlc: &[Expr; 4]) -> Expr {
+use super::Ohlc;
+
+pub fn bar_bias(ohlc: &Ohlc) -> Expr {
     let [open, high, low, close] = ohlc;
 
     let bull_pwr = high.clone() - open.clone();

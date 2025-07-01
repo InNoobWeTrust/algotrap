@@ -1,10 +1,10 @@
 use polars::lazy::dsl::max_horizontal;
 use polars::prelude::*;
 
-use crate::ta::rma;
+use super::{Ohlc, rma};
 
 /// True Range
-pub fn true_range(ohlc: &[Expr; 4]) -> Expr {
+pub fn true_range(ohlc: &Ohlc) -> Expr {
     let prev_close = ohlc[3].clone().shift(lit(1));
     let hl_range = ohlc[1].clone() - ohlc[2].clone();
     let hc_range = ohlc[1].clone() - prev_close.clone();
@@ -17,7 +17,7 @@ pub fn true_range(ohlc: &[Expr; 4]) -> Expr {
 }
 
 /// ATR
-pub fn atr(ohlc: &[Expr; 4], len: usize) -> Expr {
+pub fn atr(ohlc: &Ohlc, len: usize) -> Expr {
     let tr = true_range(ohlc);
     rma(&tr, len)
 }
