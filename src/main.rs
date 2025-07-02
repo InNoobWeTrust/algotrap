@@ -17,7 +17,7 @@ const TOL_PERCENT: f64 = 0.618;
 async fn main() -> Result<(), Box<dyn Error>> {
     let client = ext::bingx::BingXClient::default();
 
-    let tfs = ["1m", "5m", "15m", "1h", "4h"];
+    let tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"];
     let all_dfs = join_all(tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for BTC-USDT perpetual
         client
@@ -28,7 +28,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await
     .into_iter()
     .filter_map(|res| match res {
-        Ok((tf, klines)) => Some((tf, process_data(&klines).expect("Failed to process data").1)),
+        Ok((tf, klines)) => {
+            let mut df = process_data(&klines).expect("Failed to process data");
+            let df_json = df_to_json(&mut df).expect("Failed to serialize data frame to json");
+            Some((tf, df_json))
+        }
         Err(err) => {
             eprintln!("Error: {:?}", err);
             None
@@ -50,49 +54,103 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn process_data(klines: &[Kline]) -> Result<(DataFrame, Value), Box<dyn Error>> {
-    let df = klines.iter().rev().cloned().to_dataframe().unwrap();
+fn indicators() -> Vec<Expr> {
     let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
+
+    // Axis conversion
+    let time_to_date = col("time")
+        .cast(DataType::Datetime(
+            TimeUnit::Milliseconds,
+            Some("UTC".into()),
+        ))
+        .alias("Date");
+
+    // Volume
+    let vol_sma = col("volume").ema(20).alias("Volume SMA");
+
+    // Moving thresholds
+    let bias_rev = ohlc.bias_reversion_smoothed(9).alias("Bias Reversion");
+    let ema200 = col("close").ema(200).alias("EMA200");
+    let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("Bullish RevRSI");
+    let bearish_revrsi = col("low").rev_rsi(14, 30.).alias("Bearish RevRSI");
+
+    // Oscillation band
+    let atr = ohlc.atr(42).alias("ATR");
+    let atr_osc = (atr.clone() * lit(1.618)).alias("ATR Oscillation");
+    let atr_upperband = (col("open") + atr_osc.clone()).alias("ATR Upperband");
+    let atr_lowerband = (col("open") - atr_osc.clone()).alias("ATR Lowerband");
+    let atr_percent = (atr.clone() / col("open")).alias("ATR Percent");
+
+    // Relative structure power
+    let structure_pwr = ohlc.bar_bias().rma(9).alias("Structure Power");
+    let structure_pwr_sma = structure_pwr.clone().sma(16).alias("Structure Power SMA");
+
+    // Relative structure strength index
+    let rssi = ohlc.rssi(14).alias("RSSI");
+    let rssi_ma = rssi.clone().ema(9).alias("RSSI MA");
+
+    // Stability indicator
+    let atr_rev_percent = ohlc
+        .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
+        .alias("ATR Reversion Percent");
+
+    // Signals
+    let overbought = rssi
+        .clone()
+        .gt(lit(54))
+        .logical_and(atr_rev_percent.clone().lt(lit(-50)))
+        .alias("Overbought");
+    let oversold = rssi
+        .clone()
+        .lt(lit(46))
+        .logical_and(atr_rev_percent.clone().gt(lit(50)))
+        .alias("Oversold");
+    let climax_signal = when(overbought.clone().not().logical_and(oversold.clone().not()))
+        .then(lit(0))
+        .otherwise(when(overbought).then(lit(1)).otherwise(lit(-1)))
+        .alias("Climax Signal");
+
+    // Miscs
     let lvrg_adjust = SL_PERCENT / (1. + TOL_PERCENT);
-    let mut df_with_indicators = df
-        .lazy()
-        .with_columns([
-            col("time")
-                .cast(DataType::Datetime(
-                    TimeUnit::Milliseconds,
-                    Some("UTC".into()),
-                ))
-                .alias("Date"),
-            col("volume").ema(20).alias("Volume SMA"),
-            ohlc.bias_reversion_smoothed(9).alias("Bias Reversion"),
-            ohlc.atr(42).alias("ATR"),
-            ohlc.rssi(14).alias("RSSI"),
-            ohlc.bar_bias().rma(9).alias("Structure Power"),
-        ])
-        .with_columns([
-            (col("ATR") * lit(1.618)).alias("ATR Oscillation"),
-            (col("ATR") / ohlc[0].clone()).alias("ATR Percent"), // For calculating leverage
-        ])
-        .with_columns([
-            (ohlc[0].clone() + col("ATR Oscillation")).alias("ATR Upperband"),
-            (ohlc[0].clone() - col("ATR Oscillation")).alias("ATR Lowerband"),
-            ohlc.band_reversion_percent(&col("ATR Oscillation"), &col("Bias Reversion"))
-                .alias("ATR Reversion Percent"),
-            col("RSSI").ema(9).alias("RSSI MA"),
-            col("Structure Power").sma(16).alias("Structure Power SMA"),
-            (lit(lvrg_adjust) * ohlc[0].clone() / col("ATR")).alias("Leverage"),
-        ])
-        .collect()
-        .unwrap();
+    let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("Leverage");
+
+    // Selected columns to export
+    vec![
+        time_to_date,
+        vol_sma,
+        bias_rev,
+        ema200,
+        bullish_revrsi,
+        bearish_revrsi,
+        atr_upperband,
+        atr_lowerband,
+        rssi,
+        rssi_ma,
+        structure_pwr,
+        structure_pwr_sma,
+        atr_percent,
+        atr_rev_percent,
+        lvrg,
+        climax_signal,
+    ]
+}
+
+fn process_data(klines: &[Kline]) -> Result<DataFrame, Box<dyn Error>> {
+    let df = klines.iter().rev().cloned().to_dataframe().unwrap();
+    let df_with_indicators = df.lazy().with_columns(indicators()).collect().unwrap();
     println!("{df_with_indicators:?}");
+    Ok(df_with_indicators)
+}
+
+fn df_to_json(df: &mut DataFrame) -> Result<Value, Box<dyn Error>> {
     let mut file = Cursor::new(Vec::new());
     JsonWriter::new(&mut file)
         .with_json_format(JsonFormat::Json)
-        .finish(&mut df_with_indicators)
+        .finish(df)
         .unwrap();
     //let df_json = String::from_utf8(file.into_inner()).unwrap();
     let df_json = serde_json::from_slice(&file.into_inner())?;
-    Ok((df_with_indicators, df_json))
+    Ok(df_json)
 }
 
 struct TdvHtmlVars {
@@ -261,6 +319,8 @@ const TDV_HTML_TEMPLATE: &str = r#"
         const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#B2B5BE4C' });
         const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4CAF504C' });
         const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#F236454C' });
+        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(33,150,243,0.2)', lineWidth: 6 });
+        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(255,152,0,0.2)', lineWidth: 6 });
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
@@ -370,6 +430,14 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 time: d.time,
                 value: d['ATR Lowerband'],
             })));
+            bullishBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Bullish RevRSI'],
+            })));
+            bearishBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Bearish RevRSI'],
+            })));
             structurePwrSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d['Structure Power'],
@@ -394,13 +462,11 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 value: d['ATR Reversion Percent'],
                 color: d['ATR Reversion Percent'] > 50 ? '#4CAF5080' : d['ATR Reversion Percent'] < -50 ? '#F2364580': '#2962FF4C'
             })));
-            const reversionUp = (d) => (d.RSSI < 46 && d['ATR Reversion Percent'] > 50);
-            const reversionDown = (d) => (d.RSSI > 54 && d['ATR Reversion Percent'] < -50);
-            const markers = data.filter(d => reversionUp(d) || reversionDown(d)).map(d => ({
+            const markers = data.filter(d => d['Climax Signal'] != 0).map(d => ({
                 time: d.time,
-                position: reversionUp(d) ? 'belowBar' : 'aboveBar',
-                color: reversionUp(d) ? '#2196F3' : '#e91e63',
-                shape: reversionUp(d) ? 'arrowUp' : 'arrowDown',
+                position: d['Climax Signal'] < 0 ? 'belowBar' : 'aboveBar',
+                color: d['Climax Signal'] < 0 ? '#2196F3' : '#e91e63',
+                shape: d['Climax Signal'] < 0 ? 'arrowUp' : 'arrowDown',
             }))
             markersSeries.setMarkers(markers);
             watermarkUpdate();
