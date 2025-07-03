@@ -5,3 +5,14 @@ args = ["run"]
 [tasks.clean_html]
 command = "find"
 args = [".", "-name", "*.html", "-delete"]
+
+[tasks.deploy]
+command = "bash"
+args = ["-c", """
+  if [ ! -f .env ]; then
+    echo 'Error: .env file not found.';
+    exit 1;
+  fi;
+  docker build -t algotrap -f deployment/Dockerfile . && \
+  docker run --rm --env-file .env algotrap
+"""]

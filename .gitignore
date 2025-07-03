@@ -4,3 +4,4 @@ Cargo.lock
 .bacon-locations
 echarts.*.html
 tdv.*.html
+.env
