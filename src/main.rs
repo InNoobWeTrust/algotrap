@@ -82,7 +82,15 @@ async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Erro
             (tf.to_string(), signal)
         })
         .collect();
-    let excluded_tfs: HashSet<_> = ["1m".to_string(), "5m".to_string()].into_iter().collect();
+    let excluded_tfs: HashSet<_> = [
+        "1m".to_string(),
+        "5m".to_string(),
+        "1d".to_string(),
+        "1w".to_string(),
+        "1M".to_string(),
+    ]
+    .into_iter()
+    .collect();
     let need_notify = signals
         .into_iter()
         .filter(|(tf, _signal)| !excluded_tfs.contains(tf))
