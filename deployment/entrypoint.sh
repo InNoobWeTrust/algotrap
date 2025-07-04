@@ -4,8 +4,8 @@
 set -e
 
 # Check for required environment variables
-if [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$PROJECT_NAME" ]; then
-  echo "Error: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, and PROJECT_NAME must be set."
+if [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_PAGES_PROJECT_NAME" ]; then
+  echo "Error: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, and CLOUDFLARE_PAGES_PROJECT_NAME must be set."
   exit 1
 fi
 
@@ -32,6 +32,6 @@ echo "Output prepared for deployment."
 
 # Deploy directly to production
 echo "Deploying to Cloudflare Pages..."
-wrangler pages deploy "$OUTPUT_DIR" --project-name="$PROJECT_NAME"
+wrangler pages deploy "$OUTPUT_DIR" --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME"
 
 echo "Deployment successful!"

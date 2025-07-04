@@ -1,12 +1,14 @@
+use algotrap::ext::ntfy;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
 use algotrap::ta::prelude::*;
 use core::error::Error;
+use dotenv::dotenv;
 use futures::future::join_all;
 use minijinja::render;
 use polars::prelude::*;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 const SYMBOL: &str = "BTC-USDT";
@@ -15,9 +17,12 @@ const TOL_PERCENT: f64 = 0.618;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Load dotenv
+    dotenv().ok();
+
     let client = ext::bingx::BingXClient::default();
 
-    let tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"];
+    let tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M"];
     let all_dfs = join_all(tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for BTC-USDT perpetual
         client
@@ -29,17 +34,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .into_iter()
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
-            let mut df = process_data(&klines).expect("Failed to process data");
-            let df_json = df_to_json(&mut df).expect("Failed to serialize data frame to json");
-            Some((tf, df_json))
+            let df = process_data(&klines).expect("Failed to process data");
+            Some((tf, df))
         }
         Err(err) => {
-            eprintln!("Error: {:?}", err);
+            eprintln!("Error: {err:?}");
             None
         }
     })
-    .collect::<HashMap<_, _>>();
-    let df_json = serde_json::to_string(&all_dfs)?;
+    .collect::<HashMap<String, DataFrame>>();
+    let all_dfs_serialized: HashMap<String, Value> = all_dfs
+        .iter()
+        .map(|(tf, df)| {
+            let df_json =
+                df_to_json(&mut df.clone()).expect("Failed to serialize data frame to json");
+            (tf.to_string(), df_json)
+        })
+        .collect();
+    let df_json = serde_json::to_string(&all_dfs_serialized)?;
     let tfs_json = serde_json::to_string(&tfs)?;
     let html_vars = TdvHtmlVars {
         dataset: df_json,
@@ -51,6 +63,64 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     let tdv_html = render_tdv_html(&html_vars);
     tokio::fs::write(format!("tdv.BingX.{SYMBOL}.html"), tdv_html).await?;
+    notify(&all_dfs).await?;
+    Ok(())
+}
+
+async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Error>> {
+    let signals: HashMap<String, i32> = all_dfs
+        .iter()
+        .map(|(tf, df)| {
+            let second_last_row = df.slice(-2, 1);
+            let signal: i32 = second_last_row
+                .column("Climax Signal")
+                .expect("Failed to get signal column")
+                .get(0)
+                .expect("Cannot get signal from last confirmed candle")
+                .extract::<i32>()
+                .unwrap();
+            (tf.to_string(), signal)
+        })
+        .collect();
+    let excluded_tfs: HashSet<_> = ["1m".to_string(), "5m".to_string()].into_iter().collect();
+    let need_notify = signals
+        .into_iter()
+        .filter(|(tf, _signal)| !excluded_tfs.contains(tf))
+        .all(|(_tf, signal)| signal != 0);
+
+    let force_noti = std::env::var("NTFY_ALWAYS");
+    let force_noti = force_noti.ok().is_some_and(|s| !s.is_empty());
+    if force_noti || need_notify {
+        let records_serialized: HashMap<String, Value> = all_dfs
+            .iter()
+            .map(|(tf, df)| {
+                let df = df
+                    .clone()
+                    .lazy()
+                    .select([col("RSSI"), col("ATR Reversion Percent")])
+                    .collect()
+                    .expect("Failed to extract columns");
+                let df_json = df_to_json(&mut df.slice(-2, 1))
+                    .expect("Failed to serialize data frame to json");
+                (tf.to_string(), df_json)
+            })
+            .collect();
+        let records_json = serde_json::to_string(&records_serialized)?;
+
+        let topic = std::env::var("NTFY_TOPIC")?;
+        let pages_pj_name = std::env::var("CLOUDFLARE_PAGES_PROJECT_NAME")?;
+        let action_url = format!("https://{pages_pj_name}.pages.dev/");
+        ntfy::send_ntfy_notification(
+            &topic,
+            &format!("Last stats:\n{records_json}"),
+            Some("Abnormal price movements"),
+            Some("5"),
+            None,
+            Some(&action_url),
+            Some("Open chart"),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -173,7 +243,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
 <html class="sl-theme-dark">
   <head>
     <meta charset="utf-8" />
-    <title>ECharts</title>
+    <title>BTC-USDT (InNoobWeTrust™)</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
     <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
