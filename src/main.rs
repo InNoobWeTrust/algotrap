@@ -22,7 +22,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let client = ext::bingx::BingXClient::default();
 
-    let tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M"];
+    let tfs = std::env::var("TFS")?;
+    let tfs: Vec<_> = tfs.split(",").collect();
+    //let tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M"];
     let all_dfs = join_all(tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for BTC-USDT perpetual
         client
@@ -82,15 +84,11 @@ async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Erro
             (tf.to_string(), signal)
         })
         .collect();
-    let excluded_tfs: HashSet<_> = [
-        "1m".to_string(),
-        "5m".to_string(),
-        "1d".to_string(),
-        "1w".to_string(),
-        "1M".to_string(),
-    ]
-    .into_iter()
-    .collect();
+    let ntfy_tf_exclusion = std::env::var("NTFY_TF_EXCLUSION")?;
+    let excluded_tfs: HashSet<_> = ntfy_tf_exclusion
+        .split(",")
+        .map(|s| s.to_string())
+        .collect();
     let need_notify = signals
         .into_iter()
         .filter(|(tf, _signal)| !excluded_tfs.contains(tf))
