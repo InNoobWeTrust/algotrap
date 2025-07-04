@@ -5,3 +5,4 @@ Cargo.lock
 echarts.*.html
 tdv.*.html
 .env
+k8s/secret.yaml

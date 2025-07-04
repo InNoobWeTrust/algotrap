@@ -26,3 +26,27 @@ I'm having enough with people that are trying to defame and attacking me as well
 You can browse my repos and do whatever you want with it, even call it stupid or crazy, I don't care. But don't try to exploit me anymore ok?
 
 I'm tired with you all bothering me constantly, I don't want to trace your information and hurt everyone that are precious to you due to your selfishness, please consider your attitude when contacting me. If you have bad intentions, be prepared that I will have reciprocal actions to make you suffer the mental pain that I'm having for years. You have been warned! Fuck you all! 😃
+
+---
+
+## Deployment on Kubernetes (e.g., with OrbStack)
+
+This project uses Kubernetes for deployment, with secrets managed via a templating script.
+
+### Generating Kubernetes Secrets
+
+The `k8s/secret.yaml` file is generated from `k8s/secret.yaml.template` using values from your `.env` file.
+
+1.  **Create your `.env` file**: Ensure you have a `.env` file in the project root with all necessary environment variables. You can use `.env.example` as a reference.
+
+2.  **Generate the secret**: Run the generation script from the `deployment` directory:
+    ```bash
+    ./deployment/generate_secret.sh
+    ```
+    This will create or update `k8s/secret.yaml` with your base64-encoded secret values.
+
+3.  **Apply Kubernetes configurations**: Once `k8s/secret.yaml` is generated, you can apply your Kubernetes configurations:
+    ```bash
+    kubectl apply -f k8s/
+    ```
+    If using OrbStack, ensure your Kubernetes cluster is running and configured correctly.
