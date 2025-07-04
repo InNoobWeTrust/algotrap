@@ -22,6 +22,7 @@ args = ["-c", """
 """]
 
 [tasks.k8s_deploy]
+dependencies = ["dockerbuild"]
 command = "bash"
 args = ["-c", """
   ./deployment/generate_secret.sh && \

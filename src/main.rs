@@ -10,6 +10,7 @@ use polars::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
+use tap::prelude::*;
 
 const SYMBOL: &str = "BTC-USDT";
 const SL_PERCENT: f64 = 0.1;
@@ -90,12 +91,14 @@ async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Erro
         .map(|s| s.to_string())
         .collect();
     let need_notify = signals
+        .clone()
         .into_iter()
         .filter(|(tf, _signal)| !excluded_tfs.contains(tf))
-        .all(|(_tf, signal)| signal != 0);
+        .any(|(_tf, signal)| signal != 0);
 
     let force_noti = std::env::var("NTFY_ALWAYS");
     let force_noti = force_noti.ok().is_some_and(|s| !s.is_empty());
+    dbg!(signals, need_notify, force_noti);
     if force_noti || need_notify {
         let records_serialized: HashMap<String, Value> = all_dfs
             .iter()
