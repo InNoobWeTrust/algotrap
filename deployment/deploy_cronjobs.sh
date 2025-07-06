@@ -48,8 +48,7 @@ for env_file in "$ENV_DIR"/*.env; do
         -e "s/{{CLOUDFLARE_PAGES_PROJECT_NAME}}/$(echo -n "$CLOUDFLARE_PAGES_PROJECT_NAME" | base64)/g" \
         -e "s/{{NTFY_TOPIC}}/$(echo -n "$NTFY_TOPIC" | base64)/g" \
         -e "s/{{NTFY_TF_EXCLUSION}}/$(echo -n "$NTFY_TF_EXCLUSION" | base64)/g" \
-        -e "s/{{NTFY_ALWAYS}}/$(echo -n "$NTFY_ALWAYS" | base64)/g" \
-        "$K8S_DIR/secret.yaml.template" > "$tmp_dir/secret.yaml"
+        -e "s/{{SYMBOL}}/$(echo -n "$SYMBOL" | base64)/g"         -e "s/{{SL_PERCENT}}/$(echo -n "$SL_PERCENT" | base64)/g"         -e "s/{{TOL_PERCENT}}/$(echo -n "$TOL_PERCENT" | base64)/g"         -e "s/{{NTFY_ALWAYS}}/$(echo -n "$NTFY_ALWAYS" | base64)/g"         "$K8S_DIR/secret.yaml.template" > "$tmp_dir/secret.yaml"
 
     # Generate the cronjob.yaml from the template
     sed -e "s/{{CRONJOB_NAME}}/$cronjob_name/g" \
