@@ -2,6 +2,8 @@ use algotrap::ext::ntfy;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
 use algotrap::ta::prelude::*;
+use chrono::Local;
+mod time_utils;
 use core::error::Error;
 use dotenv::dotenv;
 use futures::future::join_all;
@@ -11,6 +13,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
+
+use crate::time_utils::is_closing_timeframe;
 
 #[derive(Debug, Clone, Deserialize)]
 struct EnvConf {
@@ -82,8 +86,10 @@ async fn notify(
     all_dfs: &HashMap<String, DataFrame>,
     conf: &EnvConf,
 ) -> Result<(), Box<dyn Error>> {
+    let excluded_tfs: HashSet<_> = conf.ntfy_tf_exclusion.iter().cloned().collect();
     let signals: HashMap<String, i32> = all_dfs
         .iter()
+        .filter(|(tf, _df)| !excluded_tfs.contains(tf.as_str()))
         .map(|(tf, df)| {
             let second_last_row = df.slice(-2, 1);
             let signal: i32 = second_last_row
@@ -96,12 +102,9 @@ async fn notify(
             (tf.to_string(), signal)
         })
         .collect();
-    let excluded_tfs: HashSet<_> = conf.ntfy_tf_exclusion.iter().cloned().collect();
-    let need_notify = signals
-        .clone()
-        .into_iter()
-        .filter(|(tf, _signal)| !excluded_tfs.contains(tf))
-        .any(|(_tf, signal)| signal != 0);
+    let need_notify = signals.clone().into_iter().any(|(tf, signal)| {
+        signal != 0 && is_closing_timeframe(tf.as_str(), Local::now()).unwrap_or(false)
+    });
 
     dbg!(signals, need_notify, conf.ntfy_always);
     if conf.ntfy_always || need_notify {
