@@ -33,3 +33,18 @@ args = ["-c", """
 [tasks.trigger-nightly-workflow]
 command = "gh"
 args = ["workflow", "run", "nightly.yml"]
+
+[tasks.logs-cronjob]
+command = "bash"
+args = ["-c", """
+  for job in $(kubectl get jobs -o=jsonpath='{.items[*].metadata.name}'); do
+    echo "--- Logs for job: $job ---";
+    pod=$(kubectl get pods -l job-name=$job -o=jsonpath='{.items[0].metadata.name}' 2>/dev/null);
+    if [ -n "$pod" ]; then
+      kubectl logs "$pod";
+    else
+      echo "No active pod found for job $job";
+    fi;
+    echo "--- End of logs for job: $job ---";
+  done
+"""]
