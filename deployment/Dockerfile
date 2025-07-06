@@ -8,7 +8,7 @@ RUN rustup target add x86_64-unknown-linux-musl
 WORKDIR /app
 
 # Copy manifests from the project root
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 # Cache dependencies
 RUN mkdir src && echo "fn main() {println!(\"dummy\");}" > src/main.rs
