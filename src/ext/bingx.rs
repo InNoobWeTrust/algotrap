@@ -54,7 +54,7 @@ impl BingXClient {
         symbol: &str,
         interval: &impl Display,
         limit: u32,
-    ) -> Result<Vec<Kline>, Box<dyn Error>> {
+    ) -> Result<Vec<Kline>, Box<dyn Error + Send + Sync>> {
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

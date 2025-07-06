@@ -10,6 +10,7 @@ use dotenv::dotenv;
 use futures::future::join_all;
 use minijinja::render;
 use polars::prelude::*;
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -30,7 +31,7 @@ struct EnvConf {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Load dotenv
     dotenv().ok();
 
@@ -39,18 +40,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let client = ext::bingx::BingXClient::default();
 
-    let all_dfs = join_all(conf.tfs.iter().map(async |tf| {
-        // Fetch 15-minute candles for symbol's perpetual
-        client
-            .get_futures_klines(&conf.symbol, &tf.to_string(), MAX_LIMIT)
-            .await
-            .map(|k| (*tf, k))
-    }))
+    let all_dfs = join_all(
+        conf.tfs
+            .iter()
+            .map(|tf| {
+                let client = &client;
+                let symbol = conf.symbol.clone();
+                async move {
+                    // Fetch 15-minute candles for symbol's perpetual
+                    client
+                        .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
+                        .await
+                        .map(|k| (*tf, k))
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
     .await
-    .into_iter()
+    .into_par_iter()
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
-            let df = process_data(&klines, &conf).expect("Failed to process data");
+            let df = process_data(klines.as_slice(), &conf).expect("Failed to process data");
             Some((tf, df))
         }
         Err(err) => {
@@ -60,7 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })
     .collect::<HashMap<Timeframe, DataFrame>>();
     let all_dfs_serialized: HashMap<String, Value> = all_dfs
-        .iter()
+        .par_iter()
         .map(|(tf, df)| {
             let df_json =
                 df_to_json(&mut df.clone()).expect("Failed to serialize data frame to json");
@@ -86,10 +96,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn notify(
     all_dfs: &HashMap<Timeframe, DataFrame>,
     conf: &EnvConf,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let excluded_tfs: HashSet<_> = conf.ntfy_tf_exclusion.iter().cloned().collect();
     let signals: HashMap<Timeframe, i32> = all_dfs
-        .iter()
+        .par_iter()
         .filter(|(tf, _df)| !excluded_tfs.contains(tf))
         .map(|(tf, df)| {
             let second_last_row = df.slice(-2, 1);
@@ -105,14 +115,14 @@ async fn notify(
         .collect();
     let need_notify = signals.clone().into_iter().any(|(tf, signal)| {
         signal != 0
-            && is_closing_timeframe(&tf, Utc::now(), Some(Duration::seconds(10)))
-                .unwrap_or(false)
+            && is_closing_timeframe(&tf, Utc::now(), Some(Duration::seconds(10))).unwrap_or(false)
     });
 
     dbg!(signals, need_notify, conf.ntfy_always);
     if conf.ntfy_always || need_notify {
         let records_serialized: HashMap<String, Value> = all_dfs
-            .iter()
+            .par_iter()
+            .filter(|(tf, _df)| !excluded_tfs.contains(tf))
             .map(|(tf, df)| {
                 let df = df
                     .clone()
@@ -125,6 +135,7 @@ async fn notify(
                 (tf.to_string(), df_json)
             })
             .collect();
+        dbg!(&records_serialized);
         let records_json = serde_json::to_string(&records_serialized)?;
 
         let action_url = format!("https://{}.pages.dev/", conf.cloudflare_pages_project_name);
@@ -226,11 +237,10 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
 fn process_data(klines: &[Kline], conf: &EnvConf) -> Result<DataFrame, Box<dyn Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
     let df_with_indicators = df.lazy().with_columns(indicators(conf)).collect().unwrap();
-    println!("{df_with_indicators:?}");
     Ok(df_with_indicators)
 }
 
-fn df_to_json(df: &mut DataFrame) -> Result<Value, Box<dyn Error>> {
+fn df_to_json(df: &mut DataFrame) -> Result<Value, Box<dyn Error + Send + Sync>> {
     let mut file = Cursor::new(Vec::new());
     JsonWriter::new(&mut file)
         .with_json_format(JsonFormat::Json)

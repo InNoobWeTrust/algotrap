@@ -69,12 +69,14 @@ args = ["-c", """
 
 [tasks.k8s-verify-all-secrets]
 command = "bash"
-args = ["-c", """
+args = [
+  "-c",
+  """
   ENV_DIR="./deployment/env_configs"
   for env_file in "$ENV_DIR"/*.env; do
     if [ -f "$env_file" ]; then
       filename=$(basename -- "$env_file")
-      symbol_name=$(echo "${filename%.*}" | tr '[:upper:]' '[:lower:]')
+      symbol_name=$(echo "${filename%.*}" | tr '[:upper:]' '[:lower:]")
       secret_name="algotrap-secrets-$symbol_name"
 
       echo "Verifying secret for symbol: $symbol_name (Secret: $secret_name)"
@@ -90,7 +92,7 @@ args = ["-c", """
           value=$(echo "$value" | xargs)
 
           # Get base64 encoded value from secret
-          encoded_secret_value=$(echo "$secret_data" | jq -r ".\"$key\"")
+          encoded_secret_value=$(echo "$secret_data" | base64 --decode)
           decoded_secret_value=$(echo "$encoded_secret_value" | base64 --decode)
 
           if [ "$value" = "$decoded_secret_value" ]; then
@@ -103,4 +105,10 @@ args = ["-c", """
       echo "--------------------------------------------------"
     fi
   done
-"""]
+""",
+]
+
+[tasks.quick-bench]
+command = "hyperfine"
+args = ["--warmup", "1", "cargo run -r"]
+install_crate = "hyperfine"
