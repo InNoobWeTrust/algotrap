@@ -10,8 +10,8 @@ spec:
         spec:
           containers:
           - name: algotrap
-            image: algotrap:latest
-            imagePullPolicy: IfNotPresent
+            image: ghcr.io/innoobwetrust/algotrap:latest
+            imagePullPolicy: Always
             envFrom:
             - secretRef:
                 name: algotrap-secrets

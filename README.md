@@ -50,3 +50,23 @@ The `k8s/secret.yaml` file is generated from `k8s/secret.yaml.template` using va
     kubectl apply -f k8s/
     ```
     If using OrbStack, ensure your Kubernetes cluster is running and configured correctly.
+
+### Docker Image on GitHub Container Registry
+
+The project includes a GitHub Actions workflow to automatically build and push a Docker image to the GitHub Container Registry. This workflow runs nightly and can also be triggered manually.
+
+**Image Location**:
+
+The image is available at:
+`ghcr.io/innoobwetrust/algotrap`
+
+You can pull the latest image with:
+```bash
+docker pull ghcr.io/innoobwetrust/algotrap:latest
+```
+
+**Workflow Authentication**:
+
+The GitHub Actions workflow uses the default `GITHUB_TOKEN` to authenticate with the GitHub Container Registry. The `permissions` for `packages: write` are set in the workflow file (`.github/workflows/nightly.yml`) to grant the necessary access. No further setup is required for the workflow to push images.
+
+For users who wish to push images manually from their local machine, they will need to authenticate using a Personal Access Token (PAT) with the `write:packages` scope.
