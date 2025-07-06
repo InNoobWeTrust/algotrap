@@ -140,6 +140,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set repository name to lowercase
+        id: repo_lowercase
+        run: echo "repo=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -147,5 +151,5 @@ jobs:
           file: deployment/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:nightly-${{ github.run_id }}
+            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}:latest
+            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}:nightly-${{ github.run_id }}
