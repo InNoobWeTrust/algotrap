@@ -40,15 +40,21 @@ for env_file in "$ENV_DIR"/*.env; do
     secret_name="algotrap-secrets-$symbol_name"
     cronjob_name="algotrap-cronjob-$symbol_name"
 
+    # Read variable names from .env.template
+    ENV_VARS=$(awk -F'=' '/^[A-Z_]+=/{print $1}' "$K8S_DIR/../.env.template" | tr '\n' ' ')
+
+    SECRET_DATA_CONTENT=""
+    for var_name in $ENV_VARS; do
+      # Get the value of the variable (already sourced from .env file)
+      var_value=$(printf %s "${!var_name}")
+      # Base64 encode the value and append to SECRET_DATA_CONTENT
+      SECRET_DATA_CONTENT+="  $var_name: \"$(echo -n "$var_value" | base64)\"\n"
+    done
+
     # Generate the secret.yaml from the template
-    sed -e "s/{{SECRET_NAME}}/$secret_name/g" \
-        -e "s/{{TFS}}/$(echo -n "$TFS" | base64)/g" \
-        -e "s/{{CLOUDFLARE_ACCOUNT_ID}}/$(echo -n "$CLOUDFLARE_ACCOUNT_ID" | base64)/g" \
-        -e "s/{{CLOUDFLARE_API_TOKEN}}/$(echo -n "$CLOUDFLARE_API_TOKEN" | base64)/g" \
-        -e "s/{{CLOUDFLARE_PAGES_PROJECT_NAME}}/$(echo -n "$CLOUDFLARE_PAGES_PROJECT_NAME" | base64)/g" \
-        -e "s/{{NTFY_TOPIC}}/$(echo -n "$NTFY_TOPIC" | base64)/g" \
-        -e "s/{{NTFY_TF_EXCLUSION}}/$(echo -n "$NTFY_TF_EXCLUSION" | base64)/g" \
-        -e "s/{{SYMBOL}}/$(echo -n "$SYMBOL" | base64)/g"         -e "s/{{SL_PERCENT}}/$(echo -n "$SL_PERCENT" | base64)/g"         -e "s/{{TOL_PERCENT}}/$(echo -n "$TOL_PERCENT" | base64)/g"         -e "s/{{NTFY_ALWAYS}}/$(echo -n "$NTFY_ALWAYS" | base64)/g"         "$K8S_DIR/secret.yaml.template" > "$tmp_dir/secret.yaml"
+    sed -e "s|{{SECRET_NAME}}|$secret_name|g" \
+        -e "s|{{SECRET_DATA}}|$SECRET_DATA_CONTENT|g" \
+        "$K8S_DIR/secret.yaml.template" > "$tmp_dir/secret.yaml"
 
     # Generate the cronjob.yaml from the template
     sed -e "s/{{CRONJOB_NAME}}/$cronjob_name/g" \
