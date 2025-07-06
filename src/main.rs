@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client = ext::bingx::BingXClient::default();
 
     let all_dfs = join_all(conf.tfs.iter().map(async |tf| {
-        // Fetch 15-minute candles for BTC-USDT perpetual
+        // Fetch 15-minute candles for symbol's perpetual
         client
             .get_futures_klines(&conf.symbol, tf, 1440)
             .await
@@ -255,7 +255,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
 <html class="sl-theme-dark">
   <head>
     <meta charset="utf-8" />
-    <title>BTC-USDT (InNoobWeTrust™)</title>
+    <title>{{ symbol }} (InNoobWeTrust™)</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
     <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
