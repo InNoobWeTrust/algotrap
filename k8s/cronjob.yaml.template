@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: algotrap-cronjob
+  name: {{CRONJOB_NAME}}
 spec:
   schedule: "*/5 * * * *"
   jobTemplate:
@@ -14,5 +14,5 @@ spec:
             imagePullPolicy: Always
             envFrom:
             - secretRef:
-                name: algotrap-secrets
+                name: {{SECRET_NAME}}
           restartPolicy: Never

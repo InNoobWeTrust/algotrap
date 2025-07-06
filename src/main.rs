@@ -7,29 +7,37 @@ use dotenv::dotenv;
 use futures::future::join_all;
 use minijinja::render;
 use polars::prelude::*;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
-use tap::prelude::*;
 
-const SYMBOL: &str = "BTC-USDT";
-const SL_PERCENT: f64 = 0.1;
-const TOL_PERCENT: f64 = 0.618;
+#[derive(Debug, Clone, Deserialize)]
+struct EnvConf {
+    symbol: String,
+    sl_percent: f64,
+    tol_percent: f64,
+    tfs: Vec<String>,
+    cloudflare_pages_project_name: String,
+    ntfy_topic: String,
+    ntfy_tf_exclusion: Vec<String>,
+    ntfy_always: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Load dotenv
     dotenv().ok();
 
+    // Load env config
+    let conf: EnvConf = envy::from_env()?;
+
     let client = ext::bingx::BingXClient::default();
 
-    let tfs = std::env::var("TFS")?;
-    let tfs: Vec<_> = tfs.split(",").collect();
-    //let tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M"];
-    let all_dfs = join_all(tfs.iter().map(async |tf| {
+    let all_dfs = join_all(conf.tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for BTC-USDT perpetual
         client
-            .get_futures_klines(SYMBOL, tf, 1440)
+            .get_futures_klines(&conf.symbol, tf, 1440)
             .await
             .map(|k| (tf.to_string(), k))
     }))
@@ -37,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .into_iter()
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
-            let df = process_data(&klines).expect("Failed to process data");
+            let df = process_data(&klines, &conf).expect("Failed to process data");
             Some((tf, df))
         }
         Err(err) => {
@@ -55,22 +63,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect();
     let df_json = serde_json::to_string(&all_dfs_serialized)?;
-    let tfs_json = serde_json::to_string(&tfs)?;
+    let tfs_json = serde_json::to_string(&conf.tfs)?;
     let html_vars = TdvHtmlVars {
         dataset: df_json,
-        symbol: "BingX:BTC-USDT".to_string(),
+        symbol: format!("BingX:{}", conf.symbol),
         tfs: tfs_json,
         default_tf: "5m".to_string(),
-        sl_percent: format!("{:.0}", SL_PERCENT * 100.),
-        tol_percent: format!("{:.2}", TOL_PERCENT * 100.),
+        sl_percent: format!("{:.0}", conf.sl_percent * 100.),
+        tol_percent: format!("{:.2}", conf.tol_percent * 100.),
     };
     let tdv_html = render_tdv_html(&html_vars);
-    tokio::fs::write(format!("tdv.BingX.{SYMBOL}.html"), tdv_html).await?;
-    notify(&all_dfs).await?;
+    tokio::fs::write(format!("tdv.BingX.{}.html", conf.symbol), tdv_html).await?;
+    notify(&all_dfs, &conf).await?;
     Ok(())
 }
 
-async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Error>> {
+async fn notify(
+    all_dfs: &HashMap<String, DataFrame>,
+    conf: &EnvConf,
+) -> Result<(), Box<dyn Error>> {
     let signals: HashMap<String, i32> = all_dfs
         .iter()
         .map(|(tf, df)| {
@@ -85,21 +96,15 @@ async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Erro
             (tf.to_string(), signal)
         })
         .collect();
-    let ntfy_tf_exclusion = std::env::var("NTFY_TF_EXCLUSION")?;
-    let excluded_tfs: HashSet<_> = ntfy_tf_exclusion
-        .split(",")
-        .map(|s| s.to_string())
-        .collect();
+    let excluded_tfs: HashSet<_> = conf.ntfy_tf_exclusion.iter().cloned().collect();
     let need_notify = signals
         .clone()
         .into_iter()
         .filter(|(tf, _signal)| !excluded_tfs.contains(tf))
         .any(|(_tf, signal)| signal != 0);
 
-    let force_noti = std::env::var("NTFY_ALWAYS");
-    let force_noti = force_noti.ok().is_some_and(|s| !s.is_empty());
-    dbg!(signals, need_notify, force_noti);
-    if force_noti || need_notify {
+    dbg!(signals, need_notify, conf.ntfy_always);
+    if conf.ntfy_always || need_notify {
         let records_serialized: HashMap<String, Value> = all_dfs
             .iter()
             .map(|(tf, df)| {
@@ -116,13 +121,11 @@ async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Erro
             .collect();
         let records_json = serde_json::to_string(&records_serialized)?;
 
-        let topic = std::env::var("NTFY_TOPIC")?;
-        let pages_pj_name = std::env::var("CLOUDFLARE_PAGES_PROJECT_NAME")?;
-        let action_url = format!("https://{pages_pj_name}.pages.dev/");
+        let action_url = format!("https://{}.pages.dev/", conf.cloudflare_pages_project_name);
         ntfy::send_ntfy_notification(
-            &topic,
-            &format!("Last stats:\n{records_json}"),
-            Some("Abnormal price movements"),
+            &conf.ntfy_topic,
+            &format!("{0} last stats:\n{1}", conf.symbol, records_json),
+            Some(&format!("{}: Abnormal price movements", conf.symbol)),
             Some("5"),
             None,
             Some(&action_url),
@@ -133,7 +136,7 @@ async fn notify(all_dfs: &HashMap<String, DataFrame>) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn indicators() -> Vec<Expr> {
+fn indicators(conf: &EnvConf) -> Vec<Expr> {
     let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
 
     // Axis conversion
@@ -190,7 +193,7 @@ fn indicators() -> Vec<Expr> {
         .alias("Climax Signal");
 
     // Miscs
-    let lvrg_adjust = SL_PERCENT / (1. + TOL_PERCENT);
+    let lvrg_adjust = conf.sl_percent / (1. + conf.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("Leverage");
 
     // Selected columns to export
@@ -214,9 +217,9 @@ fn indicators() -> Vec<Expr> {
     ]
 }
 
-fn process_data(klines: &[Kline]) -> Result<DataFrame, Box<dyn Error>> {
+fn process_data(klines: &[Kline], conf: &EnvConf) -> Result<DataFrame, Box<dyn Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df.lazy().with_columns(indicators()).collect().unwrap();
+    let df_with_indicators = df.lazy().with_columns(indicators(conf)).collect().unwrap();
     println!("{df_with_indicators:?}");
     Ok(df_with_indicators)
 }

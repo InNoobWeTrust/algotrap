@@ -23,12 +23,7 @@ args = ["-c", """
 
 [tasks.k8s-deploy]
 command = "bash"
-args = ["-c", """
-  ./deployment/generate_secret.sh && \
-  kubectl apply -f k8s/ && \
-  kubectl get cronjob algotrap-cronjob && \
-  kubectl get secret algotrap-secrets
-"""]
+args = ["./deployment/deploy_cronjobs.sh"]
 
 [tasks.trigger-nightly-workflow]
 command = "gh"

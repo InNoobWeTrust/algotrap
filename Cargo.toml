@@ -30,3 +30,4 @@ minijinja = "2.10"
 futures = "0.3.31"
 openssl = { version = "0.10", features = ["vendored"] }
 dotenv = "0.15.0"
+envy = "0.4"
