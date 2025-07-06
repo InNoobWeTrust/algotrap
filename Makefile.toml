@@ -29,9 +29,15 @@ args = ["./deployment/deploy_cronjobs.sh"]
 command = "gh"
 args = ["workflow", "run", "nightly.yml"]
 
-[tasks.logs-cronjob]
+[tasks.k8s-status]
+command = "kubectl"
+args = ["get", "all"]
+
+[tasks.k8s-cronjob-logs]
 command = "bash"
-args = ["-c", """
+args = [
+  "-c",
+  """
   for job in $(kubectl get jobs -o=jsonpath='{.items[*].metadata.name}'); do
     echo "--- Logs for job: $job ---";
     pod=$(kubectl get pods -l job-name=$job -o=jsonpath='{.items[0].metadata.name}' 2>/dev/null);
@@ -41,5 +47,22 @@ args = ["-c", """
       echo "No active pod found for job $job";
     fi;
     echo "--- End of logs for job: $job ---";
+  done
+""",
+]
+
+[tasks.k8s-cronjob-suspend]
+command = "bash"
+args = ["-c", """
+  for job in $(kubectl get cronjobs -o=jsonpath='{.items[*].metadata.name}'); do
+    kubectl patch cronjob "$job" -p '{"spec" : {"suspend" : true}}';
+  done
+"""]
+
+[tasks.k8s-cronjob-resume]
+command = "bash"
+args = ["-c", """
+  for job in $(kubectl get cronjobs -o=jsonpath='{.items[*].metadata.name}'); do
+    kubectl patch cronjob "$job" -p '{"spec" : {"suspend" : false}}';
   done
 """]
