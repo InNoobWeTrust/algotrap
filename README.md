@@ -29,27 +29,52 @@ I'm tired with you all bothering me constantly, I don't want to trace your infor
 
 ---
 
-## Deployment on Kubernetes (e.g., with OrbStack)
+## Deployment
 
-This project uses Kubernetes for deployment, with secrets managed via a templating script.
+This project supports various deployment methods: local development, Docker, and Kubernetes.
 
-### Generating Kubernetes Secrets
+### Local Development
 
-The `k8s/secret.yaml` file is generated from `k8s/secret.yaml.template` using values from your `.env` file.
+For local development, you can run the application directly using `Makefile.toml` and a `.env` file in the project root.
 
 1.  **Create your `.env` file**: Ensure you have a `.env` file in the project root with all necessary environment variables. You can use `.env.example` as a reference.
-
-2.  **Generate the secret**: Run the generation script from the `deployment` directory:
+2.  **Run with Makefile**: Use `cargo make` commands to run the application. For example:
     ```bash
-    ./deployment/generate_secret.sh
+    cargo make run
     ```
-    This will create or update `k8s/secret.yaml` with your base64-encoded secret values.
+    Refer to `Makefile.toml` for available commands.
 
-3.  **Apply Kubernetes configurations**: Once `k8s/secret.yaml` is generated, you can apply your Kubernetes configurations:
-    ```bash
-    kubectl apply -f k8s/
-    ```
-    If using OrbStack, ensure your Kubernetes cluster is running and configured correctly.
+### Docker Usage
+
+This section guides you on how to build and run the application using Docker locally, incorporating your local code changes and `.env` file.
+
+#### Building the Docker Image Locally
+
+To build the Docker image from your local codebase, navigate to the project root and run:
+
+```bash
+docker build -t algotrap:latest -f deployment/Dockerfile .
+```
+
+This command builds an image tagged `algotrap:latest` using the `Dockerfile` located in the `deployment/` directory.
+
+#### Running the Docker Image Locally
+
+To run the locally built Docker image with your local `.env` file, ensure you have a `.env` file in your project root and then execute:
+
+```bash
+if [ ! -f .env ]; then \
+  echo 'Error: .env file not found.'; \
+  exit 1; \
+fi; \
+docker run --rm --env-file .env algotrap
+```
+
+This command:
+- Checks if a `.env` file exists in the current directory.
+- Runs the `algotrap` Docker image.
+- Mounts your local `.env` file into the container, making its environment variables available to the application.
+- `--rm` ensures the container is removed after it exits.
 
 ### Docker Image on GitHub Container Registry
 
@@ -70,3 +95,21 @@ docker pull ghcr.io/innoobwetrust/algotrap:latest
 The GitHub Actions workflow uses the default `GITHUB_TOKEN` to authenticate with the GitHub Container Registry. The `permissions` for `packages: write` are set in the workflow file (`.github/workflows/nightly.yml`) to grant the necessary access. No further setup is required for the workflow to push images.
 
 For users who wish to push images manually from their local machine, they will need to authenticate using a Personal Access Token (PAT) with the `write:packages` scope.
+
+### Kubernetes Deployment (e.g., with OrbStack)
+
+This project uses Kubernetes for deployment, supporting multiple cronjob configurations. Kubernetes secrets and cronjob definitions are generated from templates.
+
+1.  **Create environment-specific `.env` files**: For each cronjob instance you want to deploy, create a `.env` file in the `deployment/env_configs/` directory (e.g., `deployment/env_configs/ETH-USDT.env`). These files will contain the specific environment variables for each cronjob. You can use `deployment/env_configs/ETH-USDT.env.example` as a reference.
+
+2.  **Deploy Kubernetes cronjobs**: Run the cronjob deployment script from the `deployment` directory:
+    ```bash
+    ./deployment/deploy_cronjobs.sh
+    ```
+    This script iterates through the `.env` files in `deployment/env_configs/`, generates a `cronjob.yaml` and a symbol-specific `secret.yaml` for each, and applies them to your Kubernetes cluster. This script handles both secret and cronjob generation and deployment.
+
+3.  **Apply other Kubernetes configurations**: If you have other Kubernetes configurations (e.g., deployments, services) besides the cronjobs handled by `deploy_cronjobs.sh`, you can apply them:
+    ```bash
+    kubectl apply -f k8s/
+    ```
+    If using OrbStack, ensure your Kubernetes cluster is running and configured correctly.
