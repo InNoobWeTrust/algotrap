@@ -96,7 +96,7 @@ args = ["-c", """
           if [ "$value" = "$decoded_secret_value" ]; then
             echo "  ✅ $key: Match"
           else
-            echo "  ❌ $key: Mismatch (Expected: '$value', Got: '$decoded_secret_value')"
+            echo "  ❌ $key: Mismatch (Expected: $value, Got: $decoded_secret_value)"
           fi
         fi
       done < "$env_file"
