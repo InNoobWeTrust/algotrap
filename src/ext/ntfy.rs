@@ -36,8 +36,8 @@ pub async fn send_ntfy_notification(
     if res.status().is_success() {
         println!("Notification sent successfully!");
     } else {
-        eprintln!("Failed to send notification: {}", res.status());
-        eprintln!("Response: {:?}", res.text().await?);
+        eprintln!("Failed to send notification: {:#?}", res.status());
+        eprintln!("Response: {:#?}", res.text().await?);
     }
 
     Ok(())

@@ -1,8 +1,9 @@
+use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::ext::ntfy;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
 use algotrap::ta::prelude::*;
-use chrono::Local;
+use chrono::{Duration, Utc};
 mod time_utils;
 use core::error::Error;
 use dotenv::dotenv;
@@ -21,10 +22,10 @@ struct EnvConf {
     symbol: String,
     sl_percent: f64,
     tol_percent: f64,
-    tfs: Vec<String>,
+    tfs: Vec<Timeframe>,
     cloudflare_pages_project_name: String,
     ntfy_topic: String,
-    ntfy_tf_exclusion: Vec<String>,
+    ntfy_tf_exclusion: Vec<Timeframe>,
     ntfy_always: bool,
 }
 
@@ -41,9 +42,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let all_dfs = join_all(conf.tfs.iter().map(async |tf| {
         // Fetch 15-minute candles for symbol's perpetual
         client
-            .get_futures_klines(&conf.symbol, tf, 1440)
+            .get_futures_klines(&conf.symbol, &tf.to_string(), MAX_LIMIT)
             .await
-            .map(|k| (tf.to_string(), k))
+            .map(|k| (*tf, k))
     }))
     .await
     .into_iter()
@@ -53,11 +54,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Some((tf, df))
         }
         Err(err) => {
-            eprintln!("Error: {err:?}");
+            eprintln!("Error: {err:#?}");
             None
         }
     })
-    .collect::<HashMap<String, DataFrame>>();
+    .collect::<HashMap<Timeframe, DataFrame>>();
     let all_dfs_serialized: HashMap<String, Value> = all_dfs
         .iter()
         .map(|(tf, df)| {
@@ -83,13 +84,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn notify(
-    all_dfs: &HashMap<String, DataFrame>,
+    all_dfs: &HashMap<Timeframe, DataFrame>,
     conf: &EnvConf,
 ) -> Result<(), Box<dyn Error>> {
     let excluded_tfs: HashSet<_> = conf.ntfy_tf_exclusion.iter().cloned().collect();
-    let signals: HashMap<String, i32> = all_dfs
+    let signals: HashMap<Timeframe, i32> = all_dfs
         .iter()
-        .filter(|(tf, _df)| !excluded_tfs.contains(tf.as_str()))
+        .filter(|(tf, _df)| !excluded_tfs.contains(tf))
         .map(|(tf, df)| {
             let second_last_row = df.slice(-2, 1);
             let signal: i32 = second_last_row
@@ -99,11 +100,13 @@ async fn notify(
                 .expect("Cannot get signal from last confirmed candle")
                 .extract::<i32>()
                 .unwrap();
-            (tf.to_string(), signal)
+            (*tf, signal)
         })
         .collect();
     let need_notify = signals.clone().into_iter().any(|(tf, signal)| {
-        signal != 0 && is_closing_timeframe(tf.as_str(), Local::now()).unwrap_or(false)
+        signal != 0
+            && is_closing_timeframe(&tf, Utc::now(), Some(Duration::seconds(10)))
+                .unwrap_or(false)
     });
 
     dbg!(signals, need_notify, conf.ntfy_always);

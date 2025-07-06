@@ -1,5 +1,6 @@
 use crate::model::Kline;
 use core::error::Error;
+use core::fmt::Display;
 use hex;
 use hmac::{Hmac, Mac};
 use reqwest::Url;
@@ -8,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tap::Pipe;
 
 type HmacSha256 = Hmac<Sha256>;
+pub const MAX_LIMIT: u32 = 1440;
 
 #[derive(Clone)]
 pub struct BingXClient {
@@ -50,7 +52,7 @@ impl BingXClient {
     pub async fn get_futures_klines(
         &self,
         symbol: &str,
-        interval: &str,
+        interval: &impl Display,
         limit: u32,
     ) -> Result<Vec<Kline>, Box<dyn Error>> {
         let time = SystemTime::now()
@@ -69,7 +71,7 @@ impl BingXClient {
         params_vec.sort_by_key(|k| k.0); // BingX requires sorted params for signing
         let query_string = params_vec
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("&");
 
@@ -99,7 +101,7 @@ impl BingXClient {
             .await?;
 
         if response["code"] != 0 {
-            println!("err: {:?}", response);
+            eprintln!("Error: {response:#?}");
         }
 
         Ok(serde_json::from_value(response["data"].clone()).unwrap())

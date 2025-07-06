@@ -1,8 +1,15 @@
-use chrono::{DateTime, Datelike, Duration, Local, Timelike};
+use algotrap::model::Timeframe;
+use chrono::{DateTime, Datelike, Duration, Timelike, Weekday, Utc};
 
-pub fn is_time_multiple_of_period(period: Duration, now: DateTime<Local>) -> bool {
+/// Check if the time now is multiple of period, with optional tolerance
+pub fn is_time_multiple_of_period(
+    period: Duration,
+    now: DateTime<Utc>,
+    tolerance: Option<Duration>,
+) -> bool {
     // Calculate the total seconds from the start of the day
-    let total_seconds_since_midnight = now.num_seconds_from_midnight() as i64;
+    let total_seconds_since_midnight = now.timestamp() as i64;
+    let tolerance_seconds = tolerance.unwrap_or(Duration::seconds(0)).num_seconds();
 
     // Convert the period to seconds
     let period_seconds = period.num_seconds();
@@ -12,90 +19,270 @@ pub fn is_time_multiple_of_period(period: Duration, now: DateTime<Local>) -> boo
         return false; // Avoid division by zero
     }
 
-    total_seconds_since_midnight % period_seconds == 0
+    let remainder = total_seconds_since_midnight % period_seconds;
+
+    // Check if it's exactly a multiple or just after a multiple within tolerance
+    if remainder <= tolerance_seconds {
+        return true;
+    }
+
+    // Check if it's just before a multiple within tolerance
+    if (period_seconds - remainder) <= tolerance_seconds {
+        return true;
+    }
+
+    false
 }
 
-pub fn is_closing_timeframe(tf: &str, now: DateTime<Local>) -> Result<bool, String> {
-    let (value_str, unit) = tf.split_at(tf.len() - 1);
-    let value: i64 = value_str
-        .parse()
-        .map_err(|_| format!("Invalid timeframe value: {}", value_str))?;
+/// Check if the time now is the closing time of timeframe, within an optional tolerance
+/// Valid tf values: 1m, 5m, 15m, 30m, 1h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+pub fn is_closing_timeframe(
+    tf: &Timeframe,
+    now: DateTime<Utc>,
+    tolerance: Option<Duration>,
+) -> Result<bool, String> {
+    let tolerance_seconds = tolerance.unwrap_or(Duration::seconds(0)).num_seconds();
+    let seconds_in_day = Duration::days(1).num_seconds();
 
-    match unit {
-        "m" => Ok(is_time_multiple_of_period(Duration::minutes(value), now)),
-        "h" => Ok(is_time_multiple_of_period(Duration::hours(value), now)),
-        "d" => Ok(is_time_multiple_of_period(Duration::days(value), now)),
-        "w" => Ok(is_time_multiple_of_period(Duration::weeks(value), now)),
-        "M" => Ok(now.day() == 1
-            && now.num_seconds_from_midnight() < 60
-            && (now.month() as i64 % value == 0)),
-        _ => Err(format!("Invalid timeframe unit: {}", unit)),
+    match tf {
+        Timeframe::M1 => Ok(is_time_multiple_of_period(
+            Duration::minutes(1),
+            now,
+            tolerance,
+        )),
+        Timeframe::M5 => Ok(is_time_multiple_of_period(
+            Duration::minutes(5),
+            now,
+            tolerance,
+        )),
+        Timeframe::M15 => Ok(is_time_multiple_of_period(
+            Duration::minutes(15),
+            now,
+            tolerance,
+        )),
+        Timeframe::M30 => Ok(is_time_multiple_of_period(
+            Duration::minutes(30),
+            now,
+            tolerance,
+        )),
+        Timeframe::H1 => Ok(is_time_multiple_of_period(
+            Duration::hours(1),
+            now,
+            tolerance,
+        )),
+        Timeframe::H2 => Ok(is_time_multiple_of_period(
+            Duration::hours(2),
+            now,
+            tolerance,
+        )),
+        Timeframe::H4 => Ok(is_time_multiple_of_period(
+            Duration::hours(4),
+            now,
+            tolerance,
+        )),
+        Timeframe::H6 => Ok(is_time_multiple_of_period(
+            Duration::hours(6),
+            now,
+            tolerance,
+        )),
+        Timeframe::H8 => Ok(is_time_multiple_of_period(
+            Duration::hours(8),
+            now,
+            tolerance,
+        )),
+        Timeframe::H12 => Ok(is_time_multiple_of_period(
+            Duration::hours(12),
+            now,
+            tolerance,
+        )),
+        Timeframe::D1 => {
+            let seconds_from_midnight = now.num_seconds_from_midnight() as i64;
+            Ok(seconds_from_midnight <= tolerance_seconds
+                || (seconds_in_day - seconds_from_midnight) <= tolerance_seconds)
+        }
+        Timeframe::D3 => Ok(is_time_multiple_of_period(
+            Duration::days(3),
+            now,
+            tolerance,
+        )),
+        Timeframe::W1 => {
+            if tolerance_seconds > seconds_in_day {
+                Err(format!(
+                    "Tolerance too big, must be less than a day: {tolerance:#?}"
+                ))
+            } else {
+                let seconds_from_midnight = now.num_seconds_from_midnight() as i64;
+                let is_monday_start = now.weekday() == Weekday::Mon
+                    && (seconds_from_midnight <= tolerance_seconds
+                        || (seconds_in_day - seconds_from_midnight) <= tolerance_seconds);
+                let is_sunday_end = now.weekday() == Weekday::Sun
+                    && (seconds_from_midnight >= seconds_in_day - tolerance_seconds
+                        || seconds_from_midnight <= tolerance_seconds);
+                Ok(is_monday_start || is_sunday_end)
+            }
+        }
+        Timeframe::MOS1 => {
+            if tolerance_seconds > seconds_in_day {
+                Err(format!(
+                    "Tolerance too big, must be less than a day: {tolerance:#?}"
+                ))
+            } else {
+                let seconds_from_midnight = now.num_seconds_from_midnight() as i64;
+                let is_first_day_start = now.day() == 1
+                    && (seconds_from_midnight <= tolerance_seconds
+                        || (seconds_in_day - seconds_from_midnight) <= tolerance_seconds);
+                let is_last_day_end = (now + Duration::days(1)).day() == 1
+                    && (seconds_from_midnight >= seconds_in_day - tolerance_seconds
+                        || seconds_from_midnight <= tolerance_seconds);
+                Ok(is_first_day_start || is_last_day_end)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
     #[test]
-    fn test_is_closing_timeframe() {
-        let dt_jan_1_00_00 = Local.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let dt_jan_1_00_01 = Local.with_ymd_and_hms(2025, 1, 1, 0, 0, 1).unwrap();
-        let dt_jan_2_00_00 = Local.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
-        let dt_feb_1_00_00 = Local.with_ymd_and_hms(2025, 2, 1, 0, 0, 0).unwrap();
-        let dt_mar_1_00_00 = Local.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap();
+    fn test_is_time_multiple_of_period_no_tolerance() {
+        let period = Duration::minutes(5);
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 0).unwrap();
+        assert!(is_time_multiple_of_period(period, now, None));
 
-        // Test 'M' (month)
-        assert!(is_closing_timeframe("1M", dt_jan_1_00_00).unwrap());
-        assert!(!is_closing_timeframe("1M", dt_jan_1_00_01).unwrap());
-        assert!(!is_closing_timeframe("1M", dt_jan_2_00_00).unwrap());
-        assert!(is_closing_timeframe("1M", dt_feb_1_00_00).unwrap());
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 5, 0).unwrap();
+        assert!(is_time_multiple_of_period(period, now, None));
 
-        assert!(is_closing_timeframe("2M", dt_feb_1_00_00).unwrap()); // Feb is 2nd month
-        assert!(!is_closing_timeframe("2M", dt_mar_1_00_00).unwrap()); // Mar is 3rd month
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 1, 0).unwrap();
+        assert!(!is_time_multiple_of_period(period, now, None));
+    }
 
-        let dt_apr_1_00_00 = Local.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
-        let dt_jun_1_00_00 = Local.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
-        let dt_aug_1_00_00 = Local.with_ymd_and_hms(2025, 8, 1, 0, 0, 0).unwrap();
-        let dt_sep_1_00_00 = Local.with_ymd_and_hms(2025, 9, 1, 0, 0, 0).unwrap();
-        let dt_dec_1_00_00 = Local.with_ymd_and_hms(2025, 12, 1, 0, 0, 0).unwrap();
+    #[test]
+    fn test_is_time_multiple_of_period_with_tolerance() {
+        let period = Duration::minutes(5);
+        let tolerance = Some(Duration::seconds(30));
 
-        assert!(is_closing_timeframe("3M", dt_mar_1_00_00).unwrap());
-        assert!(!is_closing_timeframe("3M", dt_apr_1_00_00).unwrap());
-        assert!(is_closing_timeframe("3M", dt_jun_1_00_00).unwrap());
-        assert!(is_closing_timeframe("3M", dt_sep_1_00_00).unwrap());
-        assert!(is_closing_timeframe("3M", dt_dec_1_00_00).unwrap());
+        // Just after a multiple
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 15).unwrap();
+        assert!(is_time_multiple_of_period(period, now, tolerance));
 
-        assert!(is_closing_timeframe("4M", dt_apr_1_00_00).unwrap());
-        assert!(!is_closing_timeframe("4M", dt_jun_1_00_00).unwrap());
-        assert!(is_closing_timeframe("4M", dt_aug_1_00_00).unwrap());
-        assert!(is_closing_timeframe("4M", dt_dec_1_00_00).unwrap());
+        // Just before a multiple
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 4, 45).unwrap();
+        assert!(is_time_multiple_of_period(period, now, tolerance));
 
-        // Test 'm' (minutes)
-        let dt_00_15_00 = Local.with_ymd_and_hms(2025, 1, 1, 0, 15, 0).unwrap();
-        let dt_00_15_01 = Local.with_ymd_and_hms(2025, 1, 1, 0, 15, 1).unwrap();
-        assert!(is_closing_timeframe("15m", dt_00_15_00).unwrap());
-        assert!(!is_closing_timeframe("15m", dt_00_15_01).unwrap());
+        // Outside tolerance
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 1, 31).unwrap();
+        assert!(!is_time_multiple_of_period(period, now, tolerance));
+    }
 
-        // Test 'h' (hours)
-        let dt_04_00_00 = Local.with_ymd_and_hms(2025, 1, 1, 4, 0, 0).unwrap();
-        let dt_04_00_01 = Local.with_ymd_and_hms(2025, 1, 1, 4, 0, 1).unwrap();
-        assert!(is_closing_timeframe("4h", dt_04_00_00).unwrap());
-        assert!(!is_closing_timeframe("4h", dt_04_00_01).unwrap());
+    #[test]
+    fn test_is_time_multiple_of_period_zero_period() {
+        let period = Duration::seconds(0);
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 0).unwrap();
+        assert!(!is_time_multiple_of_period(period, now, None));
+    }
 
-        // Test 'd' (days)
-        let dt_jan_1_00_00 = Local.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let dt_jan_2_00_00 = Local.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
-        assert!(is_closing_timeframe("1d", dt_jan_1_00_00).unwrap());
-        assert!(is_closing_timeframe("1d", dt_jan_2_00_00).unwrap());
+    #[test]
+    fn test_is_closing_timeframe_m1() {
+        let tf = Timeframe::M1;
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, None).unwrap());
 
-        // Test 'w' (weeks) - This is tricky as weeks start on different days
-        // For simplicity, we'll assume a week starts on Monday (ISO 8601)
-        let dt_jan_6_00_00 = Local.with_ymd_and_hms(2025, 1, 6, 0, 0, 0).unwrap(); // Monday
-        let dt_jan_13_00_00 = Local.with_ymd_and_hms(2025, 1, 13, 0, 0, 0).unwrap(); // Monday
-        assert!(is_closing_timeframe("1w", dt_jan_6_00_00).unwrap());
-        assert!(is_closing_timeframe("1w", dt_jan_13_00_00).unwrap());
-        assert!(!is_closing_timeframe("1w", dt_jan_1_00_00).unwrap()); // Not a Monday
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 30).unwrap();
+        assert!(!is_closing_timeframe(&tf, now, None).unwrap());
+
+        let tolerance = Some(Duration::seconds(30));
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 15).unwrap();
+        assert!(is_closing_timeframe(&tf, now, tolerance).unwrap());
+    }
+
+    #[test]
+    fn test_is_closing_timeframe_h1() {
+        let tf = Timeframe::H1;
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, None).unwrap());
+
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 30, 0).unwrap();
+        assert!(!is_closing_timeframe(&tf, now, None).unwrap());
+
+        let tolerance = Some(Duration::minutes(15));
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 59, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, tolerance).unwrap());
+    }
+
+    #[test]
+    fn test_is_closing_timeframe_d1() {
+        let tf = Timeframe::D1;
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 0, 0, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, None).unwrap());
+
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 12, 0, 0).unwrap();
+        assert!(!is_closing_timeframe(&tf, now, None).unwrap());
+
+        let tolerance = Some(Duration::hours(1));
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 23, 50, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, tolerance).unwrap());
+
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 0, 0, 30).unwrap();
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+    }
+
+    #[test]
+    fn test_is_closing_timeframe_w1() {
+        let tf = Timeframe::W1;
+        // Monday 00:00:00 UTC
+        let now = Utc.with_ymd_and_hms(2025, 7, 7, 0, 0, 0).unwrap(); // Monday
+        assert!(is_closing_timeframe(&tf, now, None).unwrap());
+
+        // Sunday 23:59:59 UTC (just before Monday)
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 23, 59, 59).unwrap(); // Sunday
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::seconds(1))).unwrap());
+
+        // Tuesday
+        let now = Utc.with_ymd_and_hms(2025, 7, 8, 0, 0, 0).unwrap(); // Tuesday
+        assert!(!is_closing_timeframe(&tf, now, None).unwrap());
+
+        // Tolerance too big
+        let tolerance = Some(Duration::days(2));
+        let now = Utc.with_ymd_and_hms(2025, 7, 7, 0, 0, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, tolerance).is_err());
+
+        // Monday with tolerance
+        let now = Utc.with_ymd_and_hms(2025, 7, 7, 0, 0, 30).unwrap();
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+
+        // Sunday with tolerance
+        let now = Utc.with_ymd_and_hms(2025, 7, 6, 23, 59, 30).unwrap();
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+    }
+
+    #[test]
+    fn test_is_closing_timeframe_mos1() {
+        let tf = Timeframe::MOS1;
+        // First day of month 00:00:00 UTC
+        let now = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, None).unwrap());
+
+        // Last day of month 23:59:59 UTC (just before first day of next month)
+        let now = Utc.with_ymd_and_hms(2025, 7, 31, 23, 59, 59).unwrap();
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::seconds(1))).unwrap());
+
+        // Middle of month
+        let now = Utc.with_ymd_and_hms(2025, 7, 15, 0, 0, 0).unwrap();
+        assert!(!is_closing_timeframe(&tf, now, None).unwrap());
+
+        // Tolerance too big
+        let tolerance = Some(Duration::days(2));
+        let now = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
+        assert!(is_closing_timeframe(&tf, now, tolerance).is_err());
+
+        // First day of month with tolerance
+        let now = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 30).unwrap();
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+
+        // Last day of month with tolerance
+        let now = Utc.with_ymd_and_hms(2025, 7, 31, 23, 59, 30).unwrap();
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
     }
 }
