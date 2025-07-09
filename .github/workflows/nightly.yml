@@ -152,6 +152,7 @@ jobs:
           load: true
           push: false
           tags: |
+            algotrap-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:nightly-${{ github.run_id }}
 
