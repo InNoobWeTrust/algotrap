@@ -160,7 +160,7 @@ jobs:
       - name: Build and push Docker image (bins)
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ./bins/cryptobot
           file: bins/cryptobot/deployment/Dockerfile
           push: true
           tags: |
