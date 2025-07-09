@@ -1,10 +1,4 @@
-use algotrap::ext::bingx::MAX_LIMIT;
-use algotrap::ext::ntfy;
-use algotrap::prelude::*;
-use algotrap::ta::experimental::OhlcExperimental;
-use algotrap::ta::prelude::*;
 use chrono::{Duration, Utc};
-mod time_utils;
 use core::error::Error;
 use dotenv::dotenv;
 use futures::future::join_all;
@@ -16,7 +10,12 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
-use crate::time_utils::is_closing_timeframe;
+use algotrap::ext::bingx::MAX_LIMIT;
+use algotrap::ext::ntfy;
+use algotrap::prelude::*;
+use algotrap::ta::experimental::OhlcExperimental;
+use algotrap::ta::prelude::*;
+use algotrap::time_utils::is_closing_timeframe;
 
 #[derive(Debug, Clone, Deserialize)]
 struct EnvConf {

@@ -2,8 +2,7 @@
 .DS_Store
 Cargo.lock
 .bacon-locations
-echarts.*.html
-tdv.*.html
+*.html
 .env
-k8s/secret.yaml
-deployment/env_configs/*.env
+k8s/**/secret.yaml
+bins/cryptobot/deployment/envs/*.env

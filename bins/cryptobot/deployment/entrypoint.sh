@@ -11,7 +11,7 @@ fi
 
 echo "Executing application to generate HTML..."
 # Run the application binary
-./algotrap
+./cryptobot
 
 # Prepare the directory for deployment
 OUTPUT_DIR="public"

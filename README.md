@@ -50,25 +50,31 @@ This section guides you on how to build and run the application using Docker loc
 
 #### Building the Docker Image Locally
 
-To build the Docker image from your local codebase, navigate to the project root and run:
+To build the Docker images from your local codebase, navigate to the project root and run the following commands in sequence:
 
-```bash
-docker build -t algotrap:latest -f deployment/Dockerfile .
-```
+1.  **Build the base image**: This image contains common dependencies and is used as a base for other binaries.
+    ```bash
+    docker build -t algotrap-bins:latest -f Dockerfile.base .
+    ```
+2.  **Build the cryptobot image**: This image contains the `cryptobot` application.
+    ```bash
+    docker build -t algotrap-cryptobot:latest -f bins/cryptobot/deployment/Dockerfile bins/cryptobot
+    ```
 
-This command builds an image tagged `algotrap:latest` using the `Dockerfile` located in the `deployment/` directory.
+These commands build images tagged `algotrap-bins:latest` and `algotrap-cryptobot:latest` respectively.
 
 #### Running the Docker Image Locally
 
-To run the locally built Docker image with your local `.env` file, ensure you have a `.env` file in your project root and then execute:
+To run the locally built `algotrap-cryptobot` Docker image with your local `.env` file, ensure you have a `.env` file in the `bins/cryptobot` directory and then execute from the project root:
 
 ```bash
-if [ ! -f .env ]; then \
-  echo 'Error: .env file not found.'; \
+if [ ! -f bins/cryptobot/.env ]; then \
+  echo 'Error: .env file not found in bins/cryptobot/.'; \
   exit 1; \
 fi; \
-docker run --rm --env-file .env algotrap
+docker run --rm --env-file bins/cryptobot/.env algotrap-cryptobot
 ```
+
 
 This command:
 - Checks if a `.env` file exists in the current directory.
@@ -82,12 +88,12 @@ The project includes a GitHub Actions workflow to automatically build and push a
 
 **Image Location**:
 
-The image is available at:
-`ghcr.io/innoobwetrust/algotrap`
+The image for `cryptobot` is available at:
+`ghcr.io/innoobwetrust/algotrap-cryptobot`
 
 You can pull the latest image with:
 ```bash
-docker pull ghcr.io/innoobwetrust/algotrap:latest
+docker pull ghcr.io/innoobwetrust/algotrap-cryptobot:latest
 ```
 
 **Workflow Authentication**:
@@ -100,7 +106,7 @@ For users who wish to push images manually from their local machine, they will n
 
 This project uses Kubernetes for deployment, supporting multiple cronjob configurations. Kubernetes secrets and cronjob definitions are generated from templates.
 
-1.  **Create environment-specific `.env` files**: For each cronjob instance you want to deploy, create a `.env` file in the `deployment/env_configs/` directory (e.g., `deployment/env_configs/ETH-USDT.env`). These files will contain the specific environment variables for each cronjob. You can use `deployment/env_configs/ETH-USDT.env.example` as a reference.
+1.  **Create environment-specific `.env` files**: For each `cryptobot` cronjob instance you want to deploy, create a `.env` file in the `bins/cryptobot/deployment/envs/` directory (e.g., `bins/cryptobot/deployment/envs/ETH-USDT.env`). These files will contain the specific environment variables for each cronjob. You can use `bins/cryptobot/deployment/envs/ETH-USDT.env.example` as a reference.
 
 2.  **Deploy Kubernetes cronjobs**: Run the cronjob deployment script from the `deployment` directory:
     ```bash

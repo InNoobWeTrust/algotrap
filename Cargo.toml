@@ -1,11 +1,13 @@
+[workspace]
+members = ["bins/cryptobot", "bins/etf_dashboard"]
+
 [package]
 name = "algotrap"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1.45", features = ["full"] }
+reqwest = { version = "0.12", features = ["cookies", "json"] }
 hmac = "0.12"
 sha2 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
@@ -26,9 +28,11 @@ polars = { version = "0.46", default-features = false, features = [
 ] }
 polars-row-derive = "0.1.0"
 chrono = "0.4"
-minijinja = "2.10"
-futures = "0.3.31"
-openssl = { version = "0.10", features = ["vendored"] }
-dotenv = "0.15.0"
-envy = "0.4"
-rayon = "1.10.0"
+
+[[example]]
+name = "rsi_calculator"
+path = "examples/rsi_calculator.rs"
+
+[[example]]
+name = "ma_calculator"
+path = "examples/ma_calculator.rs"

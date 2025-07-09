@@ -9,7 +9,7 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 K8S_DIR="$(dirname "$SCRIPT_DIR")"/k8s
 
 # Directory containing the .env files
-ENV_DIR="$SCRIPT_DIR"/env_configs
+ENV_DIR="$SCRIPT_DIR"/envs
 
 # Check if the directory exists
 if [ ! -d "$ENV_DIR" ]; then
@@ -37,11 +37,11 @@ for env_file in "$ENV_DIR"/*.env; do
     tmp_dir=$(mktemp -d)
 
     # Define unique names for the Kubernetes resources
-    secret_name="algotrap-secrets-$symbol_name"
-    cronjob_name="algotrap-cronjob-$symbol_name"
+    secret_name="algotrap-cryptobot-secrets-$symbol_name"
+    cronjob_name="algotrap-cryptobot-cronjob-$symbol_name"
 
     # Read variable names from .env.template
-    ENV_VARS=$(awk -F'=' '/^[A-Z_]+=/{print $1}' "$K8S_DIR/../.env.template" | tr '\n' ' ')
+    ENV_VARS=$(awk -F'=' '/^[A-Z_]+=/{print $1}' "$SCRIPT_DIR/../.env.template" | tr '\n' ' ')
 
     SECRET_DATA_CONTENT=""
     for var_name in $ENV_VARS; do

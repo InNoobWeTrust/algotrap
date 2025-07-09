@@ -10,6 +10,7 @@ use tap::Pipe;
 
 type HmacSha256 = Hmac<Sha256>;
 pub const MAX_LIMIT: u32 = 1440;
+pub const BINGX_API_KLINES: &str = "https://open-api.bingx.com/openApi/swap/v3/quote/klines";
 
 #[derive(Clone)]
 pub struct BingXClient {
@@ -80,10 +81,7 @@ impl BingXClient {
             params_vec.push(("signature", signature));
         }
 
-        let url = Url::parse_with_params(
-            "https://open-api.bingx.com/openApi/swap/v3/quote/klines",
-            params_vec,
-        )?;
+        let url = Url::parse_with_params(BINGX_API_KLINES, params_vec)?;
 
         let response = self
             .client

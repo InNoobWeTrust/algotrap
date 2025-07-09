@@ -1,0 +1,9 @@
+[package]
+name = "etf_dashboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+algotrap = { path = "../.." }
+chrono = "0.4.41"
+tokio-test = "0.4.4"

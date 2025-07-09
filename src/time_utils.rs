@@ -1,5 +1,5 @@
-use algotrap::model::Timeframe;
-use chrono::{DateTime, Datelike, Duration, Timelike, Weekday, Utc};
+use crate::model::Timeframe;
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc, Weekday};
 
 /// Check if the time now is multiple of period, with optional tolerance
 pub fn is_time_multiple_of_period(
@@ -8,7 +8,7 @@ pub fn is_time_multiple_of_period(
     tolerance: Option<Duration>,
 ) -> bool {
     // Calculate the total seconds from the start of the day
-    let total_seconds_since_midnight = now.timestamp() as i64;
+    let total_seconds_since_midnight = now.timestamp();
     let tolerance_seconds = tolerance.unwrap_or(Duration::seconds(0)).num_seconds();
 
     // Convert the period to seconds

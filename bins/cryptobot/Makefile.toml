@@ -1,0 +1,112 @@
+[tasks.clean-html]
+command = "find"
+args = [".", "-name", "*.html", "-delete"]
+
+[tasks.dockerbuild]
+command = "bash"
+args = ["-c", """
+  docker build -t algotrap-bins:latest -f ../../Dockerfile.base ../..
+  docker build -t algotrap-cryptobot:latest -f deployment/Dockerfile .
+"""]
+
+[tasks.dockerrun]
+dependencies = ["dockerbuild"]
+command = "bash"
+args = ["-c", """
+  if [ ! -f .env ]; then
+    echo 'Error: .env file not found.';
+    exit 1;
+  fi;
+  docker run --rm --env-file .env algotrap-cryptobot
+"""]
+
+[tasks.k8s-status]
+command = "kubectl"
+args = ["get", "all"]
+
+[tasks.k8s-deploy]
+private = true
+command = "bash"
+args = ["./deployment/deploy_cronjobs.sh"]
+
+[tasks.k8s-verify-secrets]
+private = true
+command = "bash"
+args = [
+  "-c",
+  """
+  ENV_DIR="./deployment/envs"
+  for env_file in "$ENV_DIR"/*.env; do
+    if [ -f "$env_file" ]; then
+      filename=$(basename -- "$env_file")
+      symbol_name=$(echo "${filename%.*}" | tr '[:upper:]' '[:lower:]")
+      secret_name="algotrap-secrets-$symbol_name"
+
+      echo "Verifying secret for symbol: $symbol_name (Secret: $secret_name)"
+
+      # Get secret data
+      secret_data=$(kubectl get secret "$secret_name" -o json | jq -r '.data')
+
+      # Read .env file and compare
+      while IFS='=' read -r key value; do
+        if [[ ! "$key" =~ ^# && -n "$key" ]]; then # Ignore comments and empty lines
+          # Remove leading/trailing whitespace from key and value
+          key=$(echo "$key" | xargs)
+          value=$(echo "$value" | xargs)
+
+          # Get base64 encoded value from secret
+          encoded_secret_value=$(echo "$secret_data" | base64 --decode)
+          decoded_secret_value=$(echo "$encoded_secret_value" | base64 --decode)
+
+          if [ "$value" = "$decoded_secret_value" ]; then
+            echo "  ✅ $key: Match"
+          else
+            echo "  ❌ $key: Mismatch (Expected: $value, Got: $decoded_secret_value)"
+          fi
+        fi
+      done < "$env_file"
+      echo "--------------------------------------------------"
+    fi
+  done
+""",
+]
+
+[tasks.k8s-cronjob-logs]
+command = "bash"
+args = [
+  "-c",
+  """
+  for job in $(kubectl get jobs -o=jsonpath='{.items[*].metadata.name}'); do
+    echo "--- Logs for job: $job ---";
+    pod=$(kubectl get pods -l job-name=$job -o=jsonpath='{.items[0].metadata.name}' 2>/dev/null);
+    if [ -n "$pod" ]; then
+      kubectl logs "$pod";
+    else
+      echo "No active pod found for job $job";
+    fi;
+    echo "--- End of logs for job: $job ---";
+  done
+""",
+]
+
+[tasks.k8s-cronjob-suspend]
+command = "bash"
+args = ["-c", """
+  for job in $(kubectl get cronjobs -o=jsonpath='{.items[*].metadata.name}'); do
+    kubectl patch cronjob "$job" -p '{"spec" : {"suspend" : true}}';
+  done
+"""]
+
+[tasks.k8s-cronjob-resume]
+command = "bash"
+args = ["-c", """
+  for job in $(kubectl get cronjobs -o=jsonpath='{.items[*].metadata.name}'); do
+    kubectl patch cronjob "$job" -p '{"spec" : {"suspend" : false}}';
+  done
+"""]
+
+[tasks.quick-bench]
+private = true
+command = "hyperfine"
+args = ["--warmup", "1", "cargo run -r"]
+install_crate = "hyperfine"

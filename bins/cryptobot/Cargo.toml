@@ -1,0 +1,29 @@
+[package]
+name = "cryptobot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+algotrap = { path = "../.." }
+minijinja = "2.10"
+futures = "0.3.31"
+#openssl = { version = "0.10", features = ["vendored"] }
+dotenv = "0.15.0"
+envy = "0.4"
+rayon = "1.10.0"
+polars = { version = "0.46", default-features = false, features = [
+	"lazy",
+	"fmt",
+	"polars-ops",
+	"diff",
+	"dynamic_group_by",
+	"rolling_window",
+	"ewma",
+	"dtype-array",
+	"json",
+	"round_series",
+] }
+serde = "1.0.219"
+serde_json = "1.0.140"
+chrono = "0.4.41"
+tokio = { version = "1.45", features = ["full"] }
