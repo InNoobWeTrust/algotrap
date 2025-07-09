@@ -25,12 +25,10 @@ command = "kubectl"
 args = ["get", "all"]
 
 [tasks.k8s-deploy]
-private = true
 command = "bash"
 args = ["./deployment/deploy_cronjobs.sh"]
 
 [tasks.k8s-verify-secrets]
-private = true
 command = "bash"
 args = [
   "-c",
@@ -106,7 +104,6 @@ args = ["-c", """
 """]
 
 [tasks.quick-bench]
-private = true
 command = "hyperfine"
 args = ["--warmup", "1", "cargo run -r"]
 install_crate = "hyperfine"
