@@ -1,6 +1,0 @@
-[env]
-CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-
-[tasks.trigger-nightly-workflow]
-command = "gh"
-args = ["workflow", "run", "nightly.yml"]
