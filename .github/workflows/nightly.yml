@@ -80,7 +80,7 @@ jobs:
       - name: Build binaries
         run: cargo build --workspace --release --target x86_64-unknown-linux-musl
 
-      - name: Archive binarise
+      - name: Archive binaries
         shell: bash
         run: |
           tar -czf algotrap-x86_64-unknown-linux-musl.tar.gz -C target/x86_64-unknown-linux-musl/release cryptobot etf_dashboard
