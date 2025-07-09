@@ -49,7 +49,7 @@ jobs:
             7z a algotrap-${{ runner.os }}.zip target/release/cryptobot.exe target/release/etf_dashboard.exe
             echo "ASSET=algotrap-${{ runner.os }}.zip" >> $GITHUB_ENV
           else
-            tar -czf algotrap-${{ runner.os }}.tar.gz -C cryptobot etf_dashboard
+            tar -czf algotrap-${{ runner.os }}.tar.gz -C target/release cryptobot etf_dashboard
             echo "ASSET=algotrap-${{ runner.os }}.tar.gz" >> $GITHUB_ENV
           fi
 
