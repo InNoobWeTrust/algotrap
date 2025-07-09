@@ -46,10 +46,10 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" == "Windows" ]; then
-            7z a algotrap-${{ runner.os }}.zip target/release/libalgotrap.dll target/release/cryptobot.exe
+            7z a algotrap-${{ runner.os }}.zip target/release/cryptobot.exe target/release/etf_dashboard.exe
             echo "ASSET=algotrap-${{ runner.os }}.zip" >> $GITHUB_ENV
           else
-            tar -czf algotrap-${{ runner.os }}.tar.gz -C target/release libalgotrap.d libalgotrap.rlib cryptobot
+            tar -czf algotrap-${{ runner.os }}.tar.gz -C cryptobot etf_dashboard
             echo "ASSET=algotrap-${{ runner.os }}.tar.gz" >> $GITHUB_ENV
           fi
 
@@ -86,7 +86,7 @@ jobs:
       - name: Archive binarise
         shell: bash
         run: |
-          tar -czf algotrap-x86_64-unknown-linux-musl.tar.gz -C target/x86_64-unknown-linux-musl/release libalgotrap.d libalgotrap.rlib cryptobot
+          tar -czf algotrap-x86_64-unknown-linux-musl.tar.gz -C target/x86_64-unknown-linux-musl/release cryptobot etf_dashboard
           echo "ASSET=algotrap-x86_64-unknown-linux-musl.tar.gz" >> $GITHUB_ENV
 
       - name: Upload artifact
