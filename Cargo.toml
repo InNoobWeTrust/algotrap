@@ -22,6 +22,7 @@ polars = { version = "0.46", default-features = false, features = [
 	"diff",
 	"dynamic_group_by",
 	"rolling_window",
+	"cum_agg",
 	"ewma",
 	"dtype-array",
 	"json",

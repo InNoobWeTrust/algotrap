@@ -23,6 +23,7 @@ struct EnvConf {
     sl_percent: f64,
     tol_percent: f64,
     tfs: Vec<Timeframe>,
+    default_tf: Timeframe,
     cloudflare_pages_project_name: String,
     ntfy_topic: String,
     ntfy_tf_exclusion: Vec<Timeframe>,
@@ -82,7 +83,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         dataset: df_json,
         symbol: format!("BingX:{}", conf.symbol),
         tfs: tfs_json,
-        default_tf: "5m".to_string(),
+        default_tf: conf.default_tf.to_string(),
         sl_percent: format!("{:.0}", conf.sl_percent * 100.),
         tol_percent: format!("{:.2}", conf.tol_percent * 100.),
     };
@@ -182,10 +183,13 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     // Relative structure power
     let structure_pwr = ohlc.bar_bias().rma(9).alias("Structure Power");
     let structure_pwr_sma = structure_pwr.clone().sma(16).alias("Structure Power SMA");
+    let structure_pwr_dir = (lit(3) * structure_pwr.clone() - lit(2) * structure_pwr_sma.clone())
+        .alias("Structure Power Direction");
 
     // Relative structure strength index
     let rssi = ohlc.rssi(14).alias("RSSI");
     let rssi_ma = rssi.clone().ema(9).alias("RSSI MA");
+    let rssi_dir = (lit(3) * rssi.clone() - lit(2) * rssi_ma.clone()).alias("RSSI Direction");
 
     // Stability indicator
     let atr_rev_percent = ohlc
@@ -211,6 +215,7 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     // Miscs
     let lvrg_adjust = conf.sl_percent / (1. + conf.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("Leverage");
+    let sharpe_ratio = col("close").sharpe(200).alias("Sharpe");
 
     // Selected columns to export
     vec![
@@ -224,12 +229,15 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         atr_lowerband,
         rssi,
         rssi_ma,
+        rssi_dir,
         structure_pwr,
         structure_pwr_sma,
+        structure_pwr_dir,
         atr_percent,
         atr_rev_percent,
         lvrg,
         climax_signal,
+        sharpe_ratio,
     ]
 }
 
@@ -267,7 +275,7 @@ fn render_tdv_html(vars: &TdvHtmlVars) -> String {
 
 const TDV_HTML_TEMPLATE: &str = r#"
 <!DOCTYPE html>
-<html class="sl-theme-dark">
+<html class="sl-theme-dark" style="font-size: 22px">
   <head>
     <meta charset="utf-8" />
     <title>{{ symbol }} (InNoobWeTrust™)</title>
@@ -294,7 +302,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
 
         #overlay {
             position: absolute;
-            top: 5%;
+            top: 2.5%;
             left: 2%;
             z-index: 9999;
         }
@@ -303,9 +311,10 @@ const TDV_HTML_TEMPLATE: &str = r#"
         }
         #fullscreen-btn {
             position: absolute;
-            bottom: 1%;
-            right: 1%;
+            bottom: 15px;
+            left: -6px;
             z-index: 9999;
+            font-size: 10px;
         }
     </style>
   </head>
@@ -421,22 +430,49 @@ const TDV_HTML_TEMPLATE: &str = r#"
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(76, 175, 80, 0.1)',
-            topFillColor1: 'rgba(76, 175, 80, 0.2)',
-            topFillColor2: 'rgba(76, 175, 80, 0.5)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.2)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.5)',
+            topLineColor: 'rgba(76, 175, 80, 0.2)',
+            topFillColor1: 'rgba(76, 175, 80, 0.5)',
+            topFillColor2: 'rgba(76, 175, 80, 0.7)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.2)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.5)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.7)',
+        }, 1);
+        const structurePwrDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            topLineColor: 'rgba(76, 175, 80, 0.5)',
+            topFillColor1: 'rgba(76, 175, 80, 0.05)',
+            topFillColor2: 'rgba(76, 175, 80, 0.1)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.5)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.05)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.1)',
         }, 1);
         const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {
+            color: 'rgba(253, 216, 53, 0.5)',
+        }, 2);
         const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
+        const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
         const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
         const textWatermarks = [
-            LightweightCharts.createTextWatermark(chart.panes()[0], {}),
-            LightweightCharts.createTextWatermark(chart.panes()[1], {}),
-            LightweightCharts.createTextWatermark(chart.panes()[2], {}),
-            LightweightCharts.createTextWatermark(chart.panes()[3], {}),
+            LightweightCharts.createTextWatermark(chart.panes()[0], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[1], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[2], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[3], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[4], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
         ];
 
         const watermarkUpdate = () => {
@@ -447,8 +483,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
             lvrg_badge.innerHTML = `x${lvrg}`;
             const watermarks = [
                 {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
                     lines: [
                         {
                             text: `{{ symbol }} ${tf}`,
@@ -458,33 +492,36 @@ const TDV_HTML_TEMPLATE: &str = r#"
                     ],
                 },
                 {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
                     lines: [
                         {
-                            text: 'Structure Power',
+                            text: 'Structure Power (9, 16)',
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 18,
                         },
                     ],
                 },
                 {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
                     lines: [
                         {
-                            text: 'RSSI',
+                            text: 'RSSI (14, 9)',
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 18,
                         },
                     ],
                 },
                 {
-                    horzAlign: 'left',
-                    vertAlign: 'top',
                     lines: [
                         {
-                            text: 'ATR Reversion',
+                            text: 'ATR Reversion (42, 1.618)',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+                {
+                    lines: [
+                        {
+                            text: 'Sharpe (200)',
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 18,
                         },
@@ -538,26 +575,36 @@ const TDV_HTML_TEMPLATE: &str = r#"
             structurePwrSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d['Structure Power'],
-                color: d['Structure Power'] >= 0 ? '#00897B80' : '#880E4F80'
+                color: d['Structure Power'] >= 0 ? 'rgba(0, 137, 123, 1)' : 'rgba(136, 14, 79, 1)'
             })));
             structurePwrSmaSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d['Structure Power SMA'],
             })));
+            structurePwrDirSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Structure Power Direction'],
+                baseValue: { type: 'price', price: d['Structure Power SMA'] },
+            })));
             rssiSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d.RSSI,
-                color: d.RSSI > 59 ? '#4CAF5080' : d.RSSI < 41 ? '#F2364580': '#2962FF4C'
+                color: d.RSSI > 59 ? 'rgba(76, 175, 79, 1)' : d.RSSI < 41 ? 'rgba(242, 54, 70, 1)': 'rgba(191, 54, 207, 0.7)'
             })));
             rssiMaSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d['RSSI MA'],
-                color: '#FDD83580'
+                color: d['RSSI Direction'] > d['RSSI'] && d['RSSI'] > d['RSSI MA'] && d['RSSI MA'] > 50 ? 'rgba(76, 175, 79, 0.7)' : d['RSSI Direction'] < d['RSSI'] && d['RSSI'] < d['RSSI MA'] && d['RSSI MA'] < 50 ? 'rgba(179, 61, 44, 0.7)' : 'rgba(253, 216, 53, 0.3)',
             })));
             atrRevSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d['ATR Reversion Percent'],
                 color: d['ATR Reversion Percent'] > 50 ? '#4CAF5080' : d['ATR Reversion Percent'] < -50 ? '#F2364580': '#2962FF4C'
+            })));
+            sharpeSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d['Sharpe'],
+                color: d['Sharpe'] > 0 ? 'rgba(76, 175, 79, 0.5)' : 'rgba(242, 54, 70, 0.5)'
             })));
             const markers = data.filter(d => d['Climax Signal'] != 0).map(d => ({
                 time: d.time,
