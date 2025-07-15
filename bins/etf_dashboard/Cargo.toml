@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-algotrap = { path = "../.." }
+algotrap = { path = "../..", features = ["webdriver"] }
 chrono = "0.4.41"
-tokio-test = "0.4.4"
+fantoccini = "0.22.0"
+rand = "0.9.1"
+reqwest = "0.12.22"
+serde_json = "1.0.140"
+tokio = { version = "1.46.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"

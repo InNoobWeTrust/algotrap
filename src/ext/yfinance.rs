@@ -53,7 +53,11 @@ pub struct YfinanceClient {
 impl Default for YfinanceClient {
     fn default() -> Self {
         Self {
-            client: reqwest::ClientBuilder::new().cookie_store(true).user_agent(YFINANCE_USER_AGENT).build().unwrap(),
+            client: reqwest::ClientBuilder::new()
+                .cookie_store(true)
+                .user_agent(YFINANCE_USER_AGENT)
+                .build()
+                .unwrap(),
         }
     }
 }
@@ -90,16 +94,14 @@ impl YfinanceClient {
         if response.status() != 200 {
             return Err(format!("{response:#?}").into());
         }
-        let json_resp = response
-            .json::<serde_json::Value>()
-            .await?;
+        let json_resp = response.json::<serde_json::Value>().await?;
 
         if json_resp["chart"]["error"] != json!(null) {
             return Err(format!("{json_resp:#?}").into());
         }
 
         let chart_data = &json_resp["chart"]["result"][0];
-        dbg!(&chart_data);
+        //dbg!(&chart_data);
         let timestamps: Vec<_> = chart_data["timestamp"]
             .as_array()
             .unwrap()
@@ -131,6 +133,12 @@ impl YfinanceClient {
             .iter()
             .map(|v| v.as_f64().unwrap())
             .collect();
+        let adjclose: Vec<_> = chart_data["indicators"]["adjclose"][0]["adjclose"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
         let volume: Vec<_> = quotes["volume"]
             .as_array()
             .unwrap()
@@ -146,6 +154,7 @@ impl YfinanceClient {
                 close: close[i],
                 volume: volume[i],
                 time: timestamps[i],
+                adjclose: Some(adjclose[i]),
             })
             .collect();
 

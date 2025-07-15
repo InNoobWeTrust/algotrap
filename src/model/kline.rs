@@ -16,6 +16,8 @@ pub struct Kline {
     #[serde(deserialize_with = "de_f64_or_string_as_f64")]
     pub volume: f64,
     pub time: i64,
+    #[serde(default, deserialize_with = "de_opt_f64_or_string_as_f64")]
+    pub adjclose: Option<f64>,
 }
 
 fn de_f64_or_string_as_f64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
@@ -24,6 +26,20 @@ fn de_f64_or_string_as_f64<'de, D: Deserializer<'de>>(deserializer: D) -> Result
         Value::Number(num) => num
             .as_f64()
             .ok_or_else(|| de::Error::custom("Invalid number"))?,
+        _ => return Err(de::Error::custom("wrong type")),
+    })
+}
+
+fn de_opt_f64_or_string_as_f64<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(s) => Some(s.parse().map_err(de::Error::custom)?),
+        Value::Number(num) => Some(
+            num.as_f64()
+                .ok_or_else(|| de::Error::custom("Invalid number"))?,
+        ),
+        Value::Null => None,
         _ => return Err(de::Error::custom("wrong type")),
     })
 }

@@ -1,5 +1,6 @@
 [workspace]
 members = ["bins/cryptobot", "bins/etf_dashboard"]
+default-members = ["bins/etf_dashboard"]
 
 [package]
 name = "algotrap"
@@ -28,6 +29,14 @@ polars = { version = "0.46", default-features = false, features = [
 ] }
 polars-row-derive = "0.1.0"
 chrono = "0.4"
+fantoccini = { version = "0.22.0", optional = true }
+tracing = "0.1.41"
+rand = "0.9.1"
+humantime = "2.2.0"
+
+[features]
+webdriver = ["dep:fantoccini"]
+
 
 [[example]]
 name = "rsi_calculator"

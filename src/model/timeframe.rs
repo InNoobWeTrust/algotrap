@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::str::FromStr;
-use std::convert::TryFrom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
