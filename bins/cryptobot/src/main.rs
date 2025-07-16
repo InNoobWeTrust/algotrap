@@ -104,7 +104,7 @@ async fn notify(
         .map(|(tf, df)| {
             let second_last_row = df.slice(-2, 1);
             let signal: i32 = second_last_row
-                .column("Climax Signal")
+                .column("climax_signal")
                 .expect("Failed to get signal column")
                 .get(0)
                 .expect("Cannot get signal from last confirmed candle")
@@ -127,7 +127,7 @@ async fn notify(
                 let df = df
                     .clone()
                     .lazy()
-                    .select([col("RSSI"), col("ATR Reversion Percent")])
+                    .select([col("rssi"), col("atr_reversion_percent")])
                     .collect()
                     .expect("Failed to extract columns");
                 let df_json = df_to_json(&mut df.slice(-2, 1))
@@ -165,79 +165,156 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         .alias("Date");
 
     // Volume
-    let vol_sma = col("volume").ema(20).alias("Volume SMA");
+    let vol_color = when(col("close").gt_eq(col("open")))
+        .then(lit("rgba(76, 175, 80, 0.3)"))
+        .otherwise(lit("rgba(242, 54, 69, 0.3)"))
+        .alias("volume_color");
+    let vol_sma = col("volume").ema(20).alias("volume_sma");
 
     // Moving thresholds
-    let bias_rev = ohlc.bias_reversion_smoothed(9).alias("Bias Reversion");
-    let ema200 = col("close").ema(200).alias("EMA200");
-    let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("Bullish RevRSI");
-    let bearish_revrsi = col("low").rev_rsi(14, 30.).alias("Bearish RevRSI");
+    let bias_rev = ohlc.bias_reversion_smoothed(9).alias("bias_reversion");
+    let bias_rev_color = lit("rgba(178, 181, 190, 0.2)").alias("bias_reversion_color");
+    let ema200 = col("close").ema(200).alias("ema200");
+    let ema200_color = lit("rgba(156, 39, 176)").alias("ema200_color");
+    let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("bullish_revrsi");
+    let bullish_revrsi_color = lit("rgba(33,150,243,0.2)").alias("bullish_revrsi_color");
+    let bearish_revrsi = col("low").rev_rsi(14, 30.).alias("bearish_revrsi");
+    let bearish_revrsi_color = lit("rgba(255,152,0,0.2)").alias("bearish_revrsi_color");
 
     // Oscillation band
     let atr = ohlc.atr(42).alias("ATR");
-    let atr_osc = (atr.clone() * lit(1.618)).alias("ATR Oscillation");
-    let atr_upperband = (col("open") + atr_osc.clone()).alias("ATR Upperband");
-    let atr_lowerband = (col("open") - atr_osc.clone()).alias("ATR Lowerband");
-    let atr_percent = (atr.clone() / col("open")).alias("ATR Percent");
+    let atr_osc = (atr.clone() * lit(1.618)).alias("atr_oscillation");
+    let atr_upperband = (col("open") + atr_osc.clone()).alias("atr_upperband");
+    let atr_upperband_color = lit("rgba(76, 175, 80, 0.2)").alias("atr_upperband_color");
+    let atr_lowerband = (col("open") - atr_osc.clone()).alias("atr_lowerband");
+    let atr_lowerband_color = lit("rgba(242, 54, 69, 0.2)").alias("atr_lowerband_color");
+    let atr_percent = (atr.clone() / col("open")).alias("atr_percent");
 
     // Relative structure power
-    let structure_pwr = ohlc.bar_bias().rma(9).alias("Structure Power");
-    let structure_pwr_sma = structure_pwr.clone().sma(16).alias("Structure Power SMA");
+    let structure_pwr = ohlc.bar_bias().rma(9).alias("structure_power");
+    let structure_pwr_color = when(structure_pwr.clone().gt_eq(lit(0)))
+        .then(lit("rgba(0, 137, 123, 1)"))
+        .otherwise(lit("rgba(136, 14, 79, 1)"))
+        .alias("structure_power_color");
+    let structure_pwr_sma = structure_pwr.clone().sma(16).alias("structure_power_sma");
     let structure_pwr_dir = (lit(3) * structure_pwr.clone() - lit(2) * structure_pwr_sma.clone())
-        .alias("Structure Power Direction");
+        .alias("structure_power_direction");
 
     // Relative structure strength index
-    let rssi = ohlc.rssi(14).alias("RSSI");
-    let rssi_ma = rssi.clone().ema(9).alias("RSSI MA");
-    let rssi_dir = (lit(3) * rssi.clone() - lit(2) * rssi_ma.clone()).alias("RSSI Direction");
+    let rssi = ohlc.rssi(14).alias("rssi");
+    let rssi_color = when(rssi.clone().gt(lit(59)))
+        .then(lit("rgba(76, 175, 79, 1)"))
+        .otherwise(
+            when(rssi.clone().lt(lit(41)))
+                .then(lit("rgba(242, 54, 70, 1)"))
+                .otherwise(lit("rgba(191, 54, 207, 0.7)")),
+        )
+        .alias("rssi_color");
+    let rssi_ma = rssi.clone().ema(9).alias("rssi_ma");
+    let rssi_dir = (lit(3) * rssi.clone() - lit(2) * rssi_ma.clone()).alias("rssi_direction");
+    let rssi_ma_color = when(
+        (rssi_dir.clone().lt(rssi.clone()))
+            .logical_and(rssi.clone().lt(rssi_ma.clone()))
+            .logical_and(rssi_ma.clone().lt(lit(50))),
+    )
+    .then(lit("rgba(76, 175, 79, 0.7)"))
+    .otherwise(
+        when(
+            (rssi_dir.clone().gt(rssi.clone()))
+                .logical_and(rssi.clone().gt(rssi_ma.clone()))
+                .logical_and(rssi_ma.clone().gt(lit(50))),
+        )
+        .then(lit("rgba(179, 61, 44, 0.7)"))
+        .otherwise(lit("rgba(253, 216, 53, 0.3)")),
+    )
+    .alias("rssi_ma_color");
 
     // Stability indicator
     let atr_rev_percent = ohlc
         .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
-        .alias("ATR Reversion Percent");
+        .alias("atr_reversion_percent");
+    let atr_rev_percent_color = when(atr_rev_percent.clone().gt(lit(50)))
+        .then(lit("rgba(76, 175, 80, 0.5)"))
+        .otherwise(
+            when(atr_rev_percent.clone().lt(lit(-50)))
+                .then(lit("rgba(242, 54, 69, 0.5)"))
+                .otherwise(lit("rgba(41, 98, 255, 0.2)")),
+        )
+        .alias("atr_reversion_percent_color");
 
     // Signals
     let overbought = rssi
         .clone()
         .gt(lit(54))
         .logical_and(atr_rev_percent.clone().lt(lit(-50)))
-        .alias("Overbought");
+        .alias("overbought");
     let oversold = rssi
         .clone()
         .lt(lit(46))
         .logical_and(atr_rev_percent.clone().gt(lit(50)))
-        .alias("Oversold");
+        .alias("oversold");
     let climax_signal = when(overbought.clone().not().logical_and(oversold.clone().not()))
         .then(lit(0))
         .otherwise(when(overbought).then(lit(1)).otherwise(lit(-1)))
-        .alias("Climax Signal");
+        .alias("climax_signal");
+    let climax_signal_pos = when(climax_signal.clone().lt(lit(0)))
+        .then(lit("belowBar"))
+        .otherwise(lit("abovebar"))
+        .alias("climax_signal_pos");
+    let climax_signal_color = when(climax_signal.clone().lt(lit(0)))
+        .then(lit("rgba(33, 150, 243, 1)"))
+        .otherwise(lit("rgba(233, 30, 99, 1)"))
+        .alias("climax_signal_color");
+    let climax_signal_shape = when(climax_signal.clone().lt(lit(0)))
+        .then(lit("arrowUp"))
+        .otherwise(lit("arrowDown"))
+        .alias("climax_signal_shape");
 
     // Miscs
     let lvrg_adjust = conf.sl_percent / (1. + conf.tol_percent);
-    let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("Leverage");
-    let sharpe_ratio = col("close").sharpe(200).alias("Sharpe");
+    let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
+    let sharpe_ratio = col("close").sharpe(200).alias("sharpe");
+    let sharpe_ratio_color = when(sharpe_ratio.clone().gt(lit(0)))
+        .then(lit("rgba(76, 175, 79, 0.5)"))
+        .otherwise(lit("rgba(242, 54, 70, 0.5)"))
+        .alias("sharpe_color");
 
     // Selected columns to export
     vec![
         time_to_date,
+        vol_color,
         vol_sma,
         bias_rev,
+        bias_rev_color,
         ema200,
+        ema200_color,
         bullish_revrsi,
+        bullish_revrsi_color,
         bearish_revrsi,
+        bearish_revrsi_color,
         atr_upperband,
+        atr_upperband_color,
         atr_lowerband,
+        atr_lowerband_color,
         rssi,
+        rssi_color,
         rssi_ma,
+        rssi_ma_color,
         rssi_dir,
         structure_pwr,
+        structure_pwr_color,
         structure_pwr_sma,
         structure_pwr_dir,
         atr_percent,
         atr_rev_percent,
+        atr_rev_percent_color,
         lvrg,
         climax_signal,
+        climax_signal_pos,
+        climax_signal_color,
+        climax_signal_shape,
         sharpe_ratio,
+        sharpe_ratio_color,
     ]
 }
 
@@ -319,7 +396,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
     </style>
   </head>
   <body>
-    <div id="container" data-tf="{{ default_tf }}"></div>
+    <div id="container" data-symbol="{{ symbol }}" data-tf="{{ default_tf }}"></div>
     <div id="overlay">
         <div id="badges">
             <sl-badge variant="danger" pill>SL: {{ sl_percent }}%</sl-badge>
@@ -421,12 +498,12 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 bottom: 0,
             },
         });
-        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, { color: '#9C27B080' });
-        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#B2B5BE4C' });
-        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4CAF504C' });
-        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#F236454C' });
-        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(33,150,243,0.2)', lineWidth: 6 });
-        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(255,152,0,0.2)', lineWidth: 6 });
+        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, {});
+        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
+        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
@@ -446,9 +523,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
             bottomFillColor2: 'rgba(242, 54, 69, 0.1)',
         }, 1);
         const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {
-            color: 'rgba(253, 216, 53, 0.5)',
-        }, 2);
+        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
         const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
         const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
         const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
@@ -477,15 +552,15 @@ const TDV_HTML_TEMPLATE: &str = r#"
 
         const watermarkUpdate = () => {
             const tf = tf_btns.value || container.dataset.tf || tfs[0];
-            const atr = +(dataset[tf].slice(-1)[0]["ATR Percent"] * 100).toFixed(2);
-            const lvrg = Math.floor(dataset[tf].slice(-1)[0]["Leverage"]);
+            const atr = +(dataset[tf].slice(-1)[0].atr_percent * 100).toFixed(2);
+            const lvrg = Math.floor(dataset[tf].slice(-1)[0]["leverage"]);
             atr_badge.innerHTML = `ATR: ${atr}%`;
             lvrg_badge.innerHTML = `x${lvrg}`;
             const watermarks = [
                 {
                     lines: [
                         {
-                            text: `{{ symbol }} ${tf}`,
+                            text: `${container.dataset.symbol} ${tf}`,
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 24,
                         },
@@ -542,75 +617,80 @@ const TDV_HTML_TEMPLATE: &str = r#"
             volumeSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d.volume,
-                color: d.close >= d.open ? 'rgba(76, 175, 80, 0.3)' : 'rgba(242, 54, 69, 0.3)'
+                color: d.volume_color,
             })));
             volumeSmaSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Volume SMA'],
+                value: d.volume_sma,
             })));
             ema200Series.setData(data.map(d => ({
                 time: d.time,
-                value: d.EMA200,
+                value: d.ema200,
+                color: d.ema200_color,
             })));
             biasRevSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Bias Reversion'],
+                value: d.bias_reversion,
+                color: d.bias_reversion_color,
             })));
             atrUpperBandSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['ATR Upperband'],
+                value: d.atr_upperband,
+                color: d.atr_upperband_color,
             })));
             atrLowerBandSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['ATR Lowerband'],
+                value: d.atr_lowerband,
+                value: d.atr_lowerband_color,
             })));
             bullishBandSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Bullish RevRSI'],
+                value: d.bullish_revrsi,
+                color: d.bullish_revrsi_color,
             })));
             bearishBandSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Bearish RevRSI'],
+                value: d.bearish_revrsi,
+                color: d.bearish_revrsi_color,
             })));
             structurePwrSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Structure Power'],
-                color: d['Structure Power'] >= 0 ? 'rgba(0, 137, 123, 1)' : 'rgba(136, 14, 79, 1)'
+                value: d.structure_power,
+                color: d.structure_power_color,
             })));
             structurePwrSmaSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Structure Power SMA'],
+                value: d.structure_power_sma,
             })));
             structurePwrDirSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Structure Power Direction'],
-                baseValue: { type: 'price', price: d['Structure Power SMA'] },
+                value: d.structure_power_direction,
             })));
             rssiSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d.RSSI,
-                color: d.RSSI > 59 ? 'rgba(76, 175, 79, 1)' : d.RSSI < 41 ? 'rgba(242, 54, 70, 1)': 'rgba(191, 54, 207, 0.7)'
+                value: d.rssi,
+                color: d.rssi_color,
             })));
             rssiMaSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['RSSI MA'],
-                color: d['RSSI Direction'] > d['RSSI'] && d['RSSI'] > d['RSSI MA'] && d['RSSI MA'] > 50 ? 'rgba(76, 175, 79, 0.7)' : d['RSSI Direction'] < d['RSSI'] && d['RSSI'] < d['RSSI MA'] && d['RSSI MA'] < 50 ? 'rgba(179, 61, 44, 0.7)' : 'rgba(253, 216, 53, 0.3)',
+                value: d.rssi_ma,
+                color: d.rssi_ma_color,
             })));
             atrRevSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['ATR Reversion Percent'],
-                color: d['ATR Reversion Percent'] > 50 ? '#4CAF5080' : d['ATR Reversion Percent'] < -50 ? '#F2364580': '#2962FF4C'
+                value: d.atr_reversion_percent,
+                color: d.atr_reversion_percent_color,
             })));
             sharpeSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d['Sharpe'],
-                color: d['Sharpe'] > 0 ? 'rgba(76, 175, 79, 0.5)' : 'rgba(242, 54, 70, 0.5)'
+                value: d.sharpe,
+                color: d.sharpe_color,
             })));
-            const markers = data.filter(d => d['Climax Signal'] != 0).map(d => ({
+            const markers = data.filter(d => d.climax_signal != 0).map(d => ({
                 time: d.time,
-                position: d['Climax Signal'] < 0 ? 'belowBar' : 'aboveBar',
-                color: d['Climax Signal'] < 0 ? '#2196F3' : '#e91e63',
-                shape: d['Climax Signal'] < 0 ? 'arrowUp' : 'arrowDown',
+                position: d.climax_signal_pos,
+                color: d.climax_signal_color,
+                shape: d.climax_signal_shape,
             }))
             markersSeries.setMarkers(markers);
             watermarkUpdate();
