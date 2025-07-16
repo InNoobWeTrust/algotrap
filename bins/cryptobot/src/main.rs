@@ -295,7 +295,7 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         .alias("climax_signal");
     let climax_signal_pos = when(climax_signal.clone().lt(lit(0)))
         .then(lit("belowBar"))
-        .otherwise(lit("abovebar"))
+        .otherwise(lit("aboveBar"))
         .alias("climax_signal_pos");
     let climax_signal_color = when(climax_signal.clone().lt(lit(0)))
         .then(lit("rgba(33, 150, 243, 1)"))
@@ -677,7 +677,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
             atrLowerBandSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d.atr_lowerband,
-                value: d.atr_lowerband_color,
+                color: d.atr_lowerband_color,
             })));
             bullishBandSeries.setData(data.map(d => ({
                 time: d.time,
