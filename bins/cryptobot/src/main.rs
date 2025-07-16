@@ -110,19 +110,42 @@ async fn notify(
                 .expect("Cannot get signal from last confirmed candle")
                 .extract::<i32>()
                 .unwrap();
+            // fake value to debug
+            let signal = if conf.ntfy_always && signal == 0 {
+                1
+            } else {
+                signal
+            };
             (*tf, signal)
         })
         .collect();
-    let need_notify = signals.clone().into_iter().any(|(tf, signal)| {
-        signal != 0
-            && is_closing_timeframe(&tf, Utc::now(), Some(Duration::seconds(10))).unwrap_or(false)
-    });
+    let effective_signals: HashMap<Timeframe, i32> = signals
+        .clone()
+        .into_par_iter()
+        .filter(|(tf, signal)| {
+            *signal != 0
+                && (conf.ntfy_always
+                    || is_closing_timeframe(tf, Utc::now(), Some(Duration::seconds(10)))
+                        .unwrap_or(false))
+        })
+        .collect();
+    let effective_tfs: Vec<Timeframe> = effective_signals
+        .clone()
+        .into_par_iter()
+        .map(|(tf, _)| tf)
+        .collect();
+    let total_weight: usize = signals.par_iter().map(|(tf, _)| tf.weight()).sum();
+    let effective_weight: usize = effective_signals
+        .par_iter()
+        .map(|(tf, _)| tf.weight())
+        .sum();
+    let need_notify = effective_weight > 0;
 
-    dbg!(signals, need_notify, conf.ntfy_always);
+    dbg!(signals, effective_signals, need_notify, conf.ntfy_always);
     if conf.ntfy_always || need_notify {
         let records_serialized: HashMap<String, Value> = all_dfs
             .par_iter()
-            .filter(|(tf, _df)| !excluded_tfs.contains(tf))
+            .filter(|(tf, _df)| effective_tfs.contains(tf))
             .map(|(tf, df)| {
                 let df = df
                     .clone()
@@ -139,16 +162,29 @@ async fn notify(
         let records_json = serde_json::to_string(&records_serialized)?;
 
         let action_url = format!("https://{}.pages.dev/", conf.cloudflare_pages_project_name);
-        ntfy::send_ntfy_notification(
-            &conf.ntfy_topic,
-            &format!("{0} last stats:\n{1}", conf.symbol, records_json),
-            Some(&format!("{}: Abnormal price movements", conf.symbol)),
-            Some("5"),
-            None,
-            Some(&action_url),
-            Some("Open chart"),
-        )
-        .await?;
+        ntfy::NtfyMessage::default()
+            .topic(&conf.ntfy_topic)
+            .title(&format!("{} notable movements", &conf.symbol))
+            .message_template(
+                r#"
+Last stats:
+{{ range $tf, $obj := . }}
+{{$tf}}:{{range .}}{{range $k, $v := .}}
+- {{$k}}: {{$v}}{{end}}{{end}}
+{{ end }}
+            "#
+                .trim(),
+            )
+            .message(&records_json)
+            .priority((effective_weight as f64 / total_weight as f64 * 4.).floor() as u8 + 1)
+            .tags(vec![conf.symbol.to_string()])
+            .actions(vec![vec![
+                "view".to_string(),
+                "Open chart".to_string(),
+                action_url,
+            ]])
+            .send()
+            .await?;
     }
     Ok(())
 }

@@ -8,33 +8,41 @@ use std::str::FromStr;
 #[allow(clippy::upper_case_acronyms)]
 pub enum Timeframe {
     /// 1 minute
-    M1,
+    M1 = 1,
     /// 5 minutes
-    M5,
+    M5 = 5,
     /// 15 minutes
-    M15,
+    M15 = 15,
     /// 30 minutes
-    M30,
+    M30 = 30,
     /// 1 hour
-    H1,
+    H1 = 60,
     /// 2 hour
-    H2,
+    H2 = 120,
     /// 4 hours
-    H4,
+    H4 = 240,
     /// 6 hours
-    H6,
+    H6 = 360,
     /// 8 hours
-    H8,
+    H8 = 480,
     /// 12 hours
-    H12,
+    H12 = 720,
     /// 1 day
-    D1,
+    D1 = 1_440,
     /// 3 days
-    D3,
+    D3 = 4_320,
     /// 1 week
-    W1,
+    W1 = 10_080,
     /// 1 month
-    MOS1,
+    MOS1 = 43_200,
+}
+
+unsafe impl Sync for Timeframe {}
+
+impl Timeframe {
+    pub fn weight(self) -> usize {
+        self.into()
+    }
 }
 
 impl Display for Timeframe {
@@ -94,5 +102,11 @@ impl TryFrom<String> for Timeframe {
 impl From<Timeframe> for String {
     fn from(timeframe: Timeframe) -> Self {
         timeframe.to_string()
+    }
+}
+
+impl From<Timeframe> for usize {
+    fn from(value: Timeframe) -> Self {
+        value as Self
     }
 }
