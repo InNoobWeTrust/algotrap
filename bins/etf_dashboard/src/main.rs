@@ -1,75 +1,72 @@
 use algotrap::ext::{webdriver::*, yfinance};
 use algotrap::prelude::*;
-use chrono::{TimeZone, Utc};
 use core::error::Error;
 use fantoccini::Locator;
+use polars::prelude::*;
 use std::io::IsTerminal;
+use tracing::info;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
-    let geckodriver = GeckoDriver::default();
-    let client = geckodriver.create_client(false).await?;
-    client
-        .goto("https://farside.co.uk/bitcoin-etf-flow-all-data/")
-        .await?;
-    let elem = client.find(Locator::Css("table.etf")).await?;
-    let tb_df = client
-        .extract_table(
-            &elem,
-            Some(
-                r#"
-const table = arguments[0];
-const rows = table.rows;
-const headers = [];
-const jsonData = [];
+    let mut etf_dfs = Vec::new();
+    let mut ticker_dfs = Vec::new();
+    let srcs = vec![
+        (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
+        (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
+        (SOL_TICKER, ETF_SOL_URL, ETF_SOL_EXTRACT_SCRIPT),
+    ];
+    for (ticker, url, script) in srcs {
+        // Inner scope to automatically dispose webdriver before printing to avoid polluting console logs
+        let geckodriver = GeckoDriver::default();
+        let client = geckodriver.create_client(false).await?;
+        info!("Going to {url}...");
+        client.goto(url).await?;
+        let elem = client.find(Locator::Css("table.etf")).await?;
+        let etf_df = client
+            .extract_table(&elem, Some(script.to_string()))
+            .await?;
+        let etf_df = etf_df
+            .lazy()
+            .with_column(col("Date").str().to_date(StrptimeOptions {
+                format: Some("%d %b %Y".into()),
+                strict: false,
+                exact: true,
+                cache: false,
+            }))
+            .collect()?;
+        let start_date = etf_df.clone().column("Date")?.date()?.first().unwrap();
+        let end_date = etf_df.clone().column("Date")?.date()?.last().unwrap();
+        let start_timestamp = start_date as i64 * 86_400;
+        let end_timestamp = end_date as i64 * 86_400;
+        etf_dfs.push(etf_df);
+        client.close().await?;
 
-// Extract headers
-for (let i = 0; i < rows[0].cells.length; i++) {
-    headers.push(rows[0].cells[i].innerText);
-}
-
-// Extract data
-for (let i = 2; i < rows.length - 4; i++) {
-    const rowObject = {};
-    const cells = rows[i].cells;
-    for (let j = 0; j < cells.length; j++) {
-        let innerTxt = cells[j].innerText;
-        if (innerTxt == '-') {
-            rowObject[headers[j]] = null;
-        } else {
-            rowObject[headers[j]] = cells[j].innerText;
-        }
+        // To yfinance after we got the starting date
+        info!("Fetch ticker {ticker}...");
+        let client = yfinance::YfinanceClient::new();
+        // returns historic quotes with daily interval
+        let klines = client
+            .get_quote_history(
+                ticker,
+                start_timestamp,
+                end_timestamp,
+                yfinance::YfinanceInterval::D1,
+            )
+            .await?;
+        let ticker_df = klines.iter().cloned().to_dataframe().unwrap();
+        let ticker_df = ticker_df
+            .lazy()
+            .with_column(
+                (col("time") * lit(1000))
+                    .cast(DataType::Datetime(TimeUnit::Milliseconds, None))
+                    .alias("Date"),
+            )
+            .collect()?;
+        ticker_dfs.push(ticker_df);
     }
-    jsonData.push(rowObject);
-}
-
-return jsonData
-"#
-                .to_owned(),
-            ),
-        )
-        .await?;
-    // Dispose webdriver before printing to avoid polluting console logs
-    drop(client);
-    drop(geckodriver);
-    dbg!(&tb_df);
-    let client = yfinance::YfinanceClient::new();
-    let start = Utc
-        .with_ymd_and_hms(2009, 1, 3, 0, 0, 0)
-        .unwrap()
-        .timestamp();
-    let end = Utc
-        .with_ymd_and_hms(2025, 7, 7, 23, 59, 59)
-        .unwrap()
-        .timestamp();
-    // returns historic quotes with daily interval
-    let klines = client
-        .get_quote_history("BTC-USD", start, end, yfinance::YfinanceInterval::D1)
-        .await?;
-    let df = klines.iter().cloned().to_dataframe().unwrap();
-    println!("BTC-USD quotes:\n{df:#?}");
+    dbg!(&etf_dfs, &ticker_dfs);
     Ok(())
 }
 
@@ -90,3 +87,92 @@ fn setup_tracing() {
         );
     tracing::subscriber::set_global_default(subscriber).unwrap();
 }
+
+const BTC_TICKER: &str = "BTC-USD";
+const ETH_TICKER: &str = "ETH-USD";
+const SOL_TICKER: &str = "SOL-USD";
+
+const ETF_BTC_URL: &str = "https://farside.co.uk/bitcoin-etf-flow-all-data/";
+const ETF_ETH_URL: &str = "https://farside.co.uk/ethereum-etf-flow-all-data/";
+const ETF_SOL_URL: &str = "https://farside.co.uk/sol/";
+
+const ETF_BTC_EXTRACT_SCRIPT: &str = r#"
+const table = arguments[0];
+const rows = table.rows;
+const headers = [];
+const jsonData = [];
+
+// Extract headers
+headers.push(...[...rows[0].cells].slice(0,-1).map(e => e.innerText));
+
+// Extract data
+for (let i = 2; i < rows.length - 4; i++) {
+    const rowObject = {};
+    const cells = [...rows[i].cells].slice(0,-1);
+    for (let j = 0; j < cells.length; j++) {
+        let innerTxt = cells[j].innerText;
+        if (innerTxt == '-') {
+            rowObject[headers[j]] = null;
+        } else {
+            rowObject[headers[j]] = cells[j].innerText;
+        }
+    }
+    jsonData.push(rowObject);
+}
+
+return jsonData
+"#;
+
+const ETF_ETH_EXTRACT_SCRIPT: &str = r#"
+const table = arguments[0];
+const rows = table.rows;
+const headers = [];
+const jsonData = [];
+
+// Extract headers
+headers.push("Date", ...[...rows[1].cells].slice(1,-1).map(e => e.innerText));
+
+// Extract data
+for (let i = 5; i < rows.length - 1; i++) {
+    const rowObject = {};
+    const cells = [...rows[i].cells].slice(0,-1);
+    for (let j = 0; j < cells.length; j++) {
+        let innerTxt = cells[j].innerText;
+        if (innerTxt == '-') {
+            rowObject[headers[j]] = null;
+        } else {
+            rowObject[headers[j]] = cells[j].innerText;
+        }
+    }
+    jsonData.push(rowObject);
+}
+
+return jsonData
+"#;
+
+const ETF_SOL_EXTRACT_SCRIPT: &str = r#"
+const table = arguments[0];
+const rows = table.rows;
+const headers = [];
+const jsonData = [];
+
+// Extract headers
+headers.push("Date", ...[...rows[1].cells].slice(1,-1).map(e => e.innerText));
+
+// Extract data
+for (let i = 5; i < rows.length - 1; i++) {
+    const rowObject = {};
+    const cells = [...rows[i].cells].slice(0,-1);
+    for (let j = 0; j < cells.length; j++) {
+        let innerTxt = cells[j].innerText;
+        if (innerTxt == '-') {
+            rowObject[headers[j]] = null;
+        } else {
+            rowObject[headers[j]] = cells[j].innerText;
+        }
+    }
+    jsonData.push(rowObject);
+}
+
+return jsonData
+"#;

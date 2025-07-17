@@ -10,7 +10,9 @@ pub fn sharpe(src: &Expr, len: usize) -> Expr {
         center: false,
         fn_params: None,
     });
-    let stdev = when(stdev.clone().is_nan()).then(lit(f64::MAX)).otherwise(stdev);
+    let stdev = when(stdev.clone().is_nan())
+        .then(lit(f64::MAX))
+        .otherwise(stdev);
     let avg_ret = (src.clone() - src.clone().sma(len)).rolling_sum(RollingOptionsFixedWindow {
         window_size: len,
         min_periods: 0,
@@ -18,7 +20,9 @@ pub fn sharpe(src: &Expr, len: usize) -> Expr {
         center: false,
         fn_params: None,
     }) / lit(len as u64);
-    let avg_ret = when(avg_ret.clone().is_nan()).then(lit(0)).otherwise(avg_ret);
+    let avg_ret = when(avg_ret.clone().is_nan())
+        .then(lit(0))
+        .otherwise(avg_ret);
     avg_ret / stdev
 }
 

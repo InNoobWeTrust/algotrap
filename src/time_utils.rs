@@ -1,5 +1,6 @@
 use crate::model::Timeframe;
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
+use core::time::Duration;
 
 /// Check if the time now is multiple of period, with optional tolerance
 pub fn is_time_multiple_of_period(
@@ -8,11 +9,11 @@ pub fn is_time_multiple_of_period(
     tolerance: Option<Duration>,
 ) -> bool {
     // Calculate the total seconds from the start of the day
-    let total_seconds_since_midnight = now.timestamp();
-    let tolerance_seconds = tolerance.unwrap_or(Duration::seconds(0)).num_seconds();
+    let total_seconds_since_midnight = now.timestamp() as u64;
+    let tolerance_seconds = tolerance.map(|t| t.as_secs()).unwrap_or(0);
 
     // Convert the period to seconds
-    let period_seconds = period.num_seconds();
+    let period_seconds = period.as_secs();
 
     // Check if the total seconds is a multiple of the period seconds
     if period_seconds == 0 {
@@ -41,67 +42,67 @@ pub fn is_closing_timeframe(
     now: DateTime<Utc>,
     tolerance: Option<Duration>,
 ) -> Result<bool, String> {
-    let tolerance_seconds = tolerance.unwrap_or(Duration::seconds(0)).num_seconds();
-    let seconds_in_day = Duration::days(1).num_seconds();
+    let tolerance_seconds = tolerance.map(|t| t.as_secs()).unwrap_or(0);
+    let seconds_in_day = 86_400;
 
     match tf {
         Timeframe::M1 => Ok(is_time_multiple_of_period(
-            Duration::minutes(1),
+            Duration::from_secs(60),
             now,
             tolerance,
         )),
         Timeframe::M5 => Ok(is_time_multiple_of_period(
-            Duration::minutes(5),
+            Duration::from_secs(120),
             now,
             tolerance,
         )),
         Timeframe::M15 => Ok(is_time_multiple_of_period(
-            Duration::minutes(15),
+            Duration::from_secs(900),
             now,
             tolerance,
         )),
         Timeframe::M30 => Ok(is_time_multiple_of_period(
-            Duration::minutes(30),
+            Duration::from_secs(1_800),
             now,
             tolerance,
         )),
         Timeframe::H1 => Ok(is_time_multiple_of_period(
-            Duration::hours(1),
+            Duration::from_secs(3_600),
             now,
             tolerance,
         )),
         Timeframe::H2 => Ok(is_time_multiple_of_period(
-            Duration::hours(2),
+            Duration::from_secs(7_200),
             now,
             tolerance,
         )),
         Timeframe::H4 => Ok(is_time_multiple_of_period(
-            Duration::hours(4),
+            Duration::from_secs(14_400),
             now,
             tolerance,
         )),
         Timeframe::H6 => Ok(is_time_multiple_of_period(
-            Duration::hours(6),
+            Duration::from_secs(21_600),
             now,
             tolerance,
         )),
         Timeframe::H8 => Ok(is_time_multiple_of_period(
-            Duration::hours(8),
+            Duration::from_secs(28_800),
             now,
             tolerance,
         )),
         Timeframe::H12 => Ok(is_time_multiple_of_period(
-            Duration::hours(12),
+            Duration::from_secs(43_200),
             now,
             tolerance,
         )),
         Timeframe::D1 => {
-            let seconds_from_midnight = now.num_seconds_from_midnight() as i64;
+            let seconds_from_midnight = now.num_seconds_from_midnight() as u64;
             Ok(seconds_from_midnight <= tolerance_seconds
                 || (seconds_in_day - seconds_from_midnight) <= tolerance_seconds)
         }
         Timeframe::D3 => Ok(is_time_multiple_of_period(
-            Duration::days(3),
+            Duration::from_secs(259_200),
             now,
             tolerance,
         )),
@@ -111,7 +112,7 @@ pub fn is_closing_timeframe(
                     "Tolerance too big, must be less than a day: {tolerance:#?}"
                 ))
             } else {
-                let seconds_from_midnight = now.num_seconds_from_midnight() as i64;
+                let seconds_from_midnight = now.num_seconds_from_midnight() as u64;
                 let is_monday_start = now.weekday() == Weekday::Mon
                     && (seconds_from_midnight <= tolerance_seconds
                         || (seconds_in_day - seconds_from_midnight) <= tolerance_seconds);
@@ -127,11 +128,11 @@ pub fn is_closing_timeframe(
                     "Tolerance too big, must be less than a day: {tolerance:#?}"
                 ))
             } else {
-                let seconds_from_midnight = now.num_seconds_from_midnight() as i64;
+                let seconds_from_midnight = now.num_seconds_from_midnight() as u64;
                 let is_first_day_start = now.day() == 1
                     && (seconds_from_midnight <= tolerance_seconds
                         || (seconds_in_day - seconds_from_midnight) <= tolerance_seconds);
-                let is_last_day_end = (now + Duration::days(1)).day() == 1
+                let is_last_day_end = (now + Duration::from_secs(86_400)).day() == 1
                     && (seconds_from_midnight >= seconds_in_day - tolerance_seconds
                         || seconds_from_midnight <= tolerance_seconds);
                 Ok(is_first_day_start || is_last_day_end)
@@ -147,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_is_time_multiple_of_period_no_tolerance() {
-        let period = Duration::minutes(5);
+        let period = Duration::from_secs(5 * 60);
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 0).unwrap();
         assert!(is_time_multiple_of_period(period, now, None));
 
@@ -160,8 +161,8 @@ mod tests {
 
     #[test]
     fn test_is_time_multiple_of_period_with_tolerance() {
-        let period = Duration::minutes(5);
-        let tolerance = Some(Duration::seconds(30));
+        let period = Duration::from_secs(5 * 60);
+        let tolerance = Some(Duration::from_secs(30));
 
         // Just after a multiple
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 15).unwrap();
@@ -178,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_is_time_multiple_of_period_zero_period() {
-        let period = Duration::seconds(0);
+        let period = Duration::from_secs(0);
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 0).unwrap();
         assert!(!is_time_multiple_of_period(period, now, None));
     }
@@ -192,7 +193,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 30).unwrap();
         assert!(!is_closing_timeframe(&tf, now, None).unwrap());
 
-        let tolerance = Some(Duration::seconds(30));
+        let tolerance = Some(Duration::from_secs(30));
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 0, 15).unwrap();
         assert!(is_closing_timeframe(&tf, now, tolerance).unwrap());
     }
@@ -206,7 +207,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 30, 0).unwrap();
         assert!(!is_closing_timeframe(&tf, now, None).unwrap());
 
-        let tolerance = Some(Duration::minutes(15));
+        let tolerance = Some(Duration::from_secs(15 * 60));
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 10, 59, 0).unwrap();
         assert!(is_closing_timeframe(&tf, now, tolerance).unwrap());
     }
@@ -220,12 +221,12 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 12, 0, 0).unwrap();
         assert!(!is_closing_timeframe(&tf, now, None).unwrap());
 
-        let tolerance = Some(Duration::hours(1));
+        let tolerance = Some(Duration::from_secs(3600));
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 23, 50, 0).unwrap();
         assert!(is_closing_timeframe(&tf, now, tolerance).unwrap());
 
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 0, 0, 30).unwrap();
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(60))).unwrap());
     }
 
     #[test]
@@ -237,24 +238,24 @@ mod tests {
 
         // Sunday 23:59:59 UTC (just before Monday)
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 23, 59, 59).unwrap(); // Sunday
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::seconds(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(1))).unwrap());
 
         // Tuesday
         let now = Utc.with_ymd_and_hms(2025, 7, 8, 0, 0, 0).unwrap(); // Tuesday
         assert!(!is_closing_timeframe(&tf, now, None).unwrap());
 
         // Tolerance too big
-        let tolerance = Some(Duration::days(2));
+        let tolerance = Some(Duration::from_secs(2 * 24 * 3600));
         let now = Utc.with_ymd_and_hms(2025, 7, 7, 0, 0, 0).unwrap();
         assert!(is_closing_timeframe(&tf, now, tolerance).is_err());
 
         // Monday with tolerance
         let now = Utc.with_ymd_and_hms(2025, 7, 7, 0, 0, 30).unwrap();
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(60))).unwrap());
 
         // Sunday with tolerance
         let now = Utc.with_ymd_and_hms(2025, 7, 6, 23, 59, 30).unwrap();
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(60))).unwrap());
     }
 
     #[test]
@@ -266,23 +267,23 @@ mod tests {
 
         // Last day of month 23:59:59 UTC (just before first day of next month)
         let now = Utc.with_ymd_and_hms(2025, 7, 31, 23, 59, 59).unwrap();
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::seconds(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(60))).unwrap());
 
         // Middle of month
         let now = Utc.with_ymd_and_hms(2025, 7, 15, 0, 0, 0).unwrap();
         assert!(!is_closing_timeframe(&tf, now, None).unwrap());
 
         // Tolerance too big
-        let tolerance = Some(Duration::days(2));
+        let tolerance = Some(Duration::from_secs(2 * 24 * 3600));
         let now = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
         assert!(is_closing_timeframe(&tf, now, tolerance).is_err());
 
         // First day of month with tolerance
         let now = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 30).unwrap();
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(60))).unwrap());
 
         // Last day of month with tolerance
         let now = Utc.with_ymd_and_hms(2025, 7, 31, 23, 59, 30).unwrap();
-        assert!(is_closing_timeframe(&tf, now, Some(Duration::minutes(1))).unwrap());
+        assert!(is_closing_timeframe(&tf, now, Some(Duration::from_secs(60))).unwrap());
     }
 }

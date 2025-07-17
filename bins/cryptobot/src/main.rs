@@ -1,5 +1,6 @@
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use core::error::Error;
+use core::time::Duration;
 use dotenv::dotenv;
 use futures::future::join_all;
 use minijinja::render;
@@ -125,7 +126,7 @@ async fn notify(
         .filter(|(tf, signal)| {
             *signal != 0
                 && (conf.ntfy_always
-                    || is_closing_timeframe(tf, Utc::now(), Some(Duration::seconds(10)))
+                    || is_closing_timeframe(tf, Utc::now(), Some(Duration::from_secs(10)))
                         .unwrap_or(false))
         })
         .collect();

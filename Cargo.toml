@@ -1,6 +1,6 @@
 [workspace]
-members = ["bins/cryptobot", "bins/etf_dashboard"]
-default-members = ["bins/etf_dashboard"]
+members = [".", "bins/cryptobot", "bins/etf_dashboard"]
+default-members = [".", "bins/etf_dashboard"]
 
 [package]
 name = "algotrap"
