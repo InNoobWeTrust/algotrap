@@ -213,6 +213,8 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     let bias_rev_color = lit("rgba(178, 181, 190, 0.2)").alias("bias_reversion_color");
     let ema200 = col("close").ema(200).alias("ema200");
     let ema200_color = lit("rgba(156, 39, 176)").alias("ema200_color");
+    let neutral_revrsi = (col("open") + ohlc.bar_bias()).rev_rsi(14, 50.).alias("neutral_revrsi");
+    let neutral_revrsi_color = lit("rgba(178,181,190,0.2)").alias("neutral_revrsi_color");
     let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("bullish_revrsi");
     let bullish_revrsi_color = lit("rgba(33,150,243,0.2)").alias("bullish_revrsi_color");
     let bearish_revrsi = col("low").rev_rsi(14, 30.).alias("bearish_revrsi");
@@ -249,22 +251,6 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         .alias("rssi_color");
     let rssi_ma = rssi.clone().ema(9).alias("rssi_ma");
     let rssi_dir = (lit(3) * rssi.clone() - lit(2) * rssi_ma.clone()).alias("rssi_direction");
-    let rssi_ma_color = when(
-        (rssi_dir.clone().lt(rssi.clone()))
-            .logical_and(rssi.clone().lt(rssi_ma.clone()))
-            .logical_and(rssi_ma.clone().lt(lit(50))),
-    )
-    .then(lit("rgba(76, 175, 79, 0.7)"))
-    .otherwise(
-        when(
-            (rssi_dir.clone().gt(rssi.clone()))
-                .logical_and(rssi.clone().gt(rssi_ma.clone()))
-                .logical_and(rssi_ma.clone().gt(lit(50))),
-        )
-        .then(lit("rgba(179, 61, 44, 0.7)"))
-        .otherwise(lit("rgba(253, 216, 53, 0.3)")),
-    )
-    .alias("rssi_ma_color");
 
     // Stability indicator
     let atr_rev_percent = ohlc
@@ -325,6 +311,8 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         bias_rev_color,
         ema200,
         ema200_color,
+        neutral_revrsi,
+        neutral_revrsi_color,
         bullish_revrsi,
         bullish_revrsi_color,
         bearish_revrsi,
@@ -336,7 +324,6 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         rssi,
         rssi_color,
         rssi_ma,
-        rssi_ma_color,
         rssi_dir,
         structure_pwr,
         structure_pwr_color,
@@ -406,12 +393,10 @@ const TDV_HTML_TEMPLATE: &str = r#"
         body {
             min-height: 100%;
             box-sizing: border-box;
-            background: #222;
         }
 
         #container {
             height: 100%;
-            background: lightblue;
         }
 
         #overlay {
@@ -494,12 +479,12 @@ const TDV_HTML_TEMPLATE: &str = r#"
         const chart = LightweightCharts.createChart(container, {
             autoSize: true,
             layout: {
-                background: { color: '#222' },
+                background: { color: '#22222240' },
                 textColor: '#DDD',
             },
             grid: {
-                vertLines: { color: '#444' },
-                horzLines: { color: '#444' },
+                vertLines: { color: '#44444440' },
+                horzLines: { color: '#44444440' },
             },
             timeScale: {
                 timeVisible: true,
@@ -539,28 +524,47 @@ const TDV_HTML_TEMPLATE: &str = r#"
         const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, {});
         const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
         const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
         const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
         const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(76, 175, 80, 0.2)',
-            topFillColor1: 'rgba(76, 175, 80, 0.5)',
-            topFillColor2: 'rgba(76, 175, 80, 0.7)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.2)',
+            topLineColor: 'rgba(76, 175, 80, 0.3)',
+            topFillColor1: 'rgba(76, 175, 80, 0.2)',
+            topFillColor2: 'rgba(76, 175, 80, 0.5)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.3)',
             bottomFillColor1: 'rgba(242, 54, 69, 0.5)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.7)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
         }, 1);
         const structurePwrDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 0 },
             topLineColor: 'rgba(76, 175, 80, 0.5)',
             topFillColor1: 'rgba(76, 175, 80, 0.05)',
             topFillColor2: 'rgba(76, 175, 80, 0.1)',
             bottomLineColor: 'rgba(242, 54, 69, 0.5)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.05)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
         }, 1);
         const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        const rssiMaSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        const rssiMaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 50 },
+            topLineColor: 'rgba(76, 175, 80, 0.1)',
+            topFillColor1: 'rgba(76, 175, 80, 0.2)',
+            topFillColor2: 'rgba(76, 175, 80, 0.3)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.3)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
+        }, 2);
+        const rssiDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 50 },
+            topLineColor: 'rgba(76, 175, 80, 0.2)',
+            topFillColor1: 'rgba(76, 175, 80, 0.05)',
+            topFillColor2: 'rgba(76, 175, 80, 0.1)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.2)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
+        }, 2);
         const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
         const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
         const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
@@ -680,6 +684,11 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 value: d.atr_lowerband,
                 color: d.atr_lowerband_color,
             })));
+            neutralRevRsiSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.neutral_revrsi,
+                color: d.neutral_revrsi_color,
+            })));
             bullishBandSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d.bullish_revrsi,
@@ -711,7 +720,10 @@ const TDV_HTML_TEMPLATE: &str = r#"
             rssiMaSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d.rssi_ma,
-                color: d.rssi_ma_color,
+            })));
+            rssiDirSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.rssi_direction,
             })));
             atrRevSeries.setData(data.map(d => ({
                 time: d.time,
