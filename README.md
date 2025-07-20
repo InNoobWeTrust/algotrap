@@ -37,7 +37,7 @@ This project supports various deployment methods: local development, Docker, and
 
 For local development, you can run the application directly using `Makefile.toml` and a `.env` file in the project root.
 
-1.  **Create your `.env` file**: Ensure you have a `.env` file in the project root with all necessary environment variables. You can use `.env.example` as a reference.
+1.  **Create your `.env` file**: Ensure you have a `.env` file in `bins/cryptobot/` with all necessary environment variables. You can use `bins/cryptobot/.env.example` as a reference.
 2.  **Run with Makefile**: Use `cargo make` commands to run the application. For example:
     ```bash
     cargo make run
@@ -108,7 +108,7 @@ This project uses Kubernetes for deployment, supporting multiple cronjob configu
 
 1.  **Create environment-specific `.env` files**: For each `cryptobot` cronjob instance you want to deploy, create a `.env` file in the `bins/cryptobot/deployment/envs/` directory (e.g., `bins/cryptobot/deployment/envs/ETH-USDT.env`). These files will contain the specific environment variables for each cronjob. You can use `bins/cryptobot/deployment/envs/ETH-USDT.env.example` as a reference.
 
-2.  **Deploy Kubernetes cronjobs**: Run the cronjob deployment script from the `deployment` directory:
+2.  **Deploy Kubernetes cronjobs**: Navigate to `bins/cryptobot/` and run the cronjob deployment script:
     ```bash
     ./deployment/deploy_cronjobs.sh
     ```
