@@ -212,8 +212,10 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     let bias_rev = ohlc.bias_reversion_smoothed(9).alias("bias_reversion");
     let bias_rev_color = lit("rgba(178, 181, 190, 0.2)").alias("bias_reversion_color");
     let ema200 = col("close").ema(200).alias("ema200");
-    let ema200_color = lit("rgba(156, 39, 176)").alias("ema200_color");
-    let neutral_revrsi = (col("open") + ohlc.bar_bias()).rev_rsi(14, 50.).alias("neutral_revrsi");
+    let ema200_color = lit("rgba(156, 39, 176, 0.5)").alias("ema200_color");
+    let neutral_revrsi = (col("open") + ohlc.bar_bias())
+        .rev_rsi(14, 50.)
+        .alias("neutral_revrsi");
     let neutral_revrsi_color = lit("rgba(178,181,190,0.2)").alias("neutral_revrsi_color");
     let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("bullish_revrsi");
     let bullish_revrsi_color = lit("rgba(33,150,243,0.2)").alias("bullish_revrsi_color");
@@ -490,7 +492,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 timeVisible: true,
             },
         });
-        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
         const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: {
                 type: 'volume',
@@ -527,6 +528,8 @@ const TDV_HTML_TEMPLATE: &str = r#"
         const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
         const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
         const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
+        // Candlestick is added last in the panel to have higher z-order
+        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
