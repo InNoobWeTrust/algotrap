@@ -4,7 +4,7 @@ use core::error::Error;
 use fantoccini::Locator;
 use polars::prelude::*;
 use std::io::IsTerminal;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
@@ -12,6 +12,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
     let mut etf_dfs = Vec::new();
     let mut ticker_dfs = Vec::new();
+    let mut all_fund_vols = Vec::new();
     let srcs = vec![
         (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
         (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
@@ -40,14 +41,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         let end_date = etf_df.clone().column("Date")?.date()?.last().unwrap();
         let start_timestamp = start_date as i64 * 86_400;
         let end_timestamp = end_date as i64 * 86_400;
-        etf_dfs.push(etf_df);
+        etf_dfs.push(etf_df.clone());
         client.close().await?;
 
         // To yfinance after we got the starting date
         info!("Fetch ticker {ticker}...");
-        let client = yfinance::YfinanceClient::new();
+        let yfinance_client = yfinance::YfinanceClient::new();
         // returns historic quotes with daily interval
-        let klines = client
+        let klines = yfinance_client
             .get_quote_history(
                 ticker,
                 start_timestamp,
@@ -65,8 +66,69 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             )
             .collect()?;
         ticker_dfs.push(ticker_df);
+
+        let fund_tickers: Vec<_> = etf_df
+            .get_column_names()
+            .into_iter()
+            .filter(|name| *name != "Date" && *name != "Total")
+            .map(|s| s.to_string())
+            .collect();
+        let mut fund_volume_dfs = Vec::new();
+
+        for fund_ticker in fund_tickers {
+            info!("Fetch fund ticker {}...", &fund_ticker);
+            match yfinance_client
+                .get_quote_history(
+                    &fund_ticker,
+                    start_timestamp,
+                    end_timestamp,
+                    yfinance::YfinanceInterval::D1,
+                )
+                .await
+            {
+                Ok(klines) => {
+                    if !klines.is_empty() {
+                        let fund_df = klines.iter().cloned().to_dataframe().unwrap();
+                        let fund_df = fund_df
+                            .lazy()
+                            .with_column(
+                                (col("time") * lit(1000))
+                                    .cast(DataType::Datetime(TimeUnit::Milliseconds, None))
+                                    .dt()
+                                    .date()
+                                    .alias("Date"),
+                            )
+                            .select([col("Date"), col("volume").alias(&fund_ticker)])
+                            .collect()?;
+                        fund_volume_dfs.push(fund_df);
+                    }
+                }
+                Err(e) => {
+                    warn!("Could not fetch ticker {fund_ticker}: {e}");
+                }
+            }
+        }
+
+        if !fund_volume_dfs.is_empty() {
+            let mut combined_vols_df = fund_volume_dfs[0].clone();
+            if fund_volume_dfs.len() > 1 {
+                for i in 1..fund_volume_dfs.len() {
+                    combined_vols_df = combined_vols_df
+                        .lazy()
+                        .join_builder()
+                        .with(fund_volume_dfs[i].clone().lazy())
+                        .left_on([col("Date")])
+                        .right_on([col("Date")])
+                        .how(JoinType::Full)
+                        .coalesce(JoinCoalesce::CoalesceColumns)
+                        .finish()
+                        .collect()?;
+                }
+            }
+            all_fund_vols.push(combined_vols_df);
+        }
     }
-    dbg!(&etf_dfs, &ticker_dfs);
+    dbg!(&etf_dfs, &ticker_dfs, &all_fund_vols);
     Ok(())
 }
 
