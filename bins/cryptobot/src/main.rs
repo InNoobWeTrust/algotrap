@@ -1,3 +1,4 @@
+use algotrap::df_utils::JsonDataframe;
 use chrono::Utc;
 use core::error::Error;
 use core::time::Duration;
@@ -9,7 +10,6 @@ use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
 
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::ext::ntfy;
@@ -73,8 +73,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let all_dfs_serialized: HashMap<String, Value> = all_dfs
         .par_iter()
         .map(|(tf, df)| {
-            let df_json =
-                df_to_json(&mut df.clone()).expect("Failed to serialize data frame to json");
+            let df_json: JsonDataframe = df
+                .try_into()
+                .expect("Failed to serialize data frame to json");
+            let df_json: Value = df_json.into();
             (tf.to_string(), df_json)
         })
         .collect();
@@ -154,8 +156,11 @@ async fn notify(
                     .select([col("rssi"), col("atr_reversion_percent")])
                     .collect()
                     .expect("Failed to extract columns");
-                let df_json = df_to_json(&mut df.slice(-2, 1))
+                let df_json: JsonDataframe = df
+                    .slice(-2, 1)
+                    .try_into()
                     .expect("Failed to serialize data frame to json");
+                let df_json: Value = df_json.into();
                 (tf.to_string(), df_json)
             })
             .collect();
@@ -348,17 +353,6 @@ fn process_data(klines: &[Kline], conf: &EnvConf) -> Result<DataFrame, Box<dyn E
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
     let df_with_indicators = df.lazy().with_columns(indicators(conf)).collect().unwrap();
     Ok(df_with_indicators)
-}
-
-fn df_to_json(df: &mut DataFrame) -> Result<Value, Box<dyn Error + Send + Sync>> {
-    let mut file = Cursor::new(Vec::new());
-    JsonWriter::new(&mut file)
-        .with_json_format(JsonFormat::Json)
-        .finish(df)
-        .unwrap();
-    //let df_json = String::from_utf8(file.into_inner()).unwrap();
-    let df_json = serde_json::from_slice(&file.into_inner())?;
-    Ok(df_json)
 }
 
 struct TdvHtmlVars {
