@@ -3,6 +3,7 @@
 Cargo.lock
 .bacon-locations
 *.html
+*.log
 .env
 k8s/**/secret.yaml
 bins/cryptobot/deployment/envs/*.env

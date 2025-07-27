@@ -7,10 +7,12 @@ edition = "2024"
 algotrap = { path = "../..", features = ["webdriver"] }
 chrono = "0.4.41"
 fantoccini = "0.22.0"
+futures = "0.3.31"
 minijinja = "2.11.0"
 polars = { version = "0.46.0", features = ["lazy", "temporal", "strings"] }
 rand = "0.9.1"
 reqwest = "0.12.22"
+scopeguard = "1.2.0"
 serde_json = "1.0.140"
 tokio = { version = "1.46.1", features = ["full"] }
 tracing = "0.1.41"

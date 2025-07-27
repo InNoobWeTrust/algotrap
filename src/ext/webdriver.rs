@@ -12,9 +12,12 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use tracing::{debug, instrument, warn};
 
-use std::ops::Deref;
-use std::process::{Child, Command, Stdio};
-use std::{fmt::Debug, io::Cursor, num::NonZeroUsize};
+use std::{fmt::Debug, io::Cursor, num::NonZeroUsize, path::PathBuf};
+use std::{
+    fs::File,
+    process::{Child, Command, Stdio},
+};
+use std::{ops::Deref, path::Path};
 
 #[derive(Debug)]
 pub(crate) struct Subprocess(Child);
@@ -39,12 +42,24 @@ impl Drop for Subprocess {
 }
 
 impl Subprocess {
-    pub fn new(cmd: &str, args: &Vec<String>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        cmd: &str,
+        args: &Vec<String>,
+        logfile: Option<PathBuf>,
+    ) -> Result<Self, std::io::Error> {
+        let (pipe_out, pipe_err) = match logfile {
+            Some(p) => {
+                let out = File::create(p.clone()).unwrap();
+                let err = File::create(p).unwrap();
+                (Stdio::from(out), Stdio::from(err))
+            }
+            None => (Stdio::inherit(), Stdio::inherit()),
+        };
         let child = Command::new(cmd)
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(pipe_out)
+            .stderr(pipe_err)
             .spawn()?;
         Ok(Subprocess(child))
     }
@@ -77,6 +92,7 @@ impl Default for GeckoDriver {
                 "--log".to_string(),
                 "fatal".to_string(),
             ],
+            None,
         )
         .expect("Failed to start geckodriver");
         debug!(%port, "Starting geckodriver...");
@@ -88,7 +104,9 @@ impl Default for GeckoDriver {
 }
 
 impl GeckoDriver {
-    pub fn new(port: usize) -> Result<Self, Box<dyn Error>> {
+    pub fn default_with_log(logfile: &Path) -> Result<Self, std::io::Error> {
+        let mut rng = SmallRng::seed_from_u64(Utc::now().timestamp_micros() as u64);
+        let port = rng.random_range(4445..=7999);
         let proc = Subprocess::new(
             "geckodriver",
             &vec![
@@ -97,6 +115,27 @@ impl GeckoDriver {
                 "--log".to_string(),
                 "fatal".to_string(),
             ],
+            Some(logfile.to_path_buf()),
+        )?;
+
+        debug!(%port, "Starting geckodriver...");
+        // Sleep for 3 seconds, waiting webdriver
+        std::thread::sleep(Duration::from_secs(3));
+        debug!(%port, "geckodriver is listening...");
+
+        Ok(Self { proc, port })
+    }
+
+    pub fn new(port: usize, logfile: &Path) -> Result<Self, std::io::Error> {
+        let proc = Subprocess::new(
+            "geckodriver",
+            &vec![
+                "-p".to_string(),
+                port.to_string(),
+                "--log".to_string(),
+                "fatal".to_string(),
+            ],
+            Some(logfile.to_path_buf()),
         )?;
 
         debug!(%port, "Starting geckodriver...");
