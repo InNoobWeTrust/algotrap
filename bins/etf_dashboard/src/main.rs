@@ -2,10 +2,8 @@ use algotrap::ext::{webdriver::*, yfinance};
 use algotrap::prelude::*;
 use core::error::Error;
 use fantoccini::Locator;
-use fantoccini::error::CmdError;
 use minijinja::render;
 use polars::prelude::*;
-use scopeguard::defer;
 use std::io::IsTerminal;
 use std::path::Path;
 use tracing::{info, warn};
@@ -14,9 +12,13 @@ use tracing_subscriber::prelude::*;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
-    let mut etf_dfs = Vec::new();
-    let mut ticker_dfs = Vec::new();
-    let mut all_fund_vols = Vec::new();
+    let mut etf_funds_dfs = Vec::new(); // Net flow daily of individual funds
+    let mut etf_total_dfs = Vec::new(); // Net flow total daily
+    let mut etf_cumulative_funds_dfs = Vec::new(); // Cumulative net flow of individual funds daily
+    let mut etf_cumulative_total_dfs = Vec::new(); // Cumulative net flow total daily
+    let mut ticker_dfs = Vec::new(); // Asset price daily
+    let mut fund_vols_dfs = Vec::new(); // Trade volume daily of individual funds
+    let mut fund_vol_total_dfs = Vec::new(); // Trade volume total daily
     let srcs = vec![
         (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
         (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
@@ -25,7 +27,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     for (ticker, url, script) in srcs {
         // Inner scope to automatically dispose webdriver before printing to avoid polluting console logs
         let (etf_df, start_timestamp, end_timestamp) = get_etf_data(url, script).await?;
-        etf_dfs.push(etf_df.clone());
+        etf_funds_dfs.push(etf_df.clone());
+        let fund_tickers: Vec<_> = etf_df
+            .get_column_names()
+            .into_iter()
+            .filter(|name| *name != "Date" && *name != "Total")
+            .map(|s| s.to_string())
+            .collect();
+
+        let etf_total = etf_df.
 
         // To yfinance after we got the starting date
         info!("Fetch ticker {ticker}...");
@@ -50,12 +60,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .collect()?;
         ticker_dfs.push(ticker_df);
 
-        let fund_tickers: Vec<_> = etf_df
-            .get_column_names()
-            .into_iter()
-            .filter(|name| *name != "Date" && *name != "Total")
-            .map(|s| s.to_string())
-            .collect();
         let mut fund_volume_dfs = Vec::new();
 
         for fund_ticker in fund_tickers {
@@ -108,10 +112,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         .collect()?;
                 }
             }
-            all_fund_vols.push(combined_vols_df);
+            fund_vols_dfs.push(combined_vols_df);
         }
     }
-    dbg!(&etf_dfs, &ticker_dfs, &all_fund_vols);
+    dbg!(&etf_funds_dfs, &ticker_dfs, &fund_vols_dfs);
     Ok(())
 }
 
@@ -145,6 +149,48 @@ async fn get_etf_data(
     client.close().await?;
 
     Ok((etf_df, start_timestamp, end_timestamp))
+}
+
+fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
+    let mut features = Vec::new();
+
+    // Net flow total
+    let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
+    features.push(sum_horizontal(total_exprs, true).alias("netflow_total"));
+
+    // MA20 of net flow total
+    features.push(col("netflow_total").sma(20).alias("netflow_total_ma20"));
+
+    // Cumulative net flow total
+    features.push(
+        col("netflow_total")
+            .cum_sum(false)
+            .alias("cumulative_netflow_total"),
+    );
+
+    // Cumulative net flow of individual funds
+    for ticker in fund_cols {
+        features.push(
+            col(ticker)
+                .cum_sum(false)
+                .alias(&format!("cumulative_netflow_{}", ticker)),
+        );
+    }
+
+    features
+}
+
+fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
+    let mut features = Vec::new();
+
+    // Volume total
+    let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
+    features.push(sum_horizontal(vol_exprs, true).alias("volume_total"));
+
+    // MA20 of volume total
+    features.push(col("volume_total").sma(20).alias("volume_total_ma20"));
+
+    features
 }
 
 fn setup_tracing() {
