@@ -3,7 +3,9 @@ kind: CronJob
 metadata:
   name: {{CRONJOB_NAME}}
 spec:
-  schedule: "*/5 * * * *"
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Replace
+  startingDeadlineSeconds: 10
   jobTemplate:
     spec:
       template:
