@@ -36,7 +36,7 @@ impl Drop for Subprocess {
             if self.0.kill().is_ok() {
                 return;
             }
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 }

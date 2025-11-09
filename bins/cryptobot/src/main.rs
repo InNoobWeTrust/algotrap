@@ -202,7 +202,7 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     let time_to_date = col("time")
         .cast(DataType::Datetime(
             TimeUnit::Milliseconds,
-            Some("UTC".into()),
+            Some(TimeZone::UTC),
         ))
         .alias("Date");
 

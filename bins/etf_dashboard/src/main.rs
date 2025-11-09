@@ -1,8 +1,10 @@
-use algotrap::ext::{webdriver::*, yfinance};
+use algotrap::ext::{webdriver::*, yfinance::*};
 use algotrap::prelude::*;
+use algotrap::ta::prelude::*;
 use core::error::Error;
 use fantoccini::Locator;
 use minijinja::render;
+use polars::lazy::prelude::*;
 use polars::prelude::*;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -12,13 +14,13 @@ use tracing_subscriber::prelude::*;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
-    let mut etf_funds_dfs = Vec::new(); // Net flow daily of individual funds
-    let mut etf_total_dfs = Vec::new(); // Net flow total daily
-    let mut etf_cumulative_funds_dfs = Vec::new(); // Cumulative net flow of individual funds daily
-    let mut etf_cumulative_total_dfs = Vec::new(); // Cumulative net flow total daily
-    let mut ticker_dfs = Vec::new(); // Asset price daily
-    let mut fund_vols_dfs = Vec::new(); // Trade volume daily of individual funds
-    let mut fund_vol_total_dfs = Vec::new(); // Trade volume total daily
+    let mut etf_funds_dfs: Vec<DataFrame> = Vec::new(); // Net flow daily of individual funds
+    let mut etf_total_dfs: Vec<DataFrame> = Vec::new(); // Net flow total daily
+    let mut etf_cumulative_funds_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow of individual funds daily
+    let mut etf_cumulative_total_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow total daily
+    let mut ticker_dfs: Vec<DataFrame> = Vec::new(); // Asset price daily
+    let mut fund_vols_dfs: Vec<DataFrame> = Vec::new(); // Trade volume daily of individual funds
+    let mut fund_vol_total_dfs: Vec<DataFrame> = Vec::new(); // Trade volume total daily
     let srcs = vec![
         (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
         (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
@@ -35,19 +37,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .map(|s| s.to_string())
             .collect();
 
-        let etf_total = etf_df.
+        etf_total_dfs.push(
+            etf_df
+                .clone()
+                .lazy()
+                .with_columns(etf_netflow_features(&fund_tickers))
+                .collect()?,
+        );
 
         // To yfinance after we got the starting date
         info!("Fetch ticker {ticker}...");
-        let yfinance_client = yfinance::YfinanceClient::new();
+        let yfinance_client = YfinanceClient::new();
         // returns historic quotes with daily interval
         let klines = yfinance_client
-            .get_quote_history(
-                ticker,
-                start_timestamp,
-                end_timestamp,
-                yfinance::YfinanceInterval::D1,
-            )
+            .get_quote_history(ticker, start_timestamp, end_timestamp, YfinanceInterval::D1)
             .await?;
         let ticker_df = klines.iter().cloned().to_dataframe().unwrap();
         let ticker_df = ticker_df
@@ -69,7 +72,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                     &fund_ticker,
                     start_timestamp,
                     end_timestamp,
-                    yfinance::YfinanceInterval::D1,
+                    YfinanceInterval::D1,
                 )
                 .await
             {
@@ -142,8 +145,8 @@ async fn get_etf_data(
             cache: false,
         }))
         .collect()?;
-    let start_date = etf_df.clone().column("Date")?.date()?.first().unwrap();
-    let end_date = etf_df.clone().column("Date")?.date()?.last().unwrap();
+    let start_date = etf_df.clone().column("Date")?.date()?.phys.get(0).unwrap();
+    let end_date = etf_df.clone().column("Date")?.date()?.phys.get(etf_df.height() - 1).unwrap();
     let start_timestamp = start_date as i64 * 86_400;
     let end_timestamp = end_date as i64 * 86_400;
     client.close().await?;
@@ -151,12 +154,17 @@ async fn get_etf_data(
     Ok((etf_df, start_timestamp, end_timestamp))
 }
 
+/// Sum total net flow across all funds
 fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
     // Net flow total
     let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
-    features.push(sum_horizontal(total_exprs, true).alias("netflow_total"));
+    features.push(
+        sum_horizontal(total_exprs, true)
+            .expect("Failed to sum by funds")
+            .alias("netflow_total"),
+    );
 
     // MA20 of net flow total
     features.push(col("netflow_total").sma(20).alias("netflow_total_ma20"));
@@ -180,12 +188,17 @@ fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     features
 }
 
+// Sum vol across all funds
 fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
     // Volume total
     let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
-    features.push(sum_horizontal(vol_exprs, true).alias("volume_total"));
+    features.push(
+        sum_horizontal(vol_exprs, true)
+            .expect("Failed to sum by vol")
+            .alias("volume_total"),
+    );
 
     // MA20 of volume total
     features.push(col("volume_total").sma(20).alias("volume_total_ma20"));

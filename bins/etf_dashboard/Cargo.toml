@@ -9,7 +9,7 @@ chrono = "0.4.41"
 fantoccini = "0.22.0"
 futures = "0.3.31"
 minijinja = "2.11.0"
-polars = { version = "0.49.0", default-features = true, features = [
+polars = { version = "0.51.0", default-features = true, features = [
 	"lazy",
 	"polars-ops",
 	"temporal",
