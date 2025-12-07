@@ -16,17 +16,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
     let mut etf_funds_dfs: Vec<DataFrame> = Vec::new(); // Net flow daily of individual funds
     let mut etf_total_dfs: Vec<DataFrame> = Vec::new(); // Net flow total daily
-    let mut etf_cumulative_funds_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow of individual funds daily
-    let mut etf_cumulative_total_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow total daily
     let mut ticker_dfs: Vec<DataFrame> = Vec::new(); // Asset price daily
     let mut fund_vols_dfs: Vec<DataFrame> = Vec::new(); // Trade volume daily of individual funds
-    let mut fund_vol_total_dfs: Vec<DataFrame> = Vec::new(); // Trade volume total daily
     let srcs = vec![
         (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
         (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
         (SOL_TICKER, ETF_SOL_URL, ETF_SOL_EXTRACT_SCRIPT),
     ];
-    for (ticker, url, script) in srcs {
+    for (ticker, url, script) in &srcs {
         // Inner scope to automatically dispose webdriver before printing to avoid polluting console logs
         let (etf_df, start_timestamp, end_timestamp) = get_etf_data(url, script).await?;
         etf_funds_dfs.push(etf_df.clone());
@@ -37,13 +34,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .map(|s| s.to_string())
             .collect();
 
-        etf_total_dfs.push(
-            etf_df
-                .clone()
-                .lazy()
-                .with_columns(etf_netflow_features(&fund_tickers))
-                .collect()?,
-        );
+        let etf_total_df = etf_df
+            .clone()
+            .lazy()
+            .with_columns(etf_netflow_features(&fund_tickers))
+            .collect()?;
+        etf_total_dfs.push(etf_total_df);
 
         // To yfinance after we got the starting date
         info!("Fetch ticker {ticker}...");
@@ -115,10 +111,53 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         .collect()?;
                 }
             }
+            
+            // Get volume column names (all columns except Date)
+            let vol_cols: Vec<_> = combined_vols_df
+                .get_column_names()
+                .into_iter()
+                .filter(|name| *name != "Date")
+                .map(|s| s.to_string())
+                .collect();
+            
+            // Add volume features (total and moving average)
+            let combined_vols_df = combined_vols_df
+                .lazy()
+                .with_columns(fund_vol_features(&vol_cols))
+                .collect()?;
+            
             fund_vols_dfs.push(combined_vols_df);
         }
     }
-    dbg!(&etf_funds_dfs, &ticker_dfs, &fund_vols_dfs);
+    
+    // Process and output the results for each ETF
+    for (i, (ticker, _, _)) in srcs.iter().enumerate() {
+        info!("Processing {ticker}...");
+        
+        // Print summary information
+        info!("ETF Data for {ticker}:");
+        info!("  Rows: {}", etf_funds_dfs[i].height());
+        info!("  Columns: {}", etf_funds_dfs[i].width());
+        
+        info!("Ticker Data for {ticker}:");
+        info!("  Rows: {}", ticker_dfs[i].height());
+        
+        if i < fund_vols_dfs.len() {
+            info!("Fund Volume Data for {ticker}:");
+            info!("  Rows: {}", fund_vols_dfs[i].height());
+            info!("  Columns: {}", fund_vols_dfs[i].width());
+        }
+        
+        info!("Net Flow Total for {ticker}:");
+        if let Ok(total_col) = etf_total_dfs[i].column("netflow_total") {
+            if let Ok(sum) = total_col.f64().map(|ca| ca.sum()) {
+                if let Some(sum_val) = sum {
+                    info!("  Total net flow: ${:.2}M", sum_val / 1_000_000.0);
+                }
+            }
+        }
+    }
+    
     Ok(())
 }
 
