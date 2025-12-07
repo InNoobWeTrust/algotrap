@@ -486,11 +486,16 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
     
     <script>
         // Parse CSV data
+        // Note: This simple parser works because polars CsvWriter properly escapes
+        // quoted fields. For more complex CSV with embedded commas/quotes, 
+        // consider using a full CSV parsing library like Papa Parse.
         function parseCSV(csv) {
-            const lines = csv.trim().split('\n');
+            // Handle both \n and \r\n line endings
+            const lines = csv.trim().split(/\r?\n/);
             const headers = lines[0].split(',');
             const data = [];
             for (let i = 1; i < lines.length; i++) {
+                if (!lines[i].trim()) continue; // Skip empty lines
                 const values = lines[i].split(',');
                 const row = {};
                 headers.forEach((header, index) => {
@@ -755,6 +760,10 @@ fn render_etf_dashboard_html(vars: &EtfDashboardVars) -> String {
     .to_string()
 }
 
+// TDV_HTML_TEMPLATE is kept for potential future use with technical indicator
+// dashboards. It's a complete template with lightweight-charts integration for
+// candlestick charts with multiple technical indicators (RSI, ATR, etc.).
+// Currently not used by ETF dashboard but may be useful for other chart types.
 #[allow(dead_code)]
 const TDV_HTML_TEMPLATE: &str = r#"
 <!DOCTYPE html>
