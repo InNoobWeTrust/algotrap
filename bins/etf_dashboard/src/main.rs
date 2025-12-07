@@ -6,6 +6,7 @@ use fantoccini::Locator;
 use minijinja::render;
 use polars::lazy::prelude::*;
 use polars::prelude::*;
+use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
 use tracing::{info, warn};
@@ -37,11 +38,39 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .map(|s| s.to_string())
             .collect();
 
-        etf_total_dfs.push(
-            etf_df
-                .clone()
+        let etf_with_features = etf_df
+            .clone()
+            .lazy()
+            .with_columns(etf_netflow_features(&fund_tickers))
+            .collect()?;
+        
+        etf_total_dfs.push(etf_with_features.clone());
+        
+        // Extract cumulative netflow for individual funds
+        let cumulative_cols: Vec<_> = etf_with_features
+            .get_column_names()
+            .into_iter()
+            .filter(|name| name.starts_with("cumulative_netflow_"))
+            .map(|s| col(s.as_str()))
+            .collect();
+        
+        if !cumulative_cols.is_empty() {
+            let mut cumulative_select_cols = vec![col("Date")];
+            cumulative_select_cols.extend(cumulative_cols);
+            etf_cumulative_funds_dfs.push(
+                etf_with_features
+                    .clone()
+                    .lazy()
+                    .select(cumulative_select_cols)
+                    .collect()?,
+            );
+        }
+        
+        // Extract cumulative netflow total
+        etf_cumulative_total_dfs.push(
+            etf_with_features
                 .lazy()
-                .with_columns(etf_netflow_features(&fund_tickers))
+                .select([col("Date"), col("cumulative_netflow_total")])
                 .collect()?,
         );
 
@@ -115,10 +144,103 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         .collect()?;
                 }
             }
+            
+            // Apply volume features (total and MA20)
+            let vol_cols: Vec<_> = combined_vols_df
+                .get_column_names()
+                .into_iter()
+                .filter(|name| *name != "Date")
+                .map(|s| s.to_string())
+                .collect();
+            
+            let combined_vols_df = combined_vols_df
+                .lazy()
+                .with_columns(fund_vol_features(&vol_cols))
+                .collect()?;
+            
+            fund_vol_total_dfs.push(
+                combined_vols_df
+                    .clone()
+                    .lazy()
+                    .select([col("Date"), col("volume_total"), col("volume_total_ma20")])
+                    .collect()?,
+            );
             fund_vols_dfs.push(combined_vols_df);
         }
     }
-    dbg!(&etf_funds_dfs, &ticker_dfs, &fund_vols_dfs);
+    
+    // Create output directory
+    let output_dir = Path::new("output/etf_dashboard");
+    fs::create_dir_all(output_dir)?;
+    info!("Created output directory: {}", output_dir.display());
+    
+    // Save processed data for each asset
+    let asset_names = ["BTC", "ETH", "SOL"];
+    for (i, asset_name) in asset_names.iter().enumerate() {
+        if i < etf_funds_dfs.len() {
+            info!("Saving data for {asset_name}...");
+            
+            // Save individual fund netflows
+            let funds_file = output_dir.join(format!("{}_funds_netflow.csv", asset_name));
+            let mut funds_csv = std::fs::File::create(&funds_file)?;
+            CsvWriter::new(&mut funds_csv)
+                .include_header(true)
+                .finish(&mut etf_funds_dfs[i].clone())?;
+            info!("Saved to {}", funds_file.display());
+            
+            // Save total netflow with features
+            if i < etf_total_dfs.len() {
+                let total_file = output_dir.join(format!("{}_total_netflow.csv", asset_name));
+                let mut total_csv = std::fs::File::create(&total_file)?;
+                CsvWriter::new(&mut total_csv)
+                    .include_header(true)
+                    .finish(&mut etf_total_dfs[i].clone())?;
+                info!("Saved to {}", total_file.display());
+            }
+            
+            // Save cumulative netflows
+            if i < etf_cumulative_total_dfs.len() {
+                let cumulative_file = output_dir.join(format!("{}_cumulative_total.csv", asset_name));
+                let mut cumulative_csv = std::fs::File::create(&cumulative_file)?;
+                CsvWriter::new(&mut cumulative_csv)
+                    .include_header(true)
+                    .finish(&mut etf_cumulative_total_dfs[i].clone())?;
+                info!("Saved to {}", cumulative_file.display());
+            }
+            
+            // Save ticker prices
+            if i < ticker_dfs.len() {
+                let ticker_file = output_dir.join(format!("{}_price.csv", asset_name));
+                let mut ticker_csv = std::fs::File::create(&ticker_file)?;
+                CsvWriter::new(&mut ticker_csv)
+                    .include_header(true)
+                    .finish(&mut ticker_dfs[i].clone())?;
+                info!("Saved to {}", ticker_file.display());
+            }
+            
+            // Save fund volumes
+            if i < fund_vols_dfs.len() {
+                let vols_file = output_dir.join(format!("{}_fund_volumes.csv", asset_name));
+                let mut vols_csv = std::fs::File::create(&vols_file)?;
+                CsvWriter::new(&mut vols_csv)
+                    .include_header(true)
+                    .finish(&mut fund_vols_dfs[i].clone())?;
+                info!("Saved to {}", vols_file.display());
+            }
+            
+            // Save fund volume totals
+            if i < fund_vol_total_dfs.len() {
+                let vol_total_file = output_dir.join(format!("{}_volume_total.csv", asset_name));
+                let mut vol_total_csv = std::fs::File::create(&vol_total_file)?;
+                CsvWriter::new(&mut vol_total_csv)
+                    .include_header(true)
+                    .finish(&mut fund_vol_total_dfs[i].clone())?;
+                info!("Saved to {}", vol_total_file.display());
+            }
+        }
+    }
+    
+    info!("All data saved to {}", output_dir.display());
     Ok(())
 }
 
