@@ -237,6 +237,37 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                     .finish(&mut fund_vol_total_dfs[i].clone())?;
                 info!("Saved to {}", vol_total_file.display());
             }
+            
+            // Generate HTML dashboard
+            info!("Generating HTML dashboard for {asset_name}...");
+            let netflow_csv = if i < etf_total_dfs.len() {
+                df_to_csv_string(&etf_total_dfs[i])?
+            } else {
+                String::new()
+            };
+            
+            let price_csv = if i < ticker_dfs.len() {
+                df_to_csv_string(&ticker_dfs[i])?
+            } else {
+                String::new()
+            };
+            
+            let volume_csv = if i < fund_vol_total_dfs.len() {
+                df_to_csv_string(&fund_vol_total_dfs[i])?
+            } else {
+                String::new()
+            };
+            
+            let html = render_etf_dashboard_html(&EtfDashboardVars {
+                asset_name: asset_name.to_string(),
+                netflow_csv_data: netflow_csv,
+                price_csv_data: price_csv,
+                volume_csv_data: volume_csv,
+            });
+            
+            let html_file = output_dir.join(format!("{}_dashboard.html", asset_name));
+            fs::write(&html_file, html)?;
+            info!("Saved HTML dashboard to {}", html_file.display());
         }
     }
     
@@ -337,6 +368,220 @@ fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
 
     features
 }
+
+/// Convert a DataFrame to CSV string
+fn df_to_csv_string(df: &DataFrame) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let mut buf = Vec::new();
+    CsvWriter::new(&mut buf)
+        .include_header(true)
+        .finish(&mut df.clone())?;
+    Ok(String::from_utf8(buf)?)
+}
+
+const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ asset_name }} ETF Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+        }
+        h1, h2 {
+            color: #4fc3f7;
+        }
+        .chart-container {
+            margin: 20px 0;
+            background-color: #2d2d2d;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .data-table {
+            max-height: 400px;
+            overflow-y: auto;
+            margin: 20px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: #2d2d2d;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #444;
+        }
+        th {
+            background-color: #3d3d3d;
+            position: sticky;
+            top: 0;
+        }
+        tr:hover {
+            background-color: #3d3d3d;
+        }
+    </style>
+</head>
+<body>
+    <h1>{{ asset_name }} ETF Dashboard</h1>
+    
+    <div class="chart-container">
+        <h2>ETF Net Flow (Daily)</h2>
+        <div id="netflow-chart"></div>
+    </div>
+    
+    <div class="chart-container">
+        <h2>Asset Price</h2>
+        <div id="price-chart"></div>
+    </div>
+    
+    <div class="chart-container">
+        <h2>Trading Volume</h2>
+        <div id="volume-chart"></div>
+    </div>
+    
+    <div class="data-table">
+        <h2>Net Flow Data</h2>
+        <div id="netflow-table"></div>
+    </div>
+    
+    <script>
+        // Parse CSV data
+        function parseCSV(csv) {
+            const lines = csv.trim().split('\n');
+            const headers = lines[0].split(',');
+            const data = [];
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',');
+                const row = {};
+                headers.forEach((header, index) => {
+                    row[header] = values[index];
+                });
+                data.push(row);
+            }
+            return { headers, data };
+        }
+        
+        const netflowData = parseCSV(`{{ netflow_csv_data }}`);
+        const priceData = parseCSV(`{{ price_csv_data }}`);
+        const volumeData = parseCSV(`{{ volume_csv_data }}`);
+        
+        // Create netflow chart
+        const netflowTraces = [];
+        netflowData.headers.slice(1).forEach(header => {
+            if (header !== 'Total' && !header.includes('ma20') && !header.includes('cumulative')) {
+                netflowTraces.push({
+                    x: netflowData.data.map(d => d.Date),
+                    y: netflowData.data.map(d => parseFloat(d[header]) || 0),
+                    type: 'bar',
+                    name: header,
+                });
+            }
+        });
+        
+        // Add cumulative total line if exists
+        if (netflowData.headers.includes('cumulative_netflow_total')) {
+            netflowTraces.push({
+                x: netflowData.data.map(d => d.Date),
+                y: netflowData.data.map(d => parseFloat(d['cumulative_netflow_total']) || 0),
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Cumulative Total',
+                yaxis: 'y2',
+                line: { width: 3, color: '#4fc3f7' }
+            });
+        }
+        
+        Plotly.newPlot('netflow-chart', netflowTraces, {
+            barmode: 'stack',
+            xaxis: { title: 'Date' },
+            yaxis: { title: 'Net Flow (millions USD)' },
+            yaxis2: { title: 'Cumulative (millions USD)', overlaying: 'y', side: 'right' },
+            plot_bgcolor: '#2d2d2d',
+            paper_bgcolor: '#2d2d2d',
+            font: { color: '#e0e0e0' },
+            legend: { orientation: 'h', y: -0.2 }
+        });
+        
+        // Create price chart
+        const priceTrace = {
+            x: priceData.data.map(d => d.Date),
+            y: priceData.data.map(d => parseFloat(d.close) || 0),
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Close Price',
+            line: { width: 2, color: '#81c784' }
+        };
+        
+        Plotly.newPlot('price-chart', [priceTrace], {
+            xaxis: { title: 'Date' },
+            yaxis: { title: 'Price (USD)' },
+            plot_bgcolor: '#2d2d2d',
+            paper_bgcolor: '#2d2d2d',
+            font: { color: '#e0e0e0' }
+        });
+        
+        // Create volume chart
+        if (volumeData.headers.includes('volume_total')) {
+            const volumeTrace = {
+                x: volumeData.data.map(d => d.Date),
+                y: volumeData.data.map(d => parseFloat(d['volume_total']) || 0),
+                type: 'bar',
+                name: 'Total Volume',
+                marker: { color: '#ff9800' }
+            };
+            
+            const volumeTraces = [volumeTrace];
+            
+            // Add MA20 line if exists
+            if (volumeData.headers.includes('volume_total_ma20')) {
+                volumeTraces.push({
+                    x: volumeData.data.map(d => d.Date),
+                    y: volumeData.data.map(d => parseFloat(d['volume_total_ma20']) || 0),
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: 'MA20',
+                    line: { width: 2, color: '#e57373' }
+                });
+            }
+            
+            Plotly.newPlot('volume-chart', volumeTraces, {
+                xaxis: { title: 'Date' },
+                yaxis: { title: 'Volume' },
+                plot_bgcolor: '#2d2d2d',
+                paper_bgcolor: '#2d2d2d',
+                font: { color: '#e0e0e0' },
+                legend: { orientation: 'h', y: -0.2 }
+            });
+        }
+        
+        // Create data table
+        let tableHTML = '<table><thead><tr>';
+        netflowData.headers.slice(0, Math.min(10, netflowData.headers.length)).forEach(h => {
+            tableHTML += `<th>${h}</th>`;
+        });
+        tableHTML += '</tr></thead><tbody>';
+        
+        netflowData.data.slice(0, 100).forEach(row => {
+            tableHTML += '<tr>';
+            netflowData.headers.slice(0, Math.min(10, netflowData.headers.length)).forEach(h => {
+                const value = row[h];
+                const formatted = isNaN(value) ? value : parseFloat(value).toFixed(2);
+                tableHTML += `<td>${formatted}</td>`;
+            });
+            tableHTML += '</tr>';
+        });
+        
+        tableHTML += '</tbody></table>';
+        document.getElementById('netflow-table').innerHTML = tableHTML;
+    </script>
+</body>
+</html>
+"#;
 
 fn setup_tracing() {
     let subscriber = tracing_subscriber::Registry::default()
@@ -445,25 +690,26 @@ for (let i = 5; i < rows.length - 1; i++) {
 return jsonData
 "#;
 
-struct TdvHtmlVars {
-    price_dataset: String,
-    volume_dataset: String,
-    netflow_dataset: String,
-    symbol: String,
+struct EtfDashboardVars {
+    asset_name: String,
+    netflow_csv_data: String,
+    price_csv_data: String,
+    volume_csv_data: String,
 }
 
-fn render_tdv_html(vars: &TdvHtmlVars) -> String {
+fn render_etf_dashboard_html(vars: &EtfDashboardVars) -> String {
     render!(
-        TDV_HTML_TEMPLATE,
-        price_dataset => vars.price_dataset,
-        volume_dataset => vars.volume_dataset,
-        netflow_dataset => vars.netflow_dataset,
-        symbol => vars.symbol,
+        ETF_DASHBOARD_HTML_TEMPLATE,
+        asset_name => vars.asset_name,
+        netflow_csv_data => vars.netflow_csv_data,
+        price_csv_data => vars.price_csv_data,
+        volume_csv_data => vars.volume_csv_data,
     )
     .trim()
     .to_string()
 }
 
+#[allow(dead_code)]
 const TDV_HTML_TEMPLATE: &str = r#"
 <!DOCTYPE html>
 <html class="sl-theme-dark" style="font-size: 22px">
@@ -854,7 +1100,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::*;
 
     /// Test that our netflow calculation works correctly by computing manually
     #[test]
