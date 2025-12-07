@@ -492,10 +492,12 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
         // Color constants
         const COLORS = {
             positive: '#26a69a80',
+            positiveBase: '#26a69a',
             negative: '#ef535080',
             cumulative: '#4fc3f7',
             price: '#81c784',
             volume: '#ff980080',
+            volumeBase: '#ff9800',
             volumeMA: '#e57373',
         };
 
@@ -539,7 +541,7 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
         // Add netflow total histogram
         if (netflowData.length > 0 && netflowData[0].netflow_total !== undefined) {
             const netflowHistogram = netflowChart.addHistogramSeries({
-                color: COLORS.positive.slice(0, -2),
+                color: COLORS.positiveBase,
                 priceFormat: {
                     type: 'volume',
                 },
@@ -613,7 +615,7 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
 
         if (volumeData.length > 0 && volumeData[0].volume_total !== undefined) {
             const volumeHistogram = volumeChart.addHistogramSeries({
-                color: COLORS.volume.slice(0, -2),
+                color: COLORS.volumeBase,
                 priceFormat: {
                     type: 'volume',
                 },
