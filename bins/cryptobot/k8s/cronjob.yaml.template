@@ -4,6 +4,8 @@ metadata:
   name: {{CRONJOB_NAME}}
 spec:
   schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 0
+  failedJobsHistoryLimit: 0
   jobTemplate:
     spec:
       template:
