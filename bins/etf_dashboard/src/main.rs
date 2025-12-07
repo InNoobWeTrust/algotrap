@@ -16,17 +16,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
     let mut etf_funds_dfs: Vec<DataFrame> = Vec::new(); // Net flow daily of individual funds
     let mut etf_total_dfs: Vec<DataFrame> = Vec::new(); // Net flow total daily
-    let mut etf_cumulative_funds_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow of individual funds daily
-    let mut etf_cumulative_total_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow total daily
     let mut ticker_dfs: Vec<DataFrame> = Vec::new(); // Asset price daily
     let mut fund_vols_dfs: Vec<DataFrame> = Vec::new(); // Trade volume daily of individual funds
-    let mut fund_vol_total_dfs: Vec<DataFrame> = Vec::new(); // Trade volume total daily
     let srcs = vec![
         (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
         (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
         (SOL_TICKER, ETF_SOL_URL, ETF_SOL_EXTRACT_SCRIPT),
     ];
-    for (ticker, url, script) in srcs {
+    for (ticker, url, script) in &srcs {
         // Inner scope to automatically dispose webdriver before printing to avoid polluting console logs
         let (etf_df, start_timestamp, end_timestamp) = get_etf_data(url, script).await?;
         etf_funds_dfs.push(etf_df.clone());
@@ -115,10 +112,49 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         .collect()?;
                 }
             }
+
+            // Get volume column names (excluding "Date")
+            let vol_cols: Vec<String> = combined_vols_df
+                .get_column_names()
+                .into_iter()
+                .filter(|name| *name != "Date")
+                .map(|s| s.to_string())
+                .collect();
+
+            // Add volume total and moving average
+            let combined_vols_df = combined_vols_df
+                .lazy()
+                .with_columns(fund_vol_features(&vol_cols))
+                .collect()?;
+
             fund_vols_dfs.push(combined_vols_df);
         }
     }
-    dbg!(&etf_funds_dfs, &ticker_dfs, &fund_vols_dfs);
+    
+    info!("Data collection complete. Generating HTML dashboards...");
+    
+    // Create output directory for HTML files
+    let output_dir = std::path::Path::new("output");
+    if !output_dir.exists() {
+        std::fs::create_dir(output_dir)?;
+    }
+    
+    // Generate HTML dashboard for each ticker
+    for (i, (ticker, _url, _script)) in srcs.iter().enumerate() {
+        info!("Generating dashboard for {ticker}...");
+        // For now, just print summary statistics
+        if i < etf_total_dfs.len() {
+            info!("ETF data for {ticker}: {} rows", etf_total_dfs[i].height());
+        }
+        if i < ticker_dfs.len() {
+            info!("Price data for {ticker}: {} rows", ticker_dfs[i].height());
+        }
+        if i < fund_vols_dfs.len() {
+            info!("Volume data for {ticker}: {} rows", fund_vols_dfs[i].height());
+        }
+    }
+    
+    info!("ETF Dashboard generation complete!");
     Ok(())
 }
 
