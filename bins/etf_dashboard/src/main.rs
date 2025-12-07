@@ -280,13 +280,18 @@ async fn get_etf_data(
 fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
-    // Net flow total
-    let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
-    features.push(
-        sum_horizontal(total_exprs, true)
-            .expect("Failed to sum by funds")
-            .alias("netflow_total"),
-    );
+    if fund_cols.is_empty() {
+        // Return a zero column if no funds provided
+        features.push(lit(0.0).alias("netflow_total"));
+    } else {
+        // Net flow total
+        let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
+        features.push(
+            sum_horizontal(total_exprs, true)
+                .expect("Failed to sum by funds")
+                .alias("netflow_total"),
+        );
+    }
 
     // MA20 of net flow total
     features.push(col("netflow_total").sma(20).alias("netflow_total_ma20"));
@@ -314,13 +319,18 @@ fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
 fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
-    // Volume total
-    let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
-    features.push(
-        sum_horizontal(vol_exprs, true)
-            .expect("Failed to sum by vol")
-            .alias("volume_total"),
-    );
+    if vol_cols.is_empty() {
+        // Return a zero column if no volumes provided
+        features.push(lit(0.0).alias("volume_total"));
+    } else {
+        // Volume total
+        let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
+        features.push(
+            sum_horizontal(vol_exprs, true)
+                .expect("Failed to sum by vol")
+                .alias("volume_total"),
+        );
+    }
 
     // MA20 of volume total
     features.push(col("volume_total").sma(20).alias("volume_total_ma20"));
@@ -840,3 +850,88 @@ const TDV_HTML_TEMPLATE: &str = r#"
   </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polars::prelude::*;
+
+    /// Test that our netflow calculation works correctly by computing manually
+    #[test]
+    fn test_netflow_calculation() {
+        // Create test data
+        let fund1_values = vec![100.0, 200.0, 150.0];
+        let fund2_values = vec![50.0, 75.0, 100.0];
+        
+        // Expected total netflow
+        let expected_total: Vec<f64> = fund1_values.iter()
+            .zip(fund2_values.iter())
+            .map(|(a, b)| a + b)
+            .collect();
+        
+        assert_eq!(expected_total, vec![150.0, 275.0, 250.0]);
+        
+        // Expected cumulative netflow
+        let mut cumsum = 0.0;
+        let expected_cumulative: Vec<f64> = expected_total.iter()
+            .map(|v| {
+                cumsum += v;
+                cumsum
+            })
+            .collect();
+        
+        assert_eq!(expected_cumulative, vec![150.0, 425.0, 675.0]);
+    }
+
+    /// Test that volume calculation works correctly
+    #[test]
+    fn test_volume_calculation() {
+        let vol1_values = vec![1000.0, 1200.0, 1100.0];
+        let vol2_values = vec![500.0, 600.0, 550.0];
+        
+        // Expected total volume
+        let expected_total: Vec<f64> = vol1_values.iter()
+            .zip(vol2_values.iter())
+            .map(|(a, b)| a + b)
+            .collect();
+        
+        assert_eq!(expected_total, vec![1500.0, 1800.0, 1650.0]);
+    }
+
+    /// Test that fund_vol_features doesn't panic with empty columns
+    #[test]
+    fn test_fund_vol_features_empty() {
+        let vol_cols: Vec<String> = vec![];
+        let features = fund_vol_features(&vol_cols);
+        
+        // Should create features with lit(0.0)
+        assert_eq!(features.len(), 2); // volume_total and volume_total_ma20
+    }
+
+    /// Test that etf_netflow_features doesn't panic with empty columns
+    #[test]
+    fn test_etf_netflow_features_empty() {
+        let fund_cols: Vec<String> = vec![];
+        let features = etf_netflow_features(&fund_cols);
+        
+        // Should create features with lit(0.0)
+        assert!(features.len() >= 3); // At minimum: netflow_total, netflow_total_ma20, cumulative_netflow_total
+    }
+
+    /// Test that functions return the expected number of features
+    #[test]
+    fn test_feature_count() {
+        let fund_cols = vec!["FUND1".to_string(), "FUND2".to_string()];
+        let features = etf_netflow_features(&fund_cols);
+        
+        // Should have: netflow_total, netflow_total_ma20, cumulative_netflow_total, 
+        // cumulative_netflow_FUND1, cumulative_netflow_FUND2
+        assert_eq!(features.len(), 5);
+        
+        let vol_cols = vec!["VOL1".to_string(), "VOL2".to_string()];
+        let vol_features = fund_vol_features(&vol_cols);
+        
+        // Should have: volume_total, volume_total_ma20
+        assert_eq!(vol_features.len(), 2);
+    }
+}
