@@ -1,3 +1,16 @@
+//! ETF Dashboard Generator
+//!
+//! This application fetches ETF flow data for BTC, ETH, and SOL from farside.co.uk,
+//! combines it with price and volume data from Yahoo Finance, calculates various
+//! features (netflow totals, cumulative flows, moving averages), and generates
+//! interactive HTML dashboards with charts and tables.
+//!
+//! ## Output
+//! - CSV files with processed data for each asset
+//! - HTML dashboards with interactive Plotly charts
+//!
+//! All output is saved to the `output/etf_dashboard/` directory.
+
 use algotrap::ext::{webdriver::*, yfinance::*};
 use algotrap::prelude::*;
 use algotrap::ta::prelude::*;
@@ -307,7 +320,19 @@ async fn get_etf_data(
     Ok((etf_df, start_timestamp, end_timestamp))
 }
 
-/// Sum total net flow across all funds
+/// Calculate ETF netflow features from individual fund columns.
+///
+/// This function creates polars expressions to compute:
+/// - `netflow_total`: Sum of all fund netflows
+/// - `netflow_total_ma20`: 20-period moving average of total netflow
+/// - `cumulative_netflow_total`: Running sum of total netflow
+/// - `cumulative_netflow_{fund}`: Running sum for each individual fund
+///
+/// # Arguments
+/// * `fund_cols` - Column names of individual fund netflows
+///
+/// # Returns
+/// Vector of polars Expr objects to be used with `with_columns()`
 fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
@@ -346,7 +371,17 @@ fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     features
 }
 
-// Sum vol across all funds
+/// Calculate fund volume features from individual volume columns.
+///
+/// This function creates polars expressions to compute:
+/// - `volume_total`: Sum of all fund volumes
+/// - `volume_total_ma20`: 20-period moving average of total volume
+///
+/// # Arguments
+/// * `vol_cols` - Column names of individual fund volumes
+///
+/// # Returns
+/// Vector of polars Expr objects to be used with `with_columns()`
 fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
@@ -583,6 +618,9 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
 </html>
 "#;
 
+/// Initialize tracing/logging for the application.
+///
+/// Sets up a console logger with INFO level filtering and DEBUG level for this crate.
 fn setup_tracing() {
     let subscriber = tracing_subscriber::Registry::default()
         .with(
@@ -690,6 +728,7 @@ for (let i = 5; i < rows.length - 1; i++) {
 return jsonData
 "#;
 
+/// Variables for rendering the ETF dashboard HTML template.
 struct EtfDashboardVars {
     asset_name: String,
     netflow_csv_data: String,
@@ -697,6 +736,13 @@ struct EtfDashboardVars {
     volume_csv_data: String,
 }
 
+/// Render the ETF dashboard HTML from template and variables.
+///
+/// # Arguments
+/// * `vars` - Dashboard variables containing asset name and CSV data
+///
+/// # Returns
+/// Rendered HTML string
 fn render_etf_dashboard_html(vars: &EtfDashboardVars) -> String {
     render!(
         ETF_DASHBOARD_HTML_TEMPLATE,
