@@ -7,7 +7,7 @@
 //!
 //! ## Output
 //! - CSV files with processed data for each asset
-//! - HTML dashboards with interactive Plotly charts
+//! - HTML dashboards with interactive lightweight-charts
 //!
 //! All output is saved to the `output/etf_dashboard/` directory.
 
@@ -489,6 +489,19 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
         const priceData = JSON.parse(document.getElementById('price-data').textContent);
         const volumeData = JSON.parse(document.getElementById('volume-data').textContent);
 
+        // Color constants
+        const COLORS = {
+            positive: '#26a69a80',
+            negative: '#ef535080',
+            cumulative: '#4fc3f7',
+            price: '#81c784',
+            volume: '#ff980080',
+            volumeMA: '#e57373',
+        };
+
+        // Helper function to convert date string to Unix timestamp
+        const toTimestamp = (dateStr) => new Date(dateStr).getTime() / 1000;
+
         // Create netflow chart with histogram for individual funds and line for cumulative
         const netflowChart = LightweightCharts.createChart(document.getElementById('netflow-chart'), {
             autoSize: true,
@@ -512,12 +525,12 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
         // Add cumulative netflow line if exists
         if (netflowData.length > 0 && netflowData[0].cumulative_netflow_total !== undefined) {
             const cumulativeSeries = netflowChart.addLineSeries({
-                color: '#4fc3f7',
+                color: COLORS.cumulative,
                 lineWidth: 2,
                 priceScaleId: 'right',
             });
             const cumulativeData = netflowData.map(d => ({
-                time: new Date(d.Date).getTime() / 1000,
+                time: toTimestamp(d.Date),
                 value: d.cumulative_netflow_total || 0,
             }));
             cumulativeSeries.setData(cumulativeData);
@@ -526,7 +539,7 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
         // Add netflow total histogram
         if (netflowData.length > 0 && netflowData[0].netflow_total !== undefined) {
             const netflowHistogram = netflowChart.addHistogramSeries({
-                color: '#26a69a',
+                color: COLORS.positive.slice(0, -2),
                 priceFormat: {
                     type: 'volume',
                 },
@@ -539,9 +552,9 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
                 },
             });
             const netflowHistogramData = netflowData.map(d => ({
-                time: new Date(d.Date).getTime() / 1000,
+                time: toTimestamp(d.Date),
                 value: d.netflow_total || 0,
-                color: (d.netflow_total || 0) >= 0 ? '#26a69a80' : '#ef535080',
+                color: (d.netflow_total || 0) >= 0 ? COLORS.positive : COLORS.negative,
             }));
             netflowHistogram.setData(netflowHistogramData);
         }
@@ -568,11 +581,11 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
 
         if (priceData.length > 0 && priceData[0].close !== undefined) {
             const priceSeries = priceChart.addLineSeries({
-                color: '#81c784',
+                color: COLORS.price,
                 lineWidth: 2,
             });
             const priceSeriesData = priceData.map(d => ({
-                time: new Date(d.Date).getTime() / 1000,
+                time: toTimestamp(d.Date),
                 value: d.close || 0,
             }));
             priceSeries.setData(priceSeriesData);
@@ -600,26 +613,26 @@ const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
 
         if (volumeData.length > 0 && volumeData[0].volume_total !== undefined) {
             const volumeHistogram = volumeChart.addHistogramSeries({
-                color: '#ff9800',
+                color: COLORS.volume.slice(0, -2),
                 priceFormat: {
                     type: 'volume',
                 },
             });
             const volumeHistogramData = volumeData.map(d => ({
-                time: new Date(d.Date).getTime() / 1000,
+                time: toTimestamp(d.Date),
                 value: d.volume_total || 0,
-                color: '#ff980080',
+                color: COLORS.volume,
             }));
             volumeHistogram.setData(volumeHistogramData);
 
             // Add MA20 line if exists
             if (volumeData[0].volume_total_ma20 !== undefined) {
                 const ma20Series = volumeChart.addLineSeries({
-                    color: '#e57373',
+                    color: COLORS.volumeMA,
                     lineWidth: 2,
                 });
                 const ma20Data = volumeData.filter(d => d.volume_total_ma20 !== null).map(d => ({
-                    time: new Date(d.Date).getTime() / 1000,
+                    time: toTimestamp(d.Date),
                     value: d.volume_total_ma20,
                 }));
                 ma20Series.setData(ma20Data);
