@@ -7,8 +7,9 @@ An automated ETF flow dashboard generator that fetches, processes, and visualize
 - 📊 **Automated Data Collection**: Scrapes latest ETF flow data from farside.co.uk
 - 💰 **Price Integration**: Fetches historical price data from Yahoo Finance
 - 📈 **Feature Engineering**: Calculates moving averages, cumulative flows, and aggregations
-- 🎨 **Interactive Dashboards**: Generates HTML dashboards with Plotly charts
+- 🎨 **Interactive Dashboards**: Generates HTML dashboards with lightweight-charts
 - 💾 **CSV Export**: Saves all processed data for further analysis
+- 🔄 **JSON Data Format**: Uses JSON for data exchange between Rust and JavaScript
 
 ## Output
 
@@ -25,12 +26,11 @@ The application generates files in the `output/etf_dashboard/` directory:
 - `{ASSET}_volume_total.csv` - Total trading volume with MA20
 
 **HTML Dashboard:**
-- `{ASSET}_dashboard.html` - Interactive visualization with:
-  - Stacked bar chart of individual fund netflows
-  - Cumulative netflow line chart
-  - Asset price chart
-  - Trading volume chart with MA20
-  - Data table with recent flows
+- `{ASSET}_dashboard.html` - Interactive visualization with lightweight-charts:
+  - Netflow histogram with cumulative line overlay
+  - Asset price line chart
+  - Trading volume histogram with MA20 line
+  - Data embedded as JSON for universal compatibility
 
 ## Prerequisites
 
@@ -89,8 +89,8 @@ start output/etf_dashboard/BTC_dashboard.html
    - Joins price and volume data by date
 
 3. **Visualization**
-   - Renders interactive charts using Plotly.js
-   - Generates responsive HTML dashboards
+   - Renders interactive charts using lightweight-charts
+   - Generates responsive HTML dashboards with JSON data
    - Exports data to CSV for external analysis
 
 ## Data Sources
@@ -188,4 +188,4 @@ Contributions are welcome! Please ensure:
 - ETF flow data from [Farside Investors](https://farside.co.uk/)
 - Price/volume data from Yahoo Finance
 - Built with [Polars](https://www.pola.rs/) for data processing
-- Visualizations powered by [Plotly.js](https://plotly.com/javascript/)
+- Visualizations powered by [lightweight-charts](https://tradingview.github.io/lightweight-charts/)
