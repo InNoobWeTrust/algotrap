@@ -7,7 +7,7 @@ pub fn rsi(src: &Expr, len: usize) -> Expr {
     // Diff
     let diff = src
         .clone()
-        .diff(1, polars::series::ops::NullBehavior::Ignore);
+        .diff(lit(1), polars::series::ops::NullBehavior::Ignore);
 
     // Gains: positive changes
     let gains = when(diff.clone().gt(lit(0)))
@@ -37,7 +37,7 @@ pub fn rev_rsi(src: &Expr, len: usize, rsi: f64) -> Expr {
     let exp_per = 2 * len - 1;
     let diff = src
         .clone()
-        .diff(1, polars::series::ops::NullBehavior::Ignore);
+        .diff(lit(1), polars::series::ops::NullBehavior::Ignore);
     // Gains: positive changes
     let gains = when(diff.clone().gt(lit(0)))
         .then(diff.clone())

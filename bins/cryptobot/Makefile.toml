@@ -5,7 +5,7 @@ args = [".", "-name", "*.html", "-delete"]
 [tasks.dockerbuild]
 command = "bash"
 args = ["-c", """
-  docker build -t algotrap-bins:latest -f ../../Dockerfile.base ../..
+  docker build -t algotrap-bins:latest -f ../../base.Dockerfile ../..
   docker build -t algotrap-cryptobot:latest -f deployment/Dockerfile .
 """]
 

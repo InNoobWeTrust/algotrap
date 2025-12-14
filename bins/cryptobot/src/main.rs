@@ -29,6 +29,12 @@ struct EnvConf {
     ntfy_topic: String,
     ntfy_tf_exclusion: Vec<Timeframe>,
     ntfy_always: bool,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64, // seconds
+}
+
+fn default_timeout_secs() -> u64 {
+    10
 }
 
 #[tokio::main]
@@ -39,61 +45,77 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Load env config
     let conf: EnvConf = envy::from_env()?;
 
-    let client = ext::bingx::BingXClient::default();
+    // Convert configured timeout (seconds) to Duration
+    let timeout = Duration::from_secs(conf.timeout_secs);
 
-    let all_dfs = join_all(
-        conf.tfs
-            .iter()
-            .map(|tf| {
-                let client = &client;
-                let symbol = conf.symbol.clone();
-                async move {
-                    // Fetch 15-minute candles for symbol's perpetual
-                    client
-                        .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
-                        .await
-                        .map(|k| (*tf, k))
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
-    .await
-    .into_par_iter()
-    .filter_map(|res| match res {
-        Ok((tf, klines)) => {
-            let df = process_data(klines.as_slice(), &conf).expect("Failed to process data");
-            Some((tf, df))
-        }
-        Err(err) => {
-            eprintln!("Error: {err:#?}");
-            None
-        }
-    })
-    .collect::<HashMap<Timeframe, DataFrame>>();
-    let all_dfs_serialized: HashMap<String, Value> = all_dfs
-        .par_iter()
-        .map(|(tf, df)| {
-            let df_json: JsonDataframe = df
-                .try_into()
-                .expect("Failed to serialize data frame to json");
-            let df_json: Value = df_json.into();
-            (tf.to_string(), df_json)
+    // Run the main logic with an overall timeout so the process cannot hang indefinitely.
+    let run_future = async {
+        let client = ext::bingx::BingXClient::default();
+
+        let all_dfs = join_all(
+            conf.tfs
+                .iter()
+                .map(|tf| {
+                    let client = &client;
+                    let symbol = conf.symbol.clone();
+                    async move {
+                        // Fetch 15-minute candles for symbol's perpetual
+                        client
+                            .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
+                            .await
+                            .map(|k| (*tf, k))
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .into_par_iter()
+        .filter_map(|res| match res {
+            Ok((tf, klines)) => {
+                let df = process_data(klines.as_slice(), &conf).expect("Failed to process data");
+                Some((tf, df))
+            }
+            Err(err) => {
+                eprintln!("Error: {err:#?}");
+                None
+            }
         })
-        .collect();
-    let df_json = serde_json::to_string(&all_dfs_serialized)?;
-    let tfs_json = serde_json::to_string(&conf.tfs)?;
-    let html_vars = TdvHtmlVars {
-        dataset: df_json,
-        symbol: format!("BingX:{}", conf.symbol),
-        tfs: tfs_json,
-        default_tf: conf.default_tf.to_string(),
-        sl_percent: format!("{:.0}", conf.sl_percent * 100.),
-        tol_percent: format!("{:.2}", conf.tol_percent * 100.),
+        .collect::<HashMap<Timeframe, DataFrame>>();
+        let all_dfs_serialized: HashMap<String, Value> = all_dfs
+            .par_iter()
+            .map(|(tf, df)| {
+                let df_json: JsonDataframe = df
+                    .try_into()
+                    .expect("Failed to serialize data frame to json");
+                let df_json: Value = df_json.into();
+                (tf.to_string(), df_json)
+            })
+            .collect();
+        let df_json = serde_json::to_string(&all_dfs_serialized)?;
+        let tfs_json = serde_json::to_string(&conf.tfs)?;
+        let html_vars = TdvHtmlVars {
+            dataset: df_json,
+            symbol: format!("BingX:{}", conf.symbol),
+            tfs: tfs_json,
+            default_tf: conf.default_tf.to_string(),
+            sl_percent: format!("{:.0}", conf.sl_percent * 100.),
+            tol_percent: format!("{:.2}", conf.tol_percent * 100.),
+        };
+        let tdv_html = render_tdv_html(&html_vars);
+        tokio::fs::write(format!("tdv.BingX.{}.html", conf.symbol), tdv_html).await?;
+        notify(&all_dfs, &conf).await?;
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
     };
-    let tdv_html = render_tdv_html(&html_vars);
-    tokio::fs::write(format!("tdv.BingX.{}.html", conf.symbol), tdv_html).await?;
-    notify(&all_dfs, &conf).await?;
-    Ok(())
+
+    match tokio::time::timeout(timeout, run_future).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            eprintln!("Error: Execution timed out after {}s", timeout.as_secs());
+            // Use a distinct non-zero exit code to indicate timeout (124 is commonly used for timeouts)
+            std::process::exit(124);
+        }
+    }
 }
 
 async fn notify(
@@ -128,8 +150,12 @@ async fn notify(
         .filter(|(tf, signal)| {
             *signal != 0
                 && (conf.ntfy_always
-                    || is_closing_timeframe(tf, Utc::now(), Some(Duration::from_secs(10)))
-                        .unwrap_or(false))
+                    || is_closing_timeframe(
+                        tf,
+                        Utc::now(),
+                        Some(Duration::from_secs(conf.timeout_secs)),
+                    )
+                    .unwrap_or(false))
         })
         .collect();
     let effective_tfs: Vec<Timeframe> = effective_signals
@@ -202,7 +228,7 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     let time_to_date = col("time")
         .cast(DataType::Datetime(
             TimeUnit::Milliseconds,
-            Some("UTC".into()),
+            Some(TimeZone::UTC),
         ))
         .alias("Date");
 

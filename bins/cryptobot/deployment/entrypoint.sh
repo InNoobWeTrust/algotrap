@@ -32,6 +32,12 @@ echo "Output prepared for deployment."
 
 # Deploy directly to production
 echo "Deploying to Cloudflare Pages..."
-wrangler pages deploy "$OUTPUT_DIR" --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME"
+# Respect an upload timeout (seconds). Use UPLOAD_TIMEOUT, fall back to TIMEOUT, then default to 10s.
+UPLOAD_TIMEOUT_SECS="${UPLOAD_TIMEOUT_SECS:-${TIMEOUT_SECS-10}}"
+
+if ! timeout "${UPLOAD_TIMEOUT_SECS}s" wrangler pages deploy "$OUTPUT_DIR" --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME"; then
+    echo "Error: Deployment failed or timed out after ${UPLOAD_TIMEOUT_SECS}s"
+    exit 1
+fi
 
 echo "Deployment successful!"

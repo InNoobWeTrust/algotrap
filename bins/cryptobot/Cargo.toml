@@ -10,17 +10,11 @@ futures = "0.3.31"
 dotenv = "0.15.0"
 envy = "0.4"
 rayon = "1.10.0"
-polars = { version = "0.46", default-features = false, features = [
+polars = { version = "0.51", default-features = true, features = [
 	"lazy",
 	"fmt",
-	"polars-ops",
-	"diff",
-	"dynamic_group_by",
-	"rolling_window",
-	"ewma",
-	"dtype-array",
 	"json",
-	"round_series",
+	"timezones",
 ] }
 serde = "1.0.219"
 serde_json = "1.0.140"
