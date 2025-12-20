@@ -34,24 +34,26 @@ COPY bins/etf_dashboard/src ./bins/etf_dashboard/src
 # RUN cargo install --target x86_64-unknown-linux-musl --path bins/cryptobot --root /
 # RUN cargo install --target x86_64-unknown-linux-musl --path bins/etf_dashboard --root /
 ARG RUST_TARGETS
-RUN if [ -n "$RUST_TARGETS" ]; then \
-  for TARGET in $(echo $RUST_TARGETS | tr ',' ' '); do \
-  rustup target add $TARGET && \
-  cargo install --target $TARGET --path /bins/cryptobot --root / && \
-  cargo install --target $TARGET --path /bins/etf_dashboard --root / ; \
-  # Rename output binaries for multi-arch
-  if [ "$TARGET" = "x86_64-unknown-linux-musl" ]; then \
-  cp /bn/cryptobot /app/cryptobot-x86_64 ; \
-  cp /bin/etf_dashboard /app/etf_dashboard-x86_64 ; \
-  elif [ "$TARGET" = "aarch64-unknown-linux-musl" ]; then \
-  cp /bin/cryptobot /app/cryptobot-aarch64 ; \
-  cp /bin/etf_dashboard /app/etf_dashboard-aarch64 ; \
-  fi ; \
+RUN <<EOF
+if [ -n "$RUST_TARGETS" ]; then
+  for TARGET in $(echo $RUST_TARGETS | tr ',' ' '); do
+    rustup target add $TARGET
+    cargo install --target $TARGET --path ./bins/cryptobot --root /
+    cargo install --target $TARGET --path ./bins/etf_dashboard --root /
+    # Rename output binaries for multi-arch
+    if [ "$TARGET" = "x86_64-unknown-linux-musl" ]; then \
+      cp /bin/cryptobot /app/cryptobot-x86_64 ; \
+      cp /bin/etf_dashboard /app/etf_dashboard-x86_64 ; \
+    elif [ "$TARGET" = "aarch64-unknown-linux-musl" ]; then \
+      cp /bin/cryptobot /app/cryptobot-aarch64 ; \
+      cp /bin/etf_dashboard /app/etf_dashboard-aarch64 ; \
+    fi ; \
   done ; \
-  else \
-  cargo install --path /bin/cryptobot --root / && \
-  cargo install --path /bin/etf_dashboard --root / ; \
-  fi
+else \
+  cargo install --path ./bins/cryptobot --root / && \
+  cargo install --path ./bins/etf_dashboard --root / ; \
+fi
+EOF
 # # Strip binaries to reduce size (optional; present because binutils was installed above)
 # RUN strip /bin/cryptobot || true && strip /bin/etf_dashboard || true
 
