@@ -46,6 +46,7 @@ RUN if [ -n "$RUST_TARGETS" ]; then \
         elif [ "$TARGET" = "aarch64-unknown-linux-musl" ]; then \
           cp /app/cryptobot /app/cryptobot-aarch64 ; \
           cp /app/etf_dashboard /app/etf_dashboard-aarch64 ; \
+        fi ; \
       done ; \
     else \
       cargo install --path /app/cryptobot --root / && \
