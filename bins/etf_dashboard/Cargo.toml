@@ -18,9 +18,12 @@ polars = { version = "0.51.0", default-features = true, features = [
 	"strings",
 ] }
 rand = "0.9.1"
-reqwest = { version = "0.12.22", default-features = false, features = ["rustls-tls", "cookies", "json"] }
+reqwest = { version = "0.12.22", features = ["cookies", "json"] }
 scopeguard = "1.2.0"
 serde_json = "1.0.140"
 tokio = { version = "1.46.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "*", features = ["vendored"] }

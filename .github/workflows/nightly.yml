@@ -155,7 +155,6 @@ jobs:
         with:
           context: .
           file: base.Dockerfile
-          load: true
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
@@ -163,14 +162,29 @@ jobs:
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:nightly-${{ github.run_id }}
 
+      - name: Build and push Docker image (base-musl)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: base.Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            RUST_TARGETS=x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          tags: |
+            algotrap-bins:musl-latest
+            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-latest
+            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-nightly-${{ github.run_id }}
+
       - name: Build and push Docker image (apps)
         uses: docker/build-push-action@v5
         with:
           context: ./bins/cryptobot
           file: bins/cryptobot/deployment/Dockerfile
-          load: true
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-latest
           tags: |
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:nightly-${{ github.run_id }}
