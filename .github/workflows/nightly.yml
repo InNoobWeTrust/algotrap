@@ -144,32 +144,33 @@ jobs:
         id: repo_lowercase
         run: echo "repo=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      - name: Build Docker image (base)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image (base)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: base.Dockerfile
           load: true
-          push: false
+          push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             algotrap-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:nightly-${{ github.run_id }}
 
-      - name: Build Docker image (bins)
+      - name: Build and push Docker image (apps)
         uses: docker/build-push-action@v5
         with:
           context: ./bins/cryptobot
           file: bins/cryptobot/deployment/Dockerfile
           load: true
-          push: false
+          push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:nightly-${{ github.run_id }}
-
-      - name: Push images to ghcr.io
-        run: |
-          docker push ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:latest
-          docker push ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:nightly-${{ github.run_id }}
-          docker push ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:latest
-          docker push ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:nightly-${{ github.run_id }}
