@@ -158,7 +158,6 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            algotrap-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:nightly-${{ github.run_id }}
 
@@ -172,7 +171,6 @@ jobs:
           build-args: |
             RUST_TARGETS=x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
           tags: |
-            algotrap-bins:musl-latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-nightly-${{ github.run_id }}
 

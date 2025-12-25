@@ -12,7 +12,6 @@ ARG BASE_IMAGE=algotrap-bins:musl-latest
 # Copy the static binaries from prebuilt musl image (only if they exist)
 COPY --from=${BASE_IMAGE} /app/cryptobot* ./
 
-
 # Copy the entrypoint script from the deployment directory
 COPY deployment/entrypoint.sh .
 
