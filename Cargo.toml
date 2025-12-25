@@ -44,6 +44,8 @@ default = ["ntfy"]
 webdriver = ["dep:fantoccini"]
 ntfy = ["dep:url"]
 
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [[example]]
 name = "rsi_calculator"
