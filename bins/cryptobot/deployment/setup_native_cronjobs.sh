@@ -42,7 +42,7 @@ for env_file in "$SCRIPT_DIR"/envs/*.env; do
         # Get project name for wrangler
         pj_name=$(printf "%s\n" "$env_vars" | grep CLOUDFLARE_PAGES_PROJECT_NAME | cut -d= -f2)
 
-        printf "%s\n*/15 * * * * cd \$(mktemp -d -t cryptobot) && timeout 10s %s && mkdir -p public && mv *.html public/index.html && timeout 20s npx -y wrangler pages deploy public --project-name=%s\n" "$env_vars" "$CRYPTOBOT_BIN" "$pj_name" >> /tmp/new_cron
+        printf "%s\n*/15 * * * * cd \$(mktemp -d -t cryptobot) && timeout -k 10s 30s %s && mkdir -p public && mv *.html public/index.html && timeout -k 10s 30s npx -y wrangler pages deploy public --project-name=%s\n" "$env_vars" "$CRYPTOBOT_BIN" "$pj_name" >> /tmp/new_cron
     fi
 done
 
