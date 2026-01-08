@@ -2,6 +2,10 @@
 command = "find"
 args = [".", "-name", "*.html", "-delete"]
 
+[tasks.deploy_cronjobs]
+command = "bash"
+args = ["./deployment/setup_native_cronjobs.sh"]
+
 [tasks.dockerbuild]
 command = "bash"
 args = ["-c", """
@@ -26,7 +30,7 @@ args = ["get", "all"]
 
 [tasks.k8s-deploy]
 command = "bash"
-args = ["./deployment/deploy_cronjobs.sh"]
+args = ["./deployment/deploy_k8s_cronjobs.sh"]
 
 [tasks.k8s-verify-secrets]
 command = "bash"

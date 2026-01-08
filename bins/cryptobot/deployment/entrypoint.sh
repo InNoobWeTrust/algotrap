@@ -10,8 +10,20 @@ if [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$C
 fi
 
 echo "Executing application to generate HTML..."
-# Run the application binary
-./cryptobot
+# Detect architecture and run the correct binary
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ] && [ -f "./cryptobot-x86_64" ]; then
+  ./cryptobot-x86_64
+elif [ "$ARCH" = "aarch64" ] && [ -f "./cryptobot-aarch64" ]; then
+  ./cryptobot-aarch64
+elif [ -f "./cryptobot" ]; then
+  echo "Using default binary (no platform suffix)"
+  ./cryptobot
+else
+  echo "Error: No suitable cryptobot binary found"
+  exit 1
+fi
+
 
 # Prepare the directory for deployment
 OUTPUT_DIR="public"

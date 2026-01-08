@@ -6,8 +6,11 @@ RUN npm install -g wrangler
 
 WORKDIR /app
 
-# Copy the static binary from prebuilt image
-COPY --from=algotrap-bins:latest /app/cryptobot .
+# Use build arg to specify the base image
+ARG BASE_IMAGE=algotrap-bins:musl-latest
+
+# Copy the static binaries from prebuilt musl image (only if they exist)
+COPY --from=${BASE_IMAGE} /app/cryptobot* ./
 
 # Copy the entrypoint script from the deployment directory
 COPY deployment/entrypoint.sh .
