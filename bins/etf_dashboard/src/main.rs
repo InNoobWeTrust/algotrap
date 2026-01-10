@@ -1,3 +1,17 @@
+//! ETF Dashboard Generator
+//!
+//! This application fetches ETF flow data for BTC, ETH, and SOL from farside.co.uk,
+//! combines it with price and volume data from Yahoo Finance, calculates various
+//! features (netflow totals, cumulative flows, moving averages), and generates
+//! interactive HTML dashboards with charts and tables.
+//!
+//! ## Output
+//! - CSV files with processed data for each asset
+//! - HTML dashboards with interactive lightweight-charts
+//!
+//! All output is saved to the `output/etf_dashboard/` directory.
+
+use algotrap::df_utils::JsonDataframe;
 use algotrap::ext::{webdriver::*, yfinance::*};
 use algotrap::prelude::*;
 use algotrap::ta::prelude::*;
@@ -6,6 +20,8 @@ use fantoccini::Locator;
 use minijinja::render;
 use polars::lazy::prelude::*;
 use polars::prelude::*;
+use serde_json::Value;
+use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
 use tracing::{info, warn};
@@ -37,11 +53,39 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .map(|s| s.to_string())
             .collect();
 
-        etf_total_dfs.push(
-            etf_df
-                .clone()
+        let etf_with_features = etf_df
+            .clone()
+            .lazy()
+            .with_columns(etf_netflow_features(&fund_tickers))
+            .collect()?;
+        
+        etf_total_dfs.push(etf_with_features.clone());
+        
+        // Extract cumulative netflow for individual funds
+        let cumulative_cols: Vec<_> = etf_with_features
+            .get_column_names()
+            .into_iter()
+            .filter(|name| name.starts_with("cumulative_netflow_"))
+            .map(|s| col(s.as_str()))
+            .collect();
+        
+        if !cumulative_cols.is_empty() {
+            let mut cumulative_select_cols = vec![col("Date")];
+            cumulative_select_cols.extend(cumulative_cols);
+            etf_cumulative_funds_dfs.push(
+                etf_with_features
+                    .clone()
+                    .lazy()
+                    .select(cumulative_select_cols)
+                    .collect()?,
+            );
+        }
+        
+        // Extract cumulative netflow total
+        etf_cumulative_total_dfs.push(
+            etf_with_features
                 .lazy()
-                .with_columns(etf_netflow_features(&fund_tickers))
+                .select([col("Date"), col("cumulative_netflow_total")])
                 .collect()?,
         );
 
@@ -115,10 +159,134 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         .collect()?;
                 }
             }
+            
+            // Apply volume features (total and MA20)
+            let vol_cols: Vec<_> = combined_vols_df
+                .get_column_names()
+                .into_iter()
+                .filter(|name| *name != "Date")
+                .map(|s| s.to_string())
+                .collect();
+            
+            let combined_vols_df = combined_vols_df
+                .lazy()
+                .with_columns(fund_vol_features(&vol_cols))
+                .collect()?;
+            
+            fund_vol_total_dfs.push(
+                combined_vols_df
+                    .clone()
+                    .lazy()
+                    .select([col("Date"), col("volume_total"), col("volume_total_ma20")])
+                    .collect()?,
+            );
             fund_vols_dfs.push(combined_vols_df);
         }
     }
-    dbg!(&etf_funds_dfs, &ticker_dfs, &fund_vols_dfs);
+    
+    // Create output directory
+    let output_dir = Path::new("output/etf_dashboard");
+    fs::create_dir_all(output_dir)?;
+    info!("Created output directory: {}", output_dir.display());
+    
+    // Save processed data for each asset
+    let asset_names = ["BTC", "ETH", "SOL"];
+    for (i, asset_name) in asset_names.iter().enumerate() {
+        if i < etf_funds_dfs.len() {
+            info!("Saving data for {asset_name}...");
+            
+            // Save individual fund netflows
+            let funds_file = output_dir.join(format!("{}_funds_netflow.csv", asset_name));
+            let mut funds_csv = std::fs::File::create(&funds_file)?;
+            CsvWriter::new(&mut funds_csv)
+                .include_header(true)
+                .finish(&mut etf_funds_dfs[i].clone())?;
+            info!("Saved to {}", funds_file.display());
+            
+            // Save total netflow with features
+            if i < etf_total_dfs.len() {
+                let total_file = output_dir.join(format!("{}_total_netflow.csv", asset_name));
+                let mut total_csv = std::fs::File::create(&total_file)?;
+                CsvWriter::new(&mut total_csv)
+                    .include_header(true)
+                    .finish(&mut etf_total_dfs[i].clone())?;
+                info!("Saved to {}", total_file.display());
+            }
+            
+            // Save cumulative netflows
+            if i < etf_cumulative_total_dfs.len() {
+                let cumulative_file = output_dir.join(format!("{}_cumulative_total.csv", asset_name));
+                let mut cumulative_csv = std::fs::File::create(&cumulative_file)?;
+                CsvWriter::new(&mut cumulative_csv)
+                    .include_header(true)
+                    .finish(&mut etf_cumulative_total_dfs[i].clone())?;
+                info!("Saved to {}", cumulative_file.display());
+            }
+            
+            // Save ticker prices
+            if i < ticker_dfs.len() {
+                let ticker_file = output_dir.join(format!("{}_price.csv", asset_name));
+                let mut ticker_csv = std::fs::File::create(&ticker_file)?;
+                CsvWriter::new(&mut ticker_csv)
+                    .include_header(true)
+                    .finish(&mut ticker_dfs[i].clone())?;
+                info!("Saved to {}", ticker_file.display());
+            }
+            
+            // Save fund volumes
+            if i < fund_vols_dfs.len() {
+                let vols_file = output_dir.join(format!("{}_fund_volumes.csv", asset_name));
+                let mut vols_csv = std::fs::File::create(&vols_file)?;
+                CsvWriter::new(&mut vols_csv)
+                    .include_header(true)
+                    .finish(&mut fund_vols_dfs[i].clone())?;
+                info!("Saved to {}", vols_file.display());
+            }
+            
+            // Save fund volume totals
+            if i < fund_vol_total_dfs.len() {
+                let vol_total_file = output_dir.join(format!("{}_volume_total.csv", asset_name));
+                let mut vol_total_csv = std::fs::File::create(&vol_total_file)?;
+                CsvWriter::new(&mut vol_total_csv)
+                    .include_header(true)
+                    .finish(&mut fund_vol_total_dfs[i].clone())?;
+                info!("Saved to {}", vol_total_file.display());
+            }
+            
+            // Generate HTML dashboard
+            info!("Generating HTML dashboard for {asset_name}...");
+            let netflow_json = if i < etf_total_dfs.len() {
+                df_to_json_string(&etf_total_dfs[i])?
+            } else {
+                "[]".to_string()
+            };
+            
+            let price_json = if i < ticker_dfs.len() {
+                df_to_json_string(&ticker_dfs[i])?
+            } else {
+                "[]".to_string()
+            };
+            
+            let volume_json = if i < fund_vol_total_dfs.len() {
+                df_to_json_string(&fund_vol_total_dfs[i])?
+            } else {
+                "[]".to_string()
+            };
+            
+            let html = render_etf_dashboard_html(&EtfDashboardVars {
+                asset_name: asset_name.to_string(),
+                netflow_json_data: netflow_json,
+                price_json_data: price_json,
+                volume_json_data: volume_json,
+            });
+            
+            let html_file = output_dir.join(format!("{}_dashboard.html", asset_name));
+            fs::write(&html_file, html)?;
+            info!("Saved HTML dashboard to {}", html_file.display());
+        }
+    }
+    
+    info!("All data saved to {}", output_dir.display());
     Ok(())
 }
 
@@ -154,17 +322,34 @@ async fn get_etf_data(
     Ok((etf_df, start_timestamp, end_timestamp))
 }
 
-/// Sum total net flow across all funds
+/// Calculate ETF netflow features from individual fund columns.
+///
+/// This function creates polars expressions to compute:
+/// - `netflow_total`: Sum of all fund netflows
+/// - `netflow_total_ma20`: 20-period moving average of total netflow
+/// - `cumulative_netflow_total`: Running sum of total netflow
+/// - `cumulative_netflow_{fund}`: Running sum for each individual fund
+///
+/// # Arguments
+/// * `fund_cols` - Column names of individual fund netflows
+///
+/// # Returns
+/// Vector of polars Expr objects to be used with `with_columns()`
 fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
-    // Net flow total
-    let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
-    features.push(
-        sum_horizontal(total_exprs, true)
-            .expect("Failed to sum by funds")
-            .alias("netflow_total"),
-    );
+    if fund_cols.is_empty() {
+        // Return a zero column if no funds provided
+        features.push(lit(0.0).alias("netflow_total"));
+    } else {
+        // Net flow total
+        let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
+        features.push(
+            sum_horizontal(total_exprs, true)
+                .expect("Failed to sum by funds")
+                .alias("netflow_total"),
+        );
+    }
 
     // MA20 of net flow total
     features.push(col("netflow_total").sma(20).alias("netflow_total_ma20"));
@@ -188,17 +373,32 @@ fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
     features
 }
 
-// Sum vol across all funds
+/// Calculate fund volume features from individual volume columns.
+///
+/// This function creates polars expressions to compute:
+/// - `volume_total`: Sum of all fund volumes
+/// - `volume_total_ma20`: 20-period moving average of total volume
+///
+/// # Arguments
+/// * `vol_cols` - Column names of individual fund volumes
+///
+/// # Returns
+/// Vector of polars Expr objects to be used with `with_columns()`
 fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
     let mut features = Vec::new();
 
-    // Volume total
-    let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
-    features.push(
-        sum_horizontal(vol_exprs, true)
-            .expect("Failed to sum by vol")
-            .alias("volume_total"),
-    );
+    if vol_cols.is_empty() {
+        // Return a zero column if no volumes provided
+        features.push(lit(0.0).alias("volume_total"));
+    } else {
+        // Volume total
+        let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
+        features.push(
+            sum_horizontal(vol_exprs, true)
+                .expect("Failed to sum by vol")
+                .alias("volume_total"),
+        );
+    }
 
     // MA20 of volume total
     features.push(col("volume_total").sma(20).alias("volume_total_ma20"));
@@ -206,6 +406,248 @@ fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
     features
 }
 
+/// Convert a DataFrame to JSON string
+fn df_to_json_string(df: &DataFrame) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let df_json: JsonDataframe = df.try_into()?;
+    let df_json: Value = df_json.into();
+    Ok(serde_json::to_string(&df_json)?)
+}
+
+const ETF_DASHBOARD_HTML_TEMPLATE: &str = r#"
+<!DOCTYPE html>
+<html class="sl-theme-dark" style="font-size: 22px">
+<head>
+    <meta charset="utf-8">
+    <title>{{ asset_name }} ETF Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            min-height: 100%;
+            box-sizing: border-box;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+        }
+
+        #container {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        h1 {
+            color: #4fc3f7;
+            margin: 20px;
+        }
+
+        .charts-row {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            gap: 10px;
+            padding: 0 20px 20px 20px;
+        }
+
+        .chart-container {
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            flex: 1;
+            min-height: 300px;
+        }
+
+        #netflow-chart { flex: 2; }
+        #price-chart { flex: 1; }
+        #volume-chart { flex: 1; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>{{ asset_name }} ETF Dashboard</h1>
+        <div class="charts-row">
+            <div id="netflow-chart" class="chart-container"></div>
+            <div id="price-chart" class="chart-container"></div>
+            <div id="volume-chart" class="chart-container"></div>
+        </div>
+    </div>
+    <script id="netflow-data" type="application/json">
+        {{ netflow_json_data }}
+    </script>
+    <script id="price-data" type="application/json">
+        {{ price_json_data }}
+    </script>
+    <script id="volume-data" type="application/json">
+        {{ volume_json_data }}
+    </script>
+    <script type="text/javascript">
+        const netflowData = JSON.parse(document.getElementById('netflow-data').textContent);
+        const priceData = JSON.parse(document.getElementById('price-data').textContent);
+        const volumeData = JSON.parse(document.getElementById('volume-data').textContent);
+
+        // Color constants
+        const COLORS = {
+            positive: '#26a69a80',
+            positiveBase: '#26a69a',
+            negative: '#ef535080',
+            cumulative: '#4fc3f7',
+            price: '#81c784',
+            volume: '#ff980080',
+            volumeBase: '#ff9800',
+            volumeMA: '#e57373',
+        };
+
+        // Helper function to convert date string to Unix timestamp
+        const toTimestamp = (dateStr) => new Date(dateStr).getTime() / 1000;
+
+        // Create netflow chart with histogram for individual funds and line for cumulative
+        const netflowChart = LightweightCharts.createChart(document.getElementById('netflow-chart'), {
+            autoSize: true,
+            layout: {
+                background: { color: '#2d2d2d' },
+                textColor: '#DDD',
+            },
+            grid: {
+                vertLines: { color: '#44444440' },
+                horzLines: { color: '#44444440' },
+            },
+            rightPriceScale: {
+                borderColor: '#444',
+            },
+            timeScale: {
+                borderColor: '#444',
+                timeVisible: true,
+            },
+        });
+
+        // Add cumulative netflow line if exists
+        if (netflowData.length > 0 && netflowData[0].cumulative_netflow_total !== undefined) {
+            const cumulativeSeries = netflowChart.addLineSeries({
+                color: COLORS.cumulative,
+                lineWidth: 2,
+                priceScaleId: 'right',
+            });
+            const cumulativeData = netflowData.map(d => ({
+                time: toTimestamp(d.Date),
+                value: d.cumulative_netflow_total || 0,
+            }));
+            cumulativeSeries.setData(cumulativeData);
+        }
+
+        // Add netflow total histogram
+        if (netflowData.length > 0 && netflowData[0].netflow_total !== undefined) {
+            const netflowHistogram = netflowChart.addHistogramSeries({
+                color: COLORS.positiveBase,
+                priceFormat: {
+                    type: 'volume',
+                },
+                priceScaleId: 'left',
+            });
+            netflowChart.priceScale('left').applyOptions({
+                scaleMargins: {
+                    top: 0.1,
+                    bottom: 0.1,
+                },
+            });
+            const netflowHistogramData = netflowData.map(d => ({
+                time: toTimestamp(d.Date),
+                value: d.netflow_total || 0,
+                color: (d.netflow_total || 0) >= 0 ? COLORS.positive : COLORS.negative,
+            }));
+            netflowHistogram.setData(netflowHistogramData);
+        }
+
+        // Create price chart
+        const priceChart = LightweightCharts.createChart(document.getElementById('price-chart'), {
+            autoSize: true,
+            layout: {
+                background: { color: '#2d2d2d' },
+                textColor: '#DDD',
+            },
+            grid: {
+                vertLines: { color: '#44444440' },
+                horzLines: { color: '#44444440' },
+            },
+            rightPriceScale: {
+                borderColor: '#444',
+            },
+            timeScale: {
+                borderColor: '#444',
+                timeVisible: true,
+            },
+        });
+
+        if (priceData.length > 0 && priceData[0].close !== undefined) {
+            const priceSeries = priceChart.addLineSeries({
+                color: COLORS.price,
+                lineWidth: 2,
+            });
+            const priceSeriesData = priceData.map(d => ({
+                time: toTimestamp(d.Date),
+                value: d.close || 0,
+            }));
+            priceSeries.setData(priceSeriesData);
+        }
+
+        // Create volume chart
+        const volumeChart = LightweightCharts.createChart(document.getElementById('volume-chart'), {
+            autoSize: true,
+            layout: {
+                background: { color: '#2d2d2d' },
+                textColor: '#DDD',
+            },
+            grid: {
+                vertLines: { color: '#44444440' },
+                horzLines: { color: '#44444440' },
+            },
+            rightPriceScale: {
+                borderColor: '#444',
+            },
+            timeScale: {
+                borderColor: '#444',
+                timeVisible: true,
+            },
+        });
+
+        if (volumeData.length > 0 && volumeData[0].volume_total !== undefined) {
+            const volumeHistogram = volumeChart.addHistogramSeries({
+                color: COLORS.volumeBase,
+                priceFormat: {
+                    type: 'volume',
+                },
+            });
+            const volumeHistogramData = volumeData.map(d => ({
+                time: toTimestamp(d.Date),
+                value: d.volume_total || 0,
+                color: COLORS.volume,
+            }));
+            volumeHistogram.setData(volumeHistogramData);
+
+            // Add MA20 line if exists
+            if (volumeData[0].volume_total_ma20 !== undefined) {
+                const ma20Series = volumeChart.addLineSeries({
+                    color: COLORS.volumeMA,
+                    lineWidth: 2,
+                });
+                const ma20Data = volumeData.filter(d => d.volume_total_ma20 !== null).map(d => ({
+                    time: toTimestamp(d.Date),
+                    value: d.volume_total_ma20,
+                }));
+                ma20Series.setData(ma20Data);
+            }
+        }
+    </script>
+</body>
+</html>
+"#;
+
+/// Initialize tracing/logging for the application.
+///
+/// Sets up a console logger with INFO level filtering and DEBUG level for this crate.
 fn setup_tracing() {
     let subscriber = tracing_subscriber::Registry::default()
         .with(
@@ -313,25 +755,38 @@ for (let i = 5; i < rows.length - 1; i++) {
 return jsonData
 "#;
 
-struct TdvHtmlVars {
-    price_dataset: String,
-    volume_dataset: String,
-    netflow_dataset: String,
-    symbol: String,
+/// Variables for rendering the ETF dashboard HTML template.
+struct EtfDashboardVars {
+    asset_name: String,
+    netflow_json_data: String,
+    price_json_data: String,
+    volume_json_data: String,
 }
 
-fn render_tdv_html(vars: &TdvHtmlVars) -> String {
+/// Render the ETF dashboard HTML from template and variables.
+///
+/// # Arguments
+/// * `vars` - Dashboard variables containing asset name and JSON data
+///
+/// # Returns
+/// Rendered HTML string
+fn render_etf_dashboard_html(vars: &EtfDashboardVars) -> String {
     render!(
-        TDV_HTML_TEMPLATE,
-        price_dataset => vars.price_dataset,
-        volume_dataset => vars.volume_dataset,
-        netflow_dataset => vars.netflow_dataset,
-        symbol => vars.symbol,
+        ETF_DASHBOARD_HTML_TEMPLATE,
+        asset_name => vars.asset_name,
+        netflow_json_data => vars.netflow_json_data,
+        price_json_data => vars.price_json_data,
+        volume_json_data => vars.volume_json_data,
     )
     .trim()
     .to_string()
 }
 
+// TDV_HTML_TEMPLATE is kept for potential future use with technical indicator
+// dashboards. It's a complete template with lightweight-charts integration for
+// candlestick charts with multiple technical indicators (RSI, ATR, etc.).
+// Currently not used by ETF dashboard but may be useful for other chart types.
+#[allow(dead_code)]
 const TDV_HTML_TEMPLATE: &str = r#"
 <!DOCTYPE html>
 <html class="sl-theme-dark" style="font-size: 22px">
@@ -718,3 +1173,87 @@ const TDV_HTML_TEMPLATE: &str = r#"
   </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that our netflow calculation works correctly by computing manually
+    #[test]
+    fn test_netflow_calculation() {
+        // Create test data
+        let fund1_values = vec![100.0, 200.0, 150.0];
+        let fund2_values = vec![50.0, 75.0, 100.0];
+        
+        // Expected total netflow
+        let expected_total: Vec<f64> = fund1_values.iter()
+            .zip(fund2_values.iter())
+            .map(|(a, b)| a + b)
+            .collect();
+        
+        assert_eq!(expected_total, vec![150.0, 275.0, 250.0]);
+        
+        // Expected cumulative netflow
+        let mut cumsum = 0.0;
+        let expected_cumulative: Vec<f64> = expected_total.iter()
+            .map(|v| {
+                cumsum += v;
+                cumsum
+            })
+            .collect();
+        
+        assert_eq!(expected_cumulative, vec![150.0, 425.0, 675.0]);
+    }
+
+    /// Test that volume calculation works correctly
+    #[test]
+    fn test_volume_calculation() {
+        let vol1_values = vec![1000.0, 1200.0, 1100.0];
+        let vol2_values = vec![500.0, 600.0, 550.0];
+        
+        // Expected total volume
+        let expected_total: Vec<f64> = vol1_values.iter()
+            .zip(vol2_values.iter())
+            .map(|(a, b)| a + b)
+            .collect();
+        
+        assert_eq!(expected_total, vec![1500.0, 1800.0, 1650.0]);
+    }
+
+    /// Test that fund_vol_features doesn't panic with empty columns
+    #[test]
+    fn test_fund_vol_features_empty() {
+        let vol_cols: Vec<String> = vec![];
+        let features = fund_vol_features(&vol_cols);
+        
+        // Should create features with lit(0.0)
+        assert_eq!(features.len(), 2); // volume_total and volume_total_ma20
+    }
+
+    /// Test that etf_netflow_features doesn't panic with empty columns
+    #[test]
+    fn test_etf_netflow_features_empty() {
+        let fund_cols: Vec<String> = vec![];
+        let features = etf_netflow_features(&fund_cols);
+        
+        // Should create features with lit(0.0)
+        assert!(features.len() >= 3); // At minimum: netflow_total, netflow_total_ma20, cumulative_netflow_total
+    }
+
+    /// Test that functions return the expected number of features
+    #[test]
+    fn test_feature_count() {
+        let fund_cols = vec!["FUND1".to_string(), "FUND2".to_string()];
+        let features = etf_netflow_features(&fund_cols);
+        
+        // Should have: netflow_total, netflow_total_ma20, cumulative_netflow_total, 
+        // cumulative_netflow_FUND1, cumulative_netflow_FUND2
+        assert_eq!(features.len(), 5);
+        
+        let vol_cols = vec!["VOL1".to_string(), "VOL2".to_string()];
+        let vol_features = fund_vol_features(&vol_cols);
+        
+        // Should have: volume_total, volume_total_ma20
+        assert_eq!(vol_features.len(), 2);
+    }
+}

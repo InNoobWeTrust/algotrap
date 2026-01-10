@@ -7,3 +7,4 @@ Cargo.lock
 .env
 k8s/**/secret.yaml
 bins/cryptobot/deployment/envs/*.env
+output/
