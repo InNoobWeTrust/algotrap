@@ -1,0 +1,135 @@
+# ─── ConfigMap: litellm proxy config ──────────────────────────────────────────
+# Edit model_list to add/remove models as needed.
+# Docs: https://docs.litellm.ai/docs/proxy/configs
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  labels:
+    app: litellm
+data:
+  config.yaml: |
+    model_list:
+      # ── 0x multiplier (free) GitHub Copilot models ──────────────
+      # Auth: litellm uses OAuth device flow on first request.
+      # Check pod logs for the auth URL + code.
+      - model_name: gpt-5-mini
+        litellm_params:
+          model: github_copilot/gpt-5-mini
+      - model_name: gpt-4.1
+        litellm_params:
+          model: github_copilot/gpt-4.1
+      - model_name: gpt-4o
+        litellm_params:
+          model: github_copilot/gpt-4o
+      - model_name: raptor-mini
+        litellm_params:
+          model: github_copilot/raptor-mini
+      # ── Add paid/other models below ─────────────────────────────
+      # - model_name: claude-sonnet
+      #   litellm_params:
+      #     model: anthropic/claude-sonnet-4-20250514
+      #     api_key: os.environ/ANTHROPIC_API_KEY
+
+    general_settings:
+      master_key: sk-litellm-proxy
+      # Stateless proxy — no DB required
+      allow_requests_on_db_unavailable: true
+      store_model_in_db: false
+      disable_spend_logs: true
+      disable_error_logs: true
+
+    litellm_settings:
+      drop_params: true
+      set_verbose: false
+---
+# ─── Secret: API keys (for non-Copilot providers) ────────────────────────────
+# GitHub Copilot uses OAuth device flow (no key needed).
+# No DATABASE_URL = stateless proxy mode.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secrets
+  labels:
+    app: litellm
+type: Opaque
+stringData:
+  PLACEHOLDER: "unused"
+  # Uncomment as needed for non-Copilot providers:
+  # ANTHROPIC_API_KEY: ""
+  # GEMINI_API_KEY: ""
+---
+# ─── Deployment ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-latest
+          args:
+            - "--config"
+            - "/etc/litellm/config.yaml"
+            - "--port"
+            - "4000"
+          ports:
+            - containerPort: 4000
+          envFrom:
+            - secretRef:
+                name: litellm-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+# ─── Service ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  labels:
+    app: litellm
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+      protocol: TCP

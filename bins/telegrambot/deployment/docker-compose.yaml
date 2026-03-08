@@ -1,0 +1,33 @@
+# All-in-one local development setup
+# Usage: docker compose -f bins/telegrambot/deployment/docker-compose.yaml up
+services:
+  browserless:
+    image: ghcr.io/browserless/chromium:latest
+    ports:
+      - "3000:3000"
+    environment:
+      CONCURRENT: 5
+      QUEUED: 10
+      TIMEOUT: 30000
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - ../k8s/litellm-config.yaml:/etc/litellm/config.yaml:ro
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+
+  telegrambot:
+    build:
+      context: ../../../
+      dockerfile: bins/telegrambot/deployment/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      LLM_API_BASE: http://litellm:4000/v1
+      BROWSERLESS_URL: http://browserless:3000
+    depends_on:
+      - browserless
+      - litellm
+    restart: unless-stopped

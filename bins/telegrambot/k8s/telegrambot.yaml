@@ -1,0 +1,50 @@
+# ─── Telegrambot K8s Deployment ───────────────────────────────────────────────
+# Runs the analysis bot inside the cluster alongside browserless + litellm.
+#
+# Prerequisites:
+#   1. Build and push the image:
+#      docker build -f bins/telegrambot/deployment/Dockerfile -t telegrambot:latest .
+#   2. Create the config secret:
+#      kubectl create secret generic telegrambot-env --from-env-file=bins/telegrambot/.env
+#   3. Deploy browserless + litellm:
+#      kubectl apply -f bins/telegrambot/k8s/browserless.yaml
+#      kubectl apply -f bins/telegrambot/k8s/litellm.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegrambot
+  labels:
+    app: telegrambot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # Only one instance should run at a time
+  selector:
+    matchLabels:
+      app: telegrambot
+  template:
+    metadata:
+      labels:
+        app: telegrambot
+    spec:
+      containers:
+        - name: telegrambot
+          image: telegrambot:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: telegrambot-env
+          env:
+            # Override with in-cluster service URLs
+            - name: LLM_API_BASE
+              value: "http://litellm.default.svc.cluster.local:4000/v1"
+            - name: BROWSERLESS_URL
+              value: "http://browserless.default.svc.cluster.local:3000"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      restartPolicy: Always
