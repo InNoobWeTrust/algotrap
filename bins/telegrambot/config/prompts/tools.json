@@ -1,0 +1,64 @@
+[
+    {
+        "name": "get_indicator_summary",
+        "description": "Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, climax signals.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timeframe": {
+                    "type": "string",
+                    "description": "The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')"
+                }
+            },
+            "required": [
+                "timeframe"
+            ]
+        }
+    },
+    {
+        "name": "get_price_action",
+        "description": "Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timeframe": {
+                    "type": "string",
+                    "description": "The timeframe (e.g., '1h', '4h', '1d')"
+                },
+                "num_candles": {
+                    "type": "integer",
+                    "description": "Number of recent candles to return (max 20)",
+                    "default": 5
+                }
+            },
+            "required": [
+                "timeframe"
+            ]
+        }
+    },
+    {
+        "name": "capture_chart",
+        "description": "Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually. Call this when you need to see the chart patterns, support/resistance levels, or visual confirmation of indicators.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timeframe": {
+                    "type": "string",
+                    "description": "Which timeframe to focus the chart on (e.g., '4h'). The chart will show this timeframe by default."
+                }
+            },
+            "required": [
+                "timeframe"
+            ]
+        }
+    },
+    {
+        "name": "get_multi_tf_overview",
+        "description": "Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, climax signal, and trend direction for each timeframe. Useful for getting a bird's eye view of the market.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+]

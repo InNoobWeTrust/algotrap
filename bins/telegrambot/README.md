@@ -1,8 +1,8 @@
 # 🤖 telegrambot
 
 LLM-powered crypto market analyst that sends periodic analysis to Telegram.
-Uses an agentic multi-turn loop to inspect indicators, capture chart screenshots,
-and synthesize actionable recommendations.
+Uses an agentic multi-turn loop to inspect indicators, capture chart screenshots
+across all timeframes, and synthesize actionable recommendations.
 
 ## Quick Start
 
@@ -28,36 +28,64 @@ cargo run -p telegrambot --bin test_analysis
 
 ## How It Works
 
-```
+```text
 Every N seconds (configurable):
-  1. Fetch OHLCV data from BingX across 8 timeframes
+  1. Fetch OHLCV data from BingX across all configured timeframes
   2. Compute indicators (RSSI, ATR bands, structure power, Sharpe, ...)
-  3. Run LLM agent loop (multi-turn with tool calls):
+  3. Capture chart screenshots for ALL timeframes via Browserless
+  4. Run LLM agent loop (multi-turn with tool calls):
      → get_multi_tf_overview     → bird's eye view
      → get_indicator_summary     → drill into specific TFs
      → get_price_action          → raw candle data
-     → capture_chart             → Browserless screenshot
-  4. Send analysis + chart to Telegram
+     → capture_chart             → visual confirmation
+  5. Send chart album (all TFs) + analysis text to Telegram
+     → Header: Unicode-decorated ticker + timestamp
+     → Charts: media group album (one image per TF)
+     → Text:  concise ≤300 word analysis
 ```
 
 ## Configuration
 
 All via environment variables (see [`.env.example`](.env.example)):
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `SYMBOL` | Trading pair | `BTC-USDT` |
-| `TFS` | Timeframes (comma-separated) | `5m,15m,1h,4h,1d,1w` |
-| `DEFAULT_TF` | Chart default view | `4h` |
-| `SL_PERCENT` | Stop-loss % for leverage calc | `0.1` |
-| `TOL_PERCENT` | ATR tolerance adjustment | `0.618` |
-| `TELEGRAM_BOT_TOKEN` | From @BotFather | |
-| `TELEGRAM_CHAT_ID` | Target chat/group ID | |
-| `LLM_API_BASE` | OpenAI-compatible endpoint | `http://litellm:4000/v1` |
-| `LLM_API_KEY` | API key / proxy master key | |
-| `LLM_MODEL` | Model name | `gpt-4o` |
-| `BROWSERLESS_URL` | Browserless service | `http://browserless:3000` |
-| `ANALYSIS_INTERVAL_SECS` | Loop interval (default: 3600) | `3600` |
+| Variable                  | Description                   | Example                    |
+| ------------------------- | ----------------------------- | -------------------------- |
+| `SYMBOL`                  | Trading pair                  | `BTC-USDT`                 |
+| `TFS`                     | Timeframes (comma-separated)  | `5m,15m,1h,4h,1d,1w`      |
+| `DEFAULT_TF`              | Chart default view            | `4h`                       |
+| `SL_PERCENT`              | Stop-loss % for leverage calc | `0.1`                      |
+| `TOL_PERCENT`             | ATR tolerance adjustment      | `0.618`                    |
+| `TELEGRAM_BOT_TOKEN`      | From @BotFather               |                            |
+| `TELEGRAM_CHAT_ID`        | Target chat/group ID          |                            |
+| `LLM_API_BASE`            | OpenAI-compatible endpoint    | `http://litellm:4000/v1`   |
+| `LLM_API_KEY`             | API key / proxy master key    |                            |
+| `LLM_MODEL`               | Model name                    | `gpt-5-mini`               |
+| `BROWSERLESS_URL`         | Browserless service           | `http://browserless:3000`  |
+| `PROMPTS_DIR`             | Prompt config directory       | `config/prompts`           |
+| `ANALYSIS_INTERVAL_SECS`  | Loop interval (default: 3600) | `3600`                     |
+
+## Prompt Configuration
+
+System prompts, user messages, and tool schemas are **external files** loaded
+at runtime from `PROMPTS_DIR`. Edit without recompilation:
+
+```text
+config/prompts/
+├── system.txt     — system prompt ({{symbol}}, {{tfs}}, {{default_tf}})
+├── user.txt       — user message  ({{symbol}}, {{time}})
+└── tools.json     — tool schemas  (name, description, parameters)
+```
+
+In Kubernetes, these are mounted from a ConfigMap:
+
+```bash
+# Edit prompts
+vim k8s/prompts-configmap.yaml
+
+# Apply and restart (no Docker rebuild needed)
+kubectl apply -f k8s/prompts-configmap.yaml
+kubectl rollout restart deployment/telegrambot
+```
 
 ## Deployment
 
@@ -79,7 +107,8 @@ docker build -f bins/telegrambot/deployment/Dockerfile -t telegrambot:latest .
 kubectl create secret generic telegrambot-env \
   --from-env-file=bins/telegrambot/.env
 
-# Deploy
+# Deploy prompts + bot
+kubectl apply -f bins/telegrambot/k8s/prompts-configmap.yaml
 kubectl apply -f bins/telegrambot/k8s/telegrambot.yaml
 ```
 
@@ -91,35 +120,37 @@ docker compose -f bins/telegrambot/deployment/docker-compose.yaml up
 
 ## Infrastructure Dependencies
 
-| Service | Manifest | Purpose |
-|---------|----------|---------|
-| **Browserless** | `k8s/browserless.yaml` | Headless Chrome for chart screenshots |
-| **LiteLLM** | `k8s/litellm.yaml` | LLM proxy (GitHub Copilot, OpenAI, etc.) |
+| Service         | Manifest               | Purpose                                  |
+| --------------- | ---------------------- | ---------------------------------------- |
+| **Browserless** | `k8s/browserless.yaml` | Headless Chrome for chart screenshots    |
+| **LiteLLM**     | `k8s/litellm.yaml`     | LLM proxy (GitHub Copilot, OpenAI, etc.) |
 
 > **Note**: LiteLLM's GitHub Copilot provider uses OAuth device flow.
 > On first startup, check pod logs for the auth URL and code.
 
 ## Project Structure
 
-```
+```text
 src/
-├── main.rs              — entry point, analysis loop
+├── main.rs              — entry point, analysis loop, all-TF chart capture
 ├── lib.rs               — module re-exports
-├── config.rs            — EnvConf
+├── config.rs            — EnvConf (env vars + prompts_dir)
 ├── data.rs              — BingX data fetch + indicators
 ├── browserless.rs       — screenshot client
 ├── chart.rs             — chart HTML renderer
 ├── chart_template.html  — LightweightCharts template
-├── telegram.rs          — Telegram messaging
+├── telegram.rs          — Telegram messaging (media groups + ticker header)
 └── llm/
-    ├── mod.rs           — agentic LLM loop
-    └── tools.rs         — tool definitions + execution
+    ├── mod.rs           — agentic LLM loop + external prompt loading
+    └── tools.rs         — tool schema loading (tools.json) + execution
+config/prompts/          — external prompt templates (loaded at runtime)
 k8s/
 ├── browserless.yaml     — Browserless deployment
 ├── litellm.yaml         — LiteLLM proxy deployment
-└── telegrambot.yaml     — Bot deployment (in-cluster)
+├── prompts-configmap.yaml — Prompt config (system, user, tools)
+└── telegrambot.yaml     — Bot deployment (w/ ConfigMap mount)
 deployment/
-├── Dockerfile           — Multi-stage build
+├── Dockerfile           — Multi-stage Debian build
 └── docker-compose.yaml  — All-in-one local setup
 docs/specs/
 ├── architecture.md      — Full architecture spec

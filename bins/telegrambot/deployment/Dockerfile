@@ -1,7 +1,9 @@
 # ─── Build stage ──────────────────────────────────────────────────────────────
-FROM rust:alpine AS builder
+FROM rust:slim-bookworm AS builder
 
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf perl make
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -14,18 +16,22 @@ COPY src/ src/
 # Copy all workspace members (cargo needs them to resolve the workspace)
 COPY bins/ bins/
 
-# Build release binary (statically linked via musl)
+# Build release binary
 RUN cargo build --release -p telegrambot --bin telegrambot && \
     strip /build/target/release/telegrambot
 
 # ─── Runtime stage ────────────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=builder /build/target/release/telegrambot .
+# Default prompt config (overridden by ConfigMap mount in K8s)
+COPY bins/telegrambot/config/prompts/ config/prompts/
+ENV PROMPTS_DIR=config/prompts
 
-# The bot reads config from env vars, no files needed
 ENTRYPOINT ["./telegrambot"]

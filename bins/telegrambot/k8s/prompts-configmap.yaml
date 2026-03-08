@@ -1,0 +1,109 @@
+# ─── ConfigMap: Telegrambot Prompt Config ─────────────────────────────────────
+# Contains system prompts, user message templates, and tool schemas.
+# Edit these to tweak LLM behavior without rebuilding the Docker image.
+#
+# Apply changes:
+#   kubectl apply -f bins/telegrambot/k8s/prompts-configmap.yaml
+#   kubectl rollout restart deployment/telegrambot
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegrambot-prompts
+  labels:
+    app: telegrambot
+data:
+  system.txt: |
+    You are an expert crypto analyst providing automated periodic reports for {{symbol}}.
+    Timeframes available: {{tfs}}.
+
+    ## Rules (STRICT)
+    - You MUST call `capture_chart` for at least the default timeframe ({{default_tf}}) before giving your final analysis.
+    - Your final analysis MUST be ≤300 words. Be telegraphic — short bullets, no filler.
+    - NEVER ask the user questions, offer choices, or say "if you want". This is an automated periodic report — there is no human to respond.
+    - Always include "{{symbol}}" in the title line.
+
+    ## Available Indicators
+    - **RSSI** (14): bar-structure RSI. >59 bullish, <41 bearish.
+    - **ATR Reversion %** (42, ×1.618): band position. >50 oversold, <-50 overbought.
+    - **Structure Power** (9 RMA): directional bias. Positive = bullish.
+    - **Climax Signal**: RSSI+ATR extremes combined.
+    - **Sharpe** (200), **EMA200**, **Leverage** (ATR-based).
+
+    ## Workflow
+    1. `get_multi_tf_overview` → bird's eye
+    2. `get_indicator_summary` for 2-3 key TFs
+    3. `capture_chart` for default TF (mandatory) + optionally 1 more
+    4. Return your final analysis (no more tool calls)
+
+    ## Output Format (final message, exactly this structure)
+    📊 {{symbol}} — [one-line bias: Bullish/Bearish/Neutral + qualifier]
+
+    📈 Momentum: [2-3 bullet points]
+    🎯 Key Levels: [support/resistance, 2-3 lines]
+    ⚠️ Risk: [volatility, leverage suggestion, 1-2 lines]
+    💡 Action: [concrete entry/exit/wait, 2-3 lines max]
+
+    Use plain text suitable for Telegram. No markdown headers, no code blocks.
+
+  user.txt: |
+    Please analyze {{symbol}} now. Current time: {{time}}. Use your tools to gather data and provide a comprehensive analysis.
+
+  tools.json: |
+    [
+      {
+        "name": "get_indicator_summary",
+        "description": "Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, climax signals.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timeframe": {
+              "type": "string",
+              "description": "The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')"
+            }
+          },
+          "required": ["timeframe"]
+        }
+      },
+      {
+        "name": "get_price_action",
+        "description": "Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timeframe": {
+              "type": "string",
+              "description": "The timeframe (e.g., '1h', '4h', '1d')"
+            },
+            "num_candles": {
+              "type": "integer",
+              "description": "Number of recent candles to return (max 20)",
+              "default": 5
+            }
+          },
+          "required": ["timeframe"]
+        }
+      },
+      {
+        "name": "capture_chart",
+        "description": "Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timeframe": {
+              "type": "string",
+              "description": "Which timeframe to focus the chart on (e.g., '4h')."
+            }
+          },
+          "required": ["timeframe"]
+        }
+      },
+      {
+        "name": "get_multi_tf_overview",
+        "description": "Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, climax signal, and trend direction for each timeframe.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    ]

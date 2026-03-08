@@ -6,7 +6,8 @@
 #      docker build -f bins/telegrambot/deployment/Dockerfile -t telegrambot:latest .
 #   2. Create the config secret:
 #      kubectl create secret generic telegrambot-env --from-env-file=bins/telegrambot/.env
-#   3. Deploy browserless + litellm:
+#   3. Deploy prompts + dependencies:
+#      kubectl apply -f bins/telegrambot/k8s/prompts-configmap.yaml
 #      kubectl apply -f bins/telegrambot/k8s/browserless.yaml
 #      kubectl apply -f bins/telegrambot/k8s/litellm.yaml
 apiVersion: apps/v1
@@ -40,6 +41,13 @@ spec:
               value: "http://litellm.default.svc.cluster.local:4000/v1"
             - name: BROWSERLESS_URL
               value: "http://browserless.default.svc.cluster.local:3000"
+            # Point to mounted prompt config
+            - name: PROMPTS_DIR
+              value: "/etc/telegrambot/prompts"
+          volumeMounts:
+            - name: prompts
+              mountPath: /etc/telegrambot/prompts
+              readOnly: true
           resources:
             requests:
               cpu: "50m"
@@ -47,4 +55,8 @@ spec:
             limits:
               cpu: "500m"
               memory: "256Mi"
+      volumes:
+        - name: prompts
+          configMap:
+            name: telegrambot-prompts
       restartPolicy: Always

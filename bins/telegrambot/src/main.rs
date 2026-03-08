@@ -60,24 +60,38 @@ async fn run_analysis_cycle(
         "Fetched and processed market data"
     );
 
-    // 2. Run agentic LLM analysis loop
-    let (analysis_text, chart_png) = llm::run_agent(llm_client, conf, &all_dfs).await?;
+    // 2. Capture chart screenshots for ALL timeframes
+    let chart_html = telegrambot::chart::render_chart_html(&all_dfs, conf)?;
+    let mut tf_charts: Vec<(String, Vec<u8>)> = Vec::new();
+    for tf in &conf.tfs {
+        let tf_label = tf.to_string();
+        match telegrambot::browserless::capture_chart_screenshot(
+            &chart_html,
+            &conf.browserless_url,
+        )
+        .await
+        {
+            Ok(png) => {
+                info!(tf = %tf_label, "Captured chart screenshot");
+                tf_charts.push((tf_label, png));
+            }
+            Err(e) => {
+                error!(tf = %tf_label, "Failed to capture chart: {e:#}");
+            }
+        }
+    }
+
+    // 3. Run agentic LLM analysis loop
+    let (analysis_text, _) = llm::run_agent(llm_client, conf, &all_dfs).await?;
     info!(
         analysis_len = analysis_text.len(),
-        has_chart = chart_png.is_some(),
+        chart_count = tf_charts.len(),
         "LLM analysis complete"
     );
 
-    // 3. Send results to Telegram
+    // 4. Send results to Telegram
     let chat_id = ChatId(conf.telegram_chat_id);
-    telegram::send_analysis(
-        bot,
-        chat_id,
-        &conf.symbol,
-        &analysis_text,
-        chart_png.as_deref(),
-    )
-    .await?;
+    telegram::send_analysis(bot, chat_id, &conf.symbol, &analysis_text, &tf_charts).await?;
 
     Ok(())
 }

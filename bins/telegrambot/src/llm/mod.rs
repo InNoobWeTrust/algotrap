@@ -31,11 +31,12 @@ pub async fn run_agent(
     all_dfs: &HashMap<Timeframe, DataFrame>,
 ) -> Result<(String, Option<Vec<u8>>), Box<dyn core::error::Error + Send + Sync>> {
     let chart_html = chart::render_chart_html(all_dfs, conf)?;
-    let tools = build_tools();
+    let tools = build_tools(conf)?;
     let mut chart_screenshots: HashMap<String, Vec<u8>> = HashMap::new();
     let mut latest_chart_png: Option<Vec<u8>> = None;
 
-    let system_prompt = build_system_prompt(conf);
+    let system_prompt = load_and_render_prompt(conf, "system.txt")?;
+    let user_prompt = load_and_render_prompt(conf, "user.txt")?;
 
     let mut messages: Vec<ChatCompletionRequestMessage> = vec![
         ChatCompletionRequestSystemMessageArgs::default()
@@ -43,12 +44,7 @@ pub async fn run_agent(
             .build()?
             .into(),
         ChatCompletionRequestUserMessageArgs::default()
-            .content(format!(
-                "Please analyze {symbol} now. Current time: {time}. \
-                 Use your tools to gather data and provide a comprehensive analysis.",
-                symbol = conf.symbol,
-                time = Utc::now().format("%Y-%m-%d %H:%M UTC"),
-            ))
+            .content(user_prompt.as_str())
             .build()?
             .into(),
     ];
@@ -136,39 +132,29 @@ pub async fn run_agent(
     ))
 }
 
-// ─── System Prompt ───────────────────────────────────────────────────────────
+// ─── Prompt Loading ──────────────────────────────────────────────────────────
 
-fn build_system_prompt(conf: &EnvConf) -> String {
-    format!(
-        "You are an experienced crypto market analyst. You are analyzing {symbol} \
-         across multiple timeframes: {tfs:?}.\n\n\
-         You have access to tools that let you inspect indicator data and capture chart screenshots. \
-         Use them to build a thorough analysis before giving your recommendation.\n\n\
-         **Available custom indicators:**\n\
-         - **RSSI** (Relative Structure Strength Index, 14-period): Like RSI but based on \
-           bar structure bias. >59 = bullish, <41 = bearish, between = neutral.\n\
-         - **ATR Reversion %** (42-period ATR, 1.618 multiplier): Measures how far price has \
-           moved within the ATR oscillation band. >50 = oversold zone, <-50 = overbought zone.\n\
-         - **Structure Power** (9-period RMA of bar bias): Shows the directional strength of \
-           price structure. Positive = bullish structure, negative = bearish.\n\
-         - **Climax Signal**: Combined signal — overbought when RSSI>54 AND ATR_rev<-50, \
-           oversold when RSSI<46 AND ATR_rev>50.\n\
-         - **Sharpe Ratio** (200-period): Risk-adjusted return measure.\n\
-         - **EMA200**: Long-term trend reference.\n\
-         - **Leverage**: Suggested leverage based on ATR and configured stop-loss.\n\n\
-         **Approach:**\n\
-         1. Start with `get_multi_tf_overview` for a bird's eye view\n\
-         2. Drill into specific timeframes with `get_indicator_summary` and `get_price_action`\n\
-         3. Optionally `capture_chart` for visual confirmation\n\
-         4. Synthesize your findings into a clear recommendation\n\n\
-         **Final output format** (when you're done analyzing, respond with this):\n\
-         - 📊 **Market Structure**: overall trend assessment\n\
-         - 📈 **Momentum**: strength and direction\n\
-         - 🎯 **Key Levels**: support/resistance from indicators\n\
-         - ⚠️ **Risk Assessment**: volatility, signals, leverage suggestion\n\
-         - 💡 **Recommendation**: actionable suggestion with reasoning\n\n\
-         Keep your final analysis concise but insightful. Use plain text suitable for Telegram.",
-        symbol = conf.symbol,
-        tfs = conf.tfs,
-    )
+/// Load a prompt template from `{prompts_dir}/{filename}` and render placeholders.
+fn load_and_render_prompt(
+    conf: &EnvConf,
+    filename: &str,
+) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
+    let path = std::path::Path::new(&conf.prompts_dir).join(filename);
+    let template = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "Failed to read prompt file {}: {e}",
+            path.display()
+        )
+    })?;
+
+    let rendered = template
+        .replace("{{symbol}}", &conf.symbol)
+        .replace("{{tfs}}", &format!("{:?}", conf.tfs))
+        .replace("{{default_tf}}", &conf.default_tf.to_string())
+        .replace(
+            "{{time}}",
+            &Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+        );
+
+    Ok(rendered)
 }

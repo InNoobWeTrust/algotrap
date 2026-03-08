@@ -1,0 +1,1 @@
+Please analyze {{symbol}} now. Current time: {{time}}. Use your tools to gather data and provide a comprehensive analysis.

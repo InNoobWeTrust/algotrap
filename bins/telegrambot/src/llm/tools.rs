@@ -10,95 +10,44 @@ use tracing::warn;
 use crate::browserless::capture_chart_screenshot;
 use crate::config::EnvConf;
 
-/// Build the tool definitions available to the LLM agent.
-pub fn build_tools() -> Vec<ChatCompletionTools> {
-    vec![
-        ChatCompletionTools::Function(ChatCompletionTool {
-            function: FunctionObjectArgs::default()
-                .name("get_indicator_summary")
-                .description(
-                    "Get a summary of technical indicator values for a specific timeframe. \
-                     Returns the last 3 candles of key indicators: RSSI, ATR reversion %, \
-                     structure power, Sharpe ratio, EMA200, leverage, climax signals.",
-                )
-                .parameters(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "timeframe": {
-                            "type": "string",
-                            "description": "The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')"
-                        }
-                    },
-                    "required": ["timeframe"]
-                }))
-                .build()
-                .unwrap(),
-        }),
-        ChatCompletionTools::Function(ChatCompletionTool {
-            function: FunctionObjectArgs::default()
-                .name("get_price_action")
-                .description(
-                    "Get OHLCV price action data for a specific timeframe. \
-                     Returns the last N candles with open, high, low, close, volume.",
-                )
-                .parameters(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "timeframe": {
-                            "type": "string",
-                            "description": "The timeframe (e.g., '1h', '4h', '1d')"
-                        },
-                        "num_candles": {
-                            "type": "integer",
-                            "description": "Number of recent candles to return (max 20)",
-                            "default": 5
-                        }
-                    },
-                    "required": ["timeframe"]
-                }))
-                .build()
-                .unwrap(),
-        }),
-        ChatCompletionTools::Function(ChatCompletionTool {
-            function: FunctionObjectArgs::default()
-                .name("capture_chart")
-                .description(
-                    "Capture a screenshot of the multi-timeframe chart. \
-                     Returns a chart image that you can analyze visually. \
-                     Call this when you need to see the chart patterns, \
-                     support/resistance levels, or visual confirmation of indicators.",
-                )
-                .parameters(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "timeframe": {
-                            "type": "string",
-                            "description": "Which timeframe to focus the chart on (e.g., '4h'). The chart will show this timeframe by default."
-                        }
-                    },
-                    "required": ["timeframe"]
-                }))
-                .build()
-                .unwrap(),
-        }),
-        ChatCompletionTools::Function(ChatCompletionTool {
-            function: FunctionObjectArgs::default()
-                .name("get_multi_tf_overview")
-                .description(
-                    "Get a quick overview across ALL configured timeframes. \
-                     Returns the latest RSSI, ATR reversion %, climax signal, \
-                     and trend direction for each timeframe. \
-                     Useful for getting a bird's eye view of the market.",
-                )
-                .parameters(serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }))
-                .build()
-                .unwrap(),
-        }),
-    ]
+/// Build LLM tool definitions by loading schemas from `tools.json`.
+///
+/// Only the tool *schemas* (name, description, parameters) are externalized.
+/// Tool *execution* logic stays in Rust — adding a new tool still requires
+/// a code change in `execute_tool_call`, but tweaking descriptions or
+/// parameter docs is a config-only change.
+pub fn build_tools(
+    conf: &EnvConf,
+) -> Result<Vec<ChatCompletionTools>, Box<dyn core::error::Error + Send + Sync>> {
+    let path = std::path::Path::new(&conf.prompts_dir).join("tools.json");
+    let json_str = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read tool schemas from {}: {e}", path.display()))?;
+
+    let schemas: Vec<serde_json::Value> = serde_json::from_str(&json_str)?;
+
+    let tools = schemas
+        .into_iter()
+        .map(|schema| {
+            let name = schema["name"].as_str().unwrap_or("unknown").to_string();
+            let description = schema["description"].as_str().unwrap_or("").to_string();
+            let parameters = schema.get("parameters").cloned().unwrap_or(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }));
+
+            ChatCompletionTools::Function(ChatCompletionTool {
+                function: FunctionObjectArgs::default()
+                    .name(name)
+                    .description(description)
+                    .parameters(parameters)
+                    .build()
+                    .expect("Failed to build tool function"),
+            })
+        })
+        .collect();
+
+    Ok(tools)
 }
 
 /// Execute a tool call and return the result as a string,

@@ -23,6 +23,10 @@ pub struct EnvConf {
     // Browserless
     pub browserless_url: String,
 
+    // Prompt config directory (system.txt, user.txt, tools.json)
+    #[serde(default = "default_prompts_dir")]
+    pub prompts_dir: String,
+
     // Scheduling
     #[serde(default = "default_analysis_interval")]
     pub analysis_interval_secs: u64,
@@ -36,4 +40,8 @@ fn default_analysis_interval() -> u64 {
 
 fn default_timeout_secs() -> u64 {
     30
+}
+
+fn default_prompts_dir() -> String {
+    "config/prompts".to_string()
 }
