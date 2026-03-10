@@ -8,6 +8,7 @@ use polars::prelude::*;
 use tracing::warn;
 
 use crate::browserless::capture_chart_screenshot;
+use crate::chart::render_single_tf_chart_html;
 use crate::config::EnvConf;
 
 /// Build LLM tool definitions by loading schemas from `tools.json`.
@@ -56,7 +57,6 @@ pub async fn execute_tool_call(
     tool_call: &ChatCompletionMessageToolCall,
     all_dfs: &HashMap<Timeframe, DataFrame>,
     conf: &EnvConf,
-    chart_html: &str,
     chart_screenshots: &mut HashMap<String, Vec<u8>>,
 ) -> Result<(String, Option<Vec<u8>>), Box<dyn core::error::Error + Send + Sync>> {
     let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
@@ -109,7 +109,22 @@ pub async fn execute_tool_call(
                 ));
             }
 
-            match capture_chart_screenshot(chart_html, &conf.browserless_url).await {
+            // Parse timeframe and render per-TF chart HTML
+            let tf: Timeframe = tf_str
+                .parse()
+                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
+            let df = match all_dfs.get(&tf) {
+                Some(df) => df,
+                None => {
+                    return Ok((
+                        format!("Timeframe {tf_str} not available. Available: {:?}", conf.tfs),
+                        None,
+                    ));
+                }
+            };
+            let chart_html = render_single_tf_chart_html(&tf, df, conf)?;
+
+            match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
                 Ok(png) => {
                     chart_screenshots.insert(tf_str.to_string(), png.clone());
                     Ok((

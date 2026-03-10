@@ -15,7 +15,6 @@ use chrono::Utc;
 use polars::prelude::*;
 use tracing::{info, warn};
 
-use crate::chart;
 use crate::config::EnvConf;
 
 pub use tools::{build_tools, execute_tool_call};
@@ -30,7 +29,6 @@ pub async fn run_agent(
     conf: &EnvConf,
     all_dfs: &HashMap<Timeframe, DataFrame>,
 ) -> Result<(String, Option<Vec<u8>>), Box<dyn core::error::Error + Send + Sync>> {
-    let chart_html = chart::render_chart_html(all_dfs, conf)?;
     let tools = build_tools(conf)?;
     let mut chart_screenshots: HashMap<String, Vec<u8>> = HashMap::new();
     let mut latest_chart_png: Option<Vec<u8>> = None;
@@ -94,7 +92,6 @@ pub async fn run_agent(
                         tool_call,
                         all_dfs,
                         conf,
-                        &chart_html,
                         &mut chart_screenshots,
                     )
                     .await?;

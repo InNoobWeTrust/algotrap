@@ -19,7 +19,7 @@ multiple timeframes and deliver actionable recommendations.
 ┌────────────────────────────────────────────────────────┐
 │  main.rs — loop: analysis cycle → sleep                │
 │    ├─► data::fetch_all_data()  (BingX API)             │
-│    ├─► chart::render + browserless for ALL TFs         │
+│    ├─► chart::render_single_tf_chart_html per TF       │
 │    ├─► llm::run_agent()        (multi-turn)            │
 │    │     ├─► load_and_render_prompt(system.txt)        │
 │    │     ├─► load_and_render_prompt(user.txt)          │
@@ -29,7 +29,7 @@ multiple timeframes and deliver actionable recommendations.
 │    │     ├─► tools::get_price_action                   │
 │    │     └─► tools::capture_chart                      │
 │    │           └─► browserless::capture_screenshot     │
-│    │                 └─► chart::render_chart_html      │
+│    │           └─► chart::render_single_tf_chart_html  │
 │    └─► telegram::send_analysis()                       │
 │          ├─► send_media_group (all TF charts as album) │
 │          └─► send_message (Unicode header + analysis)  │
@@ -50,8 +50,8 @@ src/
 ├── config.rs            — EnvConf struct + defaults (incl. prompts_dir)
 ├── data.rs              — fetch_all_data, indicators, process_data
 ├── browserless.rs       — capture_chart_screenshot via Browserless API
-├── chart.rs             — render_chart_html + include_str! loader
-├── chart_template.html  — LightweightCharts HTML template
+├── chart.rs             — render_single_tf_chart_html (per-TF)
+├── chart_template.html  — LightweightCharts single-TF template
 ├── telegram.rs          — send_analysis (media groups, Unicode header, split)
 ├── llm/
 │   ├── mod.rs           — run_agent: multi-turn loop + prompt file loading

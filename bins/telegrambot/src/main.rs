@@ -60,11 +60,25 @@ async fn run_analysis_cycle(
         "Fetched and processed market data"
     );
 
-    // 2. Capture chart screenshots for ALL timeframes
-    let chart_html = telegrambot::chart::render_chart_html(&all_dfs, conf)?;
+    // 2. Capture chart screenshots for ALL timeframes (per-TF rendering)
     let mut tf_charts: Vec<(String, Vec<u8>)> = Vec::new();
     for tf in &conf.tfs {
         let tf_label = tf.to_string();
+        let df = match all_dfs.get(tf) {
+            Some(df) => df,
+            None => {
+                error!(tf = %tf_label, "No data for timeframe, skipping chart");
+                continue;
+            }
+        };
+        let chart_html =
+            match telegrambot::chart::render_single_tf_chart_html(tf, df, conf) {
+                Ok(html) => html,
+                Err(e) => {
+                    error!(tf = %tf_label, "Failed to render chart HTML: {e:#}");
+                    continue;
+                }
+            };
         match telegrambot::browserless::capture_chart_screenshot(
             &chart_html,
             &conf.browserless_url,
