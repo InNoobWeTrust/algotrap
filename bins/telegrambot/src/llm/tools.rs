@@ -9,16 +9,17 @@ use tracing::warn;
 
 use crate::browserless::capture_chart_screenshot;
 use crate::chart::render_single_tf_chart_html;
-use crate::config::EnvConf;
+use crate::config::{EnvConf, TickerConf};
+
+use super::AnalysisMode;
 
 /// Build LLM tool definitions by loading schemas from `tools.json`.
 ///
-/// Only the tool *schemas* (name, description, parameters) are externalized.
-/// Tool *execution* logic stays in Rust — adding a new tool still requires
-/// a code change in `execute_tool_call`, but tweaking descriptions or
-/// parameter docs is a config-only change.
+/// In `AlertScan` mode, `capture_chart` is excluded to avoid wasteful
+/// Browserless calls for below-threshold tickers.
 pub fn build_tools(
     conf: &EnvConf,
+    mode: AnalysisMode,
 ) -> Result<Vec<ChatCompletionTools>, Box<dyn core::error::Error + Send + Sync>> {
     let path = std::path::Path::new(&conf.prompts_dir).join("tools.json");
     let json_str = std::fs::read_to_string(&path)
@@ -28,6 +29,14 @@ pub fn build_tools(
 
     let tools = schemas
         .into_iter()
+        .filter(|schema| {
+            // In alert scan mode, exclude capture_chart (ADR-5)
+            if mode == AnalysisMode::AlertScan {
+                schema["name"].as_str() != Some("capture_chart")
+            } else {
+                true
+            }
+        })
         .map(|schema| {
             let name = schema["name"].as_str().unwrap_or("unknown").to_string();
             let description = schema["description"].as_str().unwrap_or("").to_string();
@@ -51,14 +60,13 @@ pub fn build_tools(
     Ok(tools)
 }
 
-/// Execute a tool call and return the result as a string,
-/// plus an optional chart screenshot.
+/// Execute a tool call and return the result as a string.
 pub async fn execute_tool_call(
     tool_call: &ChatCompletionMessageToolCall,
     all_dfs: &HashMap<Timeframe, DataFrame>,
     conf: &EnvConf,
-    chart_screenshots: &mut HashMap<String, Vec<u8>>,
-) -> Result<(String, Option<Vec<u8>>), Box<dyn core::error::Error + Send + Sync>> {
+    ticker: &TickerConf,
+) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
 
     match tool_call.function.name.as_str() {
@@ -71,11 +79,11 @@ pub async fn execute_tool_call(
                 Some(df) => {
                     let last_rows = df.slice(-3, 3);
                     let summary = extract_indicator_summary(&last_rows, &tf)?;
-                    Ok((summary, None))
+                    Ok(summary)
                 }
-                None => Ok((
-                    format!("Timeframe {tf_str} not available. Available: {:?}", conf.tfs),
-                    None,
+                None => Ok(format!(
+                    "Timeframe {tf_str} not available. Available: {:?}",
+                    ticker.tfs
                 )),
             }
         }
@@ -89,25 +97,17 @@ pub async fn execute_tool_call(
                 Some(df) => {
                     let rows = df.slice(-(num as i64), num);
                     let price_data = extract_price_action(&rows)?;
-                    Ok((price_data, None))
+                    Ok(price_data)
                 }
-                None => Ok((
-                    format!("Timeframe {tf_str} not available. Available: {:?}", conf.tfs),
-                    None,
+                None => Ok(format!(
+                    "Timeframe {tf_str} not available. Available: {:?}",
+                    ticker.tfs
                 )),
             }
         }
         "capture_chart" => {
-            let default_tf_str = conf.default_tf.to_string();
+            let default_tf_str = ticker.default_tf.to_string();
             let tf_str = args["timeframe"].as_str().unwrap_or(&default_tf_str);
-
-            // Check cache first
-            if let Some(cached) = chart_screenshots.get(tf_str) {
-                return Ok((
-                    format!("[Chart screenshot for {tf_str} captured — see attached image]"),
-                    Some(cached.clone()),
-                ));
-            }
 
             // Parse timeframe and render per-TF chart HTML
             let tf: Timeframe = tf_str
@@ -116,41 +116,31 @@ pub async fn execute_tool_call(
             let df = match all_dfs.get(&tf) {
                 Some(df) => df,
                 None => {
-                    return Ok((
-                        format!("Timeframe {tf_str} not available. Available: {:?}", conf.tfs),
-                        None,
+                    return Ok(format!(
+                        "Timeframe {tf_str} not available. Available: {:?}",
+                        ticker.tfs
                     ));
                 }
             };
-            let chart_html = render_single_tf_chart_html(&tf, df, conf)?;
+            let chart_html = render_single_tf_chart_html(&tf, df, ticker)?;
 
             match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
-                Ok(png) => {
-                    chart_screenshots.insert(tf_str.to_string(), png.clone());
-                    Ok((
-                        format!("[Chart screenshot for {tf_str} captured — see attached image]"),
-                        Some(png),
-                    ))
-                }
+                Ok(_png) => Ok(format!(
+                    "[Chart screenshot for {tf_str} captured — see attached image]"
+                )),
                 Err(e) => {
                     warn!("Failed to capture chart screenshot: {e}");
-                    Ok((
-                        format!(
-                            "Failed to capture chart: {e}. Proceeding with data-only analysis."
-                        ),
-                        None,
+                    Ok(format!(
+                        "Failed to capture chart: {e}. Proceeding with data-only analysis."
                     ))
                 }
             }
         }
         "get_multi_tf_overview" => {
-            let overview = build_multi_tf_overview(all_dfs, conf)?;
-            Ok((overview, None))
+            let overview = build_multi_tf_overview(all_dfs, ticker)?;
+            Ok(overview)
         }
-        _ => Ok((
-            format!("Unknown tool: {}", tool_call.function.name),
-            None,
-        )),
+        _ => Ok(format!("Unknown tool: {}", tool_call.function.name)),
     }
 }
 
@@ -219,14 +209,13 @@ fn extract_price_action(
 
 fn build_multi_tf_overview(
     all_dfs: &HashMap<Timeframe, DataFrame>,
-    conf: &EnvConf,
+    ticker: &TickerConf,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec![format!(
         "=== {} Multi-Timeframe Overview ===",
-        conf.symbol
+        ticker.symbol
     )];
 
-    // Sort by timeframe weight for ordered output
     let mut tfs: Vec<Timeframe> = all_dfs.keys().cloned().collect();
     tfs.sort_by_key(|tf| tf.weight());
 

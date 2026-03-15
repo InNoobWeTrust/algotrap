@@ -9,20 +9,21 @@ use polars::prelude::*;
 use rayon::prelude::*;
 use tracing::error;
 
-use crate::config::EnvConf;
+use crate::config::TickerConf;
 
 // ─── Data Fetching ───────────────────────────────────────────────────────────
 
 pub async fn fetch_all_data(
     client: &ext::bingx::BingXClient,
-    conf: &EnvConf,
+    ticker: &TickerConf,
 ) -> Result<HashMap<Timeframe, DataFrame>, Box<dyn core::error::Error + Send + Sync>> {
     let all_dfs = join_all(
-        conf.tfs
+        ticker
+            .tfs
             .iter()
             .map(|tf| {
                 let client = client;
-                let symbol = conf.symbol.clone();
+                let symbol = ticker.symbol.clone();
                 async move {
                     client
                         .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
@@ -36,7 +37,8 @@ pub async fn fetch_all_data(
     .into_par_iter()
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
-            let df = process_data(klines.as_slice(), conf).expect("Failed to process data");
+            let df =
+                process_data(klines.as_slice(), ticker).expect("Failed to process data");
             Some((tf, df))
         }
         Err(err) => {
@@ -51,7 +53,7 @@ pub async fn fetch_all_data(
 
 // ─── Indicators ──────────────────────────────────────────────────────────────
 
-pub fn indicators(conf: &EnvConf) -> Vec<Expr> {
+pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
     let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
 
     let time_to_date = col("time")
@@ -103,7 +105,7 @@ pub fn indicators(conf: &EnvConf) -> Vec<Expr> {
         .otherwise(when(overbought).then(lit(1)).otherwise(lit(-1)))
         .alias("climax_signal");
 
-    let lvrg_adjust = conf.sl_percent / (1. + conf.tol_percent);
+    let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
     let sharpe_ratio = col("close").sharpe(200).alias("sharpe");
 
@@ -131,9 +133,9 @@ pub fn indicators(conf: &EnvConf) -> Vec<Expr> {
 
 pub fn process_data(
     klines: &[Kline],
-    conf: &EnvConf,
+    ticker: &TickerConf,
 ) -> Result<DataFrame, Box<dyn core::error::Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df.lazy().with_columns(indicators(conf)).collect().unwrap();
+    let df_with_indicators = df.lazy().with_columns(indicators(ticker)).collect().unwrap();
     Ok(df_with_indicators)
 }

@@ -2,14 +2,37 @@ use serde::Deserialize;
 
 use algotrap::prelude::*;
 
+// ─── Per-Ticker Config ───────────────────────────────────────────────────────
+
+/// Trading parameters specific to a single ticker.
 #[derive(Debug, Clone, Deserialize)]
-pub struct EnvConf {
-    // Trading
+pub struct TickerConf {
     pub symbol: String,
     pub sl_percent: f64,
     pub tol_percent: f64,
+    #[serde(deserialize_with = "deserialize_tfs")]
     pub tfs: Vec<Timeframe>,
     pub default_tf: Timeframe,
+}
+
+/// Deserialize comma-separated timeframes from a JSON string field.
+fn deserialize_tfs<'de, D>(deserializer: D) -> Result<Vec<Timeframe>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    s.split(',')
+        .map(|tf| tf.trim().parse::<Timeframe>().map_err(serde::de::Error::custom))
+        .collect()
+}
+
+// ─── Global Config ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvConf {
+    // Multi-ticker (JSON array)
+    #[serde(deserialize_with = "deserialize_tickers")]
+    pub tickers: Vec<TickerConf>,
 
     // Telegram
     pub telegram_bot_token: String,
@@ -27,15 +50,32 @@ pub struct EnvConf {
     #[serde(default = "default_prompts_dir")]
     pub prompts_dir: String,
 
-    // Scheduling
-    #[serde(default = "default_analysis_interval")]
-    pub analysis_interval_secs: u64,
+    // Alert scanning
+    #[serde(default = "default_scan_interval")]
+    pub scan_interval_secs: u64,
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+
+    // HTTP request timeout
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
 
-fn default_analysis_interval() -> u64 {
-    3600
+/// Deserialize `TICKERS` env var: a JSON array of TickerConf objects.
+fn deserialize_tickers<'de, D>(deserializer: D) -> Result<Vec<TickerConf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    serde_json::from_str(&s).map_err(serde::de::Error::custom)
+}
+
+fn default_scan_interval() -> u64 {
+    900 // 15 minutes
+}
+
+fn default_confidence_threshold() -> f64 {
+    70.0
 }
 
 fn default_timeout_secs() -> u64 {
@@ -44,4 +84,110 @@ fn default_timeout_secs() -> u64 {
 
 fn default_prompts_dir() -> String {
     "config/prompts".to_string()
+}
+
+impl EnvConf {
+    /// Find a ticker config by symbol (case-insensitive).
+    pub fn find_ticker(&self, symbol: &str) -> Option<&TickerConf> {
+        self.tickers
+            .iter()
+            .find(|tc| tc.symbol.eq_ignore_ascii_case(symbol))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Helper: build a minimal env HashMap for EnvConf deserialization.
+    fn base_env() -> HashMap<String, String> {
+        let tickers_json = r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"1m,5m,15m,1h,4h,1d,1w,1M","default_tf":"15m"},{"symbol":"ETH-USDT","sl_percent":0.08,"tol_percent":0.5,"tfs":"15m,1h,4h","default_tf":"4h"}]"#;
+        let mut env = HashMap::new();
+        env.insert("TICKERS".into(), tickers_json.into());
+        env.insert("TELEGRAM_BOT_TOKEN".into(), "test-token".into());
+        env.insert("TELEGRAM_CHAT_ID".into(), "-100123".into());
+        env.insert("LLM_API_BASE".into(), "http://localhost:4000/v1".into());
+        env.insert("LLM_API_KEY".into(), "sk-test".into());
+        env.insert("LLM_MODEL".into(), "test-model".into());
+        env.insert("BROWSERLESS_URL".into(), "http://localhost:3000".into());
+        env
+    }
+
+    #[test]
+    fn test_tickers_json_deserialization() {
+        let env = base_env();
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+
+        assert_eq!(conf.tickers.len(), 2);
+        assert_eq!(conf.tickers[0].symbol, "BTC-USDT");
+        assert_eq!(conf.tickers[0].tfs.len(), 8);
+        assert_eq!(conf.tickers[1].symbol, "ETH-USDT");
+        assert_eq!(conf.tickers[1].tfs.len(), 3);
+    }
+
+    #[test]
+    fn test_ticker_conf_fields() {
+        let env = base_env();
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+
+        let btc = &conf.tickers[0];
+        assert!((btc.sl_percent - 0.1).abs() < f64::EPSILON);
+        assert!((btc.tol_percent - 0.618).abs() < f64::EPSILON);
+        assert_eq!(btc.default_tf, Timeframe::M15);
+
+        let eth = &conf.tickers[1];
+        assert!((eth.sl_percent - 0.08).abs() < f64::EPSILON);
+        assert_eq!(eth.default_tf, Timeframe::H4);
+    }
+
+    #[test]
+    fn test_default_values() {
+        let env = base_env();
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+
+        assert_eq!(conf.scan_interval_secs, 900);
+        assert!((conf.confidence_threshold - 70.0).abs() < f64::EPSILON);
+        assert_eq!(conf.timeout_secs, 30);
+        assert_eq!(conf.prompts_dir, "config/prompts");
+    }
+
+    #[test]
+    fn test_custom_scan_interval() {
+        let mut env = base_env();
+        env.insert("SCAN_INTERVAL_SECS".into(), "300".into());
+        env.insert("CONFIDENCE_THRESHOLD".into(), "85".into());
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+
+        assert_eq!(conf.scan_interval_secs, 300);
+        assert!((conf.confidence_threshold - 85.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_find_ticker_case_insensitive() {
+        let env = base_env();
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+
+        assert!(conf.find_ticker("BTC-USDT").is_some());
+        assert!(conf.find_ticker("btc-usdt").is_some());
+        assert!(conf.find_ticker("Btc-Usdt").is_some());
+        assert!(conf.find_ticker("ETH-USDT").is_some());
+        assert!(conf.find_ticker("XRP-USDT").is_none());
+    }
+
+    #[test]
+    fn test_invalid_tickers_json() {
+        let mut env = base_env();
+        env.insert("TICKERS".into(), "not-valid-json".into());
+        let result: Result<EnvConf, _> = envy::from_iter(env.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_tickers_array() {
+        let mut env = base_env();
+        env.insert("TICKERS".into(), "[]".into());
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        assert!(conf.tickers.is_empty());
+    }
 }

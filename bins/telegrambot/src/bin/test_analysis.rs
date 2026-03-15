@@ -1,5 +1,5 @@
-/// Standalone test: runs the analysis pipeline on BTC-USDT
-/// without Telegram, printing the result to stdout.
+/// Standalone test: runs the analysis pipeline on ALL configured tickers
+/// without Telegram, printing results to stdout.
 ///
 /// Usage:
 ///   cargo run -p telegrambot --bin test_analysis
@@ -16,44 +16,75 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     dotenv().ok();
 
     let conf: EnvConf = envy::from_env()?;
+
     println!("═══════════════════════════════════════════════════════════════");
-    println!("  🧪 Telegrambot Analysis Test — {}", conf.symbol);
-    println!("  Timeframes: {:?}", conf.tfs);
+    println!(
+        "  🧪 Telegrambot Multi-Ticker Test — {} tickers",
+        conf.tickers.len()
+    );
     println!("  LLM: {} @ {}", conf.llm_model, conf.llm_api_base);
     println!("  Browserless: {}", conf.browserless_url);
     println!("═══════════════════════════════════════════════════════════════");
 
-    // 1. Fetch data
-    println!("\n📡 Fetching market data...");
     let bingx = algotrap::ext::bingx::BingXClient::default();
-    let all_dfs = data::fetch_all_data(&bingx, &conf).await?;
-    println!("✅ Fetched {} timeframes", all_dfs.len());
-
-    for (tf, df) in &all_dfs {
-        println!("   {tf}: {} candles", df.height());
-    }
-
-    // 2. Run LLM agent
-    println!("\n🤖 Running LLM agent loop...");
     let openai_config = OpenAIConfig::new()
         .with_api_base(&conf.llm_api_base)
         .with_api_key(&conf.llm_api_key);
     let llm_client = OpenAIClient::with_config(openai_config);
 
-    let (analysis, chart_png) = llm::run_agent(&llm_client, &conf, &all_dfs).await?;
+    for (i, ticker) in conf.tickers.iter().enumerate() {
+        let bar = "━".repeat(60);
+        println!(
+            "\n\n{bar}\n  [{}/{}] 📊 {} — Alert Scan Mode\n{bar}",
+            i + 1,
+            conf.tickers.len(),
+            ticker.symbol,
+        );
 
-    // 3. Print results
-    println!("\n═══════════════════════════════════════════════════════════════");
-    println!("  📊 Analysis Result");
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("{analysis}");
+        // 1. Fetch data
+        println!("\n📡 Fetching market data for {}...", ticker.symbol);
+        let all_dfs = data::fetch_all_data(&bingx, ticker).await?;
+        println!("✅ Fetched {} timeframes", all_dfs.len());
 
-    if let Some(png) = &chart_png {
-        let path = "/tmp/telegrambot_test_chart.png";
-        std::fs::write(path, png)?;
-        println!("\n📸 Chart saved to: {path}");
+        for (tf, df) in &all_dfs {
+            println!("   {tf}: {} candles", df.height());
+        }
+
+        // 2. Run LLM agent in alert scan mode
+        println!("\n🤖 Running LLM alert scan...");
+        let result = llm::run_agent(
+            &llm_client,
+            &conf,
+            ticker,
+            &all_dfs,
+            llm::AnalysisMode::AlertScan,
+        )
+        .await?;
+
+        // 3. Print result
+        let threshold_icon = if result.confidence >= conf.confidence_threshold {
+            "🎯 ABOVE THRESHOLD"
+        } else {
+            "📉 Below threshold"
+        };
+
+        println!("\n  ┌─────────────────────────────────────────┐");
+        println!(
+            "  │ {} — Confidence: {:.0}%",
+            ticker.symbol, result.confidence
+        );
+        println!("  │ Direction: {}", result.direction);
+        println!(
+            "  │ {} (threshold: {:.0}%)",
+            threshold_icon, conf.confidence_threshold
+        );
+        println!("  └─────────────────────────────────────────┘");
+        println!("\n  Summary: {}", result.text);
     }
 
-    println!("\n✅ Test complete!");
+    println!("\n\n═══════════════════════════════════════════════════════════════");
+    println!("  ✅ All {} tickers scanned!", conf.tickers.len());
+    println!("═══════════════════════════════════════════════════════════════");
+
     Ok(())
 }

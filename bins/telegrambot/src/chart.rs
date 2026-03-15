@@ -4,7 +4,7 @@ use minijinja::render;
 use polars::prelude::DataFrame;
 use serde_json::Value;
 
-use crate::config::EnvConf;
+use crate::config::TickerConf;
 
 /// Render a chart HTML page for a **single** timeframe.
 ///
@@ -14,7 +14,7 @@ use crate::config::EnvConf;
 pub fn render_single_tf_chart_html(
     tf: &Timeframe,
     df: &DataFrame,
-    conf: &EnvConf,
+    ticker: &TickerConf,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let df_json: JsonDataframe = df
         .try_into()
@@ -25,10 +25,10 @@ pub fn render_single_tf_chart_html(
     Ok(render!(
         TDV_HTML_TEMPLATE,
         dataset => dataset,
-        symbol => format!("BingX:{}", conf.symbol),
+        symbol => format!("BingX:{}", ticker.symbol),
         tf => tf.to_string(),
-        sl_percent => format!("{:.0}", conf.sl_percent * 100.),
-        tol_percent => format!("{:.2}", conf.tol_percent * 100.)
+        sl_percent => format!("{:.0}", ticker.sl_percent * 100.),
+        tol_percent => format!("{:.2}", ticker.tol_percent * 100.)
     )
     .trim()
     .to_string())

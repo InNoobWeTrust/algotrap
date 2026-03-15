@@ -33,7 +33,7 @@
 - [x] **Dockerfile prompt fallback**: Default prompts COPY'd into image, overridden
       by ConfigMap mount in K8s
 - [x] **K8s deployment**: Successfully deployed and ran first analysis cycle
-      in OrbStack cluster
+      in local K8s cluster
 
 ### Key Decisions
 
