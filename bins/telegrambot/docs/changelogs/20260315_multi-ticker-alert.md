@@ -77,3 +77,20 @@ Challenges raised: 1 | Author victories: 0 | Reviewer victories: 1
 
 1. **Alert scanning scenario didn't specify which tools are used** — Reviewer won.
    Updated high-confidence scenario to list tools explicitly per ADR-5.
+
+## Session: 2026-03-16T00:04 — Bugfix
+
+### Source Code
+- [MODIFIED] `src/commands.rs` — Added `filter_channel_post()` branch via
+  `dptree::entry()` so slash commands work in Telegram channels (not just groups)
+
+### Docs
+- [MODIFIED] `docs/trds/multi-ticker-alert.md` — Noted channel post handling in
+  `commands.rs` component description
+- [MODIFIED] `docs/specs/manual-analysis.md` — Added channel post scenario and
+  validation rule
+
+### Root Cause
+Telegram channels emit `ChannelPost` updates, not `Message` updates. The original
+code used `Update::filter_message()` only, which silently ignored channel posts.
+Fix: dual-branch handler via `dptree::entry()` listening to both event types.

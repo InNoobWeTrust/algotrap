@@ -64,12 +64,20 @@ mode, but on demand. Additional commands list available tickers and show help.
 - **Then** the manual analysis runs concurrently with the scan
 - **And** both produce their respective outputs without interference
 
+### Scenario: Commands in a Telegram channel (not a group)
+
+- **Given** the bot is an admin in a Telegram channel
+- **When** a user sends `/list` in the channel
+- **Then** the bot receives the update as a `ChannelPost` (not a `Message`)
+- **And** responds with the ticker list in the channel
+
 ## Validation Rules
 
 - Symbol matching is case-insensitive ("btc-usdt" matches "BTC-USDT")
 - `/analyze` runs full analysis mode (existing system.txt + user.txt prompts)
 - Chart screenshots are captured for all TFs configured for that ticker
 - Response format matches existing analysis output (header + media group + text)
+- Commands must work in both group chats (`Message`) and channels (`ChannelPost`)
 
 ## Out of Scope
 

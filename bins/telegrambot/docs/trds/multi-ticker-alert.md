@@ -110,6 +110,9 @@ LLM client, and Telegram bot instance through `Arc`.
 - **`llm/tools.rs`**: Tool execution parameterized by `TickerConf`.
 - **`chart.rs`**: Per-TF chart rendering, parameterized by `TickerConf`.
 - **`commands.rs`** [NEW]: Teloxide `BotCommands` derive, slash command handlers.
+  Handles both `Message` (groups/DMs) and `ChannelPost` (channels) via
+  `dptree::entry()` branching — required because Telegram channels emit
+  different update types than groups.
 - **`telegram.rs`**: `send_analysis` (manual) + `send_alert` (entry alerts with
   direction + confidence badge).
 - **`main.rs`**: Dual-mode entry point — alert scanner + command dispatcher.
