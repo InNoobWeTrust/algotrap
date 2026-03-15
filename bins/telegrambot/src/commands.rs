@@ -37,16 +37,41 @@ pub struct HandlerState {
 // ─── Command Dispatcher ─────────────────────────────────────────────────────
 
 /// Start the teloxide command dispatcher (blocking — run in a tokio::spawn).
+///
+/// Handles commands from both group messages and channel posts. Telegram
+/// channels emit `ChannelPost` updates (not `Message`), so we must listen
+/// to both event types.
 pub async fn run_command_dispatcher(bot: Bot, state: HandlerState) {
-    let handler = Update::filter_message().filter_command::<Command>().endpoint(
-        move |bot: Bot, msg: Message, cmd: Command| {
-            let state = state.clone();
-            async move {
-                handle_command(bot, msg, cmd, state).await;
-                respond(())
-            }
-        },
-    );
+    let state_for_msg = state.clone();
+    let state_for_channel = state.clone();
+
+    let handler = dptree::entry()
+        // Branch 1: Regular messages (groups, private chats)
+        .branch(
+            Update::filter_message().filter_command::<Command>().endpoint(
+                move |bot: Bot, msg: Message, cmd: Command| {
+                    let state = state_for_msg.clone();
+                    async move {
+                        handle_command(bot, msg, cmd, state).await;
+                        respond(())
+                    }
+                },
+            ),
+        )
+        // Branch 2: Channel posts
+        .branch(
+            Update::filter_channel_post()
+                .filter_command::<Command>()
+                .endpoint(
+                    move |bot: Bot, msg: Message, cmd: Command| {
+                        let state = state_for_channel.clone();
+                        async move {
+                            handle_command(bot, msg, cmd, state).await;
+                            respond(())
+                        }
+                    },
+                ),
+        );
 
     Dispatcher::builder(bot, handler)
         .default_handler(|_| async {})
