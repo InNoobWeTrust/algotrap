@@ -16,6 +16,7 @@ use polars::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::config::{EnvConf, TickerConf};
+use crate::memory::TickerMemory;
 
 pub use tools::{build_tools, execute_tool_call};
 
@@ -39,6 +40,12 @@ pub struct AnalysisResult {
     pub confidence: f64,
     /// "LONG" | "SHORT" | "NONE".
     pub direction: String,
+    /// Trade plan options (A, B, C) from the LLM.
+    pub trade_plans: Vec<crate::memory::TradePlan>,
+    /// Per-indicator weights proposed by the LLM (before guardrails).
+    pub proposed_weights: Option<HashMap<String, f64>>,
+    /// LLM-tuned significance threshold for change detection.
+    pub significance_threshold: Option<f64>,
 }
 
 // ─── Agent Entry Point ───────────────────────────────────────────────────────
@@ -54,16 +61,17 @@ pub async fn run_agent(
     ticker: &TickerConf,
     all_dfs: &HashMap<Timeframe, DataFrame>,
     mode: AnalysisMode,
+    memory: Option<&TickerMemory>,
 ) -> Result<AnalysisResult, Box<dyn core::error::Error + Send + Sync>> {
     let tools = build_tools(conf, mode)?;
 
     let (system_file, user_file) = match mode {
         AnalysisMode::FullAnalysis => ("system.txt", "user.txt"),
-        AnalysisMode::AlertScan => ("system_alert.txt", "user_alert.txt"),
+        AnalysisMode::AlertScan => ("system_adaptive.txt", "user_adaptive.txt"),
     };
 
-    let system_prompt = load_and_render_prompt(conf, ticker, system_file)?;
-    let user_prompt = load_and_render_prompt(conf, ticker, user_file)?;
+    let system_prompt = render_prompt(conf, ticker, system_file, memory)?;
+    let user_prompt = render_prompt(conf, ticker, user_file, memory)?;
 
     let mut messages: Vec<ChatCompletionRequestMessage> = vec![
         ChatCompletionRequestSystemMessageArgs::default()
@@ -80,6 +88,11 @@ pub async fn run_agent(
 
     for turn in 0..MAX_TURNS {
         info!(turn, "LLM agent turn");
+
+        // Compress chat history when it exceeds the configured limit.
+        if messages.len() > conf.keep_recent_messages + 1 {
+            compress_history(llm_client, conf, &mut messages).await?;
+        }
 
         let mut req_builder = CreateChatCompletionRequestArgs::default();
         req_builder.model(&conf.llm_model).messages(messages.clone());
@@ -151,6 +164,9 @@ pub async fn run_agent(
         text: "⚠️ Analysis was truncated after reaching maximum reasoning steps.".to_string(),
         confidence: 0.0,
         direction: "NONE".to_string(),
+        trade_plans: vec![],
+        proposed_weights: None,
+        significance_threshold: None,
     })
 }
 
@@ -167,6 +183,9 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
             text,
             confidence: 100.0,
             direction: "NONE".to_string(),
+            trade_plans: vec![],
+            proposed_weights: None,
+            significance_threshold: None,
         },
         AnalysisMode::AlertScan => parse_alert_json(&text),
     }
@@ -195,10 +214,54 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                     .unwrap_or(text)
                     .to_string();
 
+                // Parse trade plans if present
+                let trade_plans = v["trade_plans"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|plan| {
+                                Some(crate::memory::TradePlan {
+                                    label: plan["label"].as_str()?.to_string(),
+                                    direction: plan["direction"]
+                                        .as_str()
+                                        .unwrap_or("WAIT")
+                                        .to_string(),
+                                    entry: plan["entry"].as_f64(),
+                                    target: plan["target"].as_f64(),
+                                    stop: plan["stop"].as_f64(),
+                                    rationale: plan["rationale"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Parse proposed weights (if present)
+                let proposed_weights = v["weights"].as_object().map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, val)| val.as_f64().map(|v| (k.clone(), v)))
+                        .collect::<HashMap<String, f64>>()
+                });
+                if proposed_weights.is_none() {
+                    warn!("LLM response missing 'weights' — retaining previous cycle weights");
+                }
+
+                // Parse significance threshold (if present)
+                let significance_threshold = v["significance_threshold"].as_f64();
+                if significance_threshold.is_none() {
+                    warn!("LLM response missing 'significance_threshold' — retaining previous value");
+                }
+
                 return AnalysisResult {
                     text: summary,
                     confidence,
                     direction,
+                    trade_plans,
+                    proposed_weights,
+                    significance_threshold,
                 };
             }
         }
@@ -210,16 +273,24 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
         text: text.to_string(),
         confidence: 0.0,
         direction: "NONE".to_string(),
+        trade_plans: vec![],
+        proposed_weights: None,
+        significance_threshold: None,
     }
 }
 
 // ─── Prompt Loading ──────────────────────────────────────────────────────────
 
-/// Load a prompt template and render placeholders with ticker-specific values.
-fn load_and_render_prompt(
+/// Load a prompt template and render all placeholders.
+///
+/// Base placeholders (all modes): `{{symbol}}`, `{{tfs}}`, `{{default_tf}}`, `{{time}}`
+/// Adaptive placeholders (AlertScan): `{{memory_context}}`, `{{weights_context}}`,
+/// `{{outcome_summary}}`, `{{weight_min}}`, `{{weight_max}}`, `{{weight_rate_limit}}`
+fn render_prompt(
     conf: &EnvConf,
     ticker: &TickerConf,
     filename: &str,
+    memory: Option<&TickerMemory>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let path = std::path::Path::new(&conf.prompts_dir).join(filename);
     let template = std::fs::read_to_string(&path).map_err(|e| {
@@ -229,7 +300,8 @@ fn load_and_render_prompt(
         )
     })?;
 
-    let rendered = template
+    // Base placeholders (shared by all modes)
+    let mut rendered = template
         .replace("{{symbol}}", &ticker.symbol)
         .replace("{{tfs}}", &format!("{:?}", ticker.tfs))
         .replace("{{default_tf}}", &ticker.default_tf.to_string())
@@ -238,7 +310,241 @@ fn load_and_render_prompt(
             &Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
         );
 
+    // Adaptive placeholders (only relevant for AlertScan prompt files)
+    rendered = rendered
+        .replace("{{weight_min}}", &format!("{:.2}", conf.weight_min))
+        .replace("{{weight_max}}", &format!("{:.2}", conf.weight_max))
+        .replace(
+            "{{weight_rate_limit}}",
+            &format!("{:.2}", conf.weight_rate_limit),
+        )
+        .replace(
+            "{{tier_watch_threshold}}",
+            &format!("{:.0}", conf.tier_watch_threshold),
+        )
+        .replace(
+            "{{tier_alert_threshold}}",
+            &format!("{:.0}", conf.tier_alert_threshold),
+        )
+        .replace(
+            "{{tier_watch_threshold_minus_1}}",
+            &format!("{:.0}", conf.tier_watch_threshold - 1.0),
+        )
+        .replace(
+            "{{tier_alert_threshold_minus_1}}",
+            &format!("{:.0}", conf.tier_alert_threshold - 1.0),
+        );
+
+    // Memory-dependent context
+    match memory {
+        Some(mem) => {
+            rendered = rendered
+                .replace("{{memory_context}}", &format_memory_context(mem))
+                .replace("{{weights_context}}", &format_weights_context(mem))
+                .replace("{{outcome_summary}}", &format_outcome_summary(mem));
+        }
+        None => {
+            rendered = rendered
+                .replace(
+                    "{{memory_context}}",
+                    "No previous predictions. This is a cold start.",
+                )
+                .replace(
+                    "{{weights_context}}",
+                    "No previous weights. Use equal attention across all indicators.",
+                )
+                .replace(
+                    "{{outcome_summary}}",
+                    "No past predictions to evaluate yet.",
+                );
+        }
+    }
+
     Ok(rendered)
+}
+
+// ─── Memory Context Formatting ───────────────────────────────────────────────
+
+/// Format memory into a compact text block for prompt injection (≤1600 chars).
+///
+/// Each prediction is one line: `[timestamp] confidence=X direction=DIR outcome=SCORE|pending`
+fn format_memory_context(mem: &TickerMemory) -> String {
+    if mem.predictions.is_empty() {
+        return "No previous predictions. This is a cold start.".to_string();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for pred in &mem.predictions {
+        let ts = pred.timestamp.format("%m-%d %H:%M");
+        let outcome = match pred.outcome_score {
+            Some(score) => format!("outcome={score:.2}"),
+            None => "outcome=pending".to_string(),
+        };
+        lines.push(format!(
+            "[{ts}] confidence={:.0} direction={} {outcome}",
+            pred.confidence, pred.direction
+        ));
+    }
+
+    let result = lines.join("\n");
+    // Budget: ≤1600 characters
+    if result.len() > 1600 {
+        result[..1600].to_string()
+    } else {
+        result
+    }
+}
+
+/// Format current weights as a readable block for prompt injection.
+fn format_weights_context(mem: &TickerMemory) -> String {
+    if mem.weights.values.is_empty() {
+        return "No previous weights. Use equal attention across all indicators.".to_string();
+    }
+
+    let mut lines = vec!["Current weights (from previous cycle):".to_string()];
+    let mut sorted: Vec<_> = mem.weights.values.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, val) in sorted {
+        lines.push(format!("  {key}: {val:.2}"));
+    }
+    lines.push(format!(
+        "Significance threshold: {:.2} ({:.0}% change in any key indicator triggers re-notification)",
+        mem.weights.significance_threshold,
+        mem.weights.significance_threshold * 100.0
+    ));
+    lines.join("\n")
+}
+
+/// Format outcome summary — aggregate accuracy stats.
+fn format_outcome_summary(mem: &TickerMemory) -> String {
+    let total = mem.predictions.len();
+    if total == 0 {
+        return "No past predictions to evaluate yet.".to_string();
+    }
+
+    let scored: Vec<f64> = mem
+        .predictions
+        .iter()
+        .filter_map(|p| p.outcome_score)
+        .collect();
+    let scored_count = scored.len();
+
+    if scored_count == 0 {
+        return format!(
+            "Your past {total} predictions have not been validated yet."
+        );
+    }
+
+    let avg = scored.iter().sum::<f64>() / scored_count as f64;
+    format!(
+        "Your past {total} predictions: {scored_count} validated (avg accuracy: {avg:.2}). \
+         High accuracy means your signals are reliable. Low accuracy suggests some \
+         indicators may need re-weighting — do not simply suppress confidence."
+    )
+}
+
+// ─── Chat History Compression ────────────────────────────────────────────────
+
+/// Compress older messages via a separate LLM call for semantic summarization.
+///
+/// Extracts messages beyond `keep_recent_messages` (excluding the system message),
+/// sends them to a fresh LLM with a summarization prompt, and replaces the old
+/// messages with the summary.
+async fn compress_history(
+    llm_client: &OpenAIClient<OpenAIConfig>,
+    conf: &EnvConf,
+    messages: &mut Vec<ChatCompletionRequestMessage>,
+) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    // messages[0] is always the system message — never compress it.
+    // Keep the last `keep_recent_messages` non-system messages.
+    let non_system_count = messages.len() - 1;
+    if non_system_count <= conf.keep_recent_messages {
+        return Ok(());
+    }
+
+    let to_compress = non_system_count - conf.keep_recent_messages;
+    // Old messages are messages[1..=to_compress]
+    let old_messages: Vec<String> = messages[1..=to_compress]
+        .iter()
+        .filter_map(|msg| {
+            // Extract text content from each message type
+            match msg {
+                ChatCompletionRequestMessage::User(m) => {
+                    Some(format!("User: {:?}", m.content))
+                }
+                ChatCompletionRequestMessage::Assistant(m) => {
+                    let content = match &m.content {
+                        Some(c) => format!("{c:?}"),
+                        None => "[tool calls]".to_string(),
+                    };
+                    Some(format!("Assistant: {content}"))
+                }
+                ChatCompletionRequestMessage::Tool(m) => {
+                    Some(format!("Tool result: {:?}", m.content))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
+    if old_messages.is_empty() {
+        return Ok(());
+    }
+
+    let conversation_text = old_messages.join("\n---\n");
+
+    // Separate LLM call with fresh context for semantic summarization
+    let compress_system = "Summarize the following analysis conversation into a concise \
+        paragraph. Preserve key indicator readings, timeframe observations, and any \
+        patterns noted. Do not add new analysis.";
+
+    let compress_messages: Vec<ChatCompletionRequestMessage> = vec![
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content(compress_system)
+            .build()?
+            .into(),
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(conversation_text.as_str())
+            .build()?
+            .into(),
+    ];
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(&conf.llm_model)
+        .messages(compress_messages)
+        .build()?;
+
+    let response = llm_client.chat().create(request).await?;
+    let summary = response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_deref())
+        .unwrap_or("[Earlier analysis data gathered]")
+        .to_string();
+
+    info!(
+        compressed = to_compress,
+        summary_len = summary.len(),
+        "Compressed chat history via LLM"
+    );
+
+    // Replace old messages with the summary
+    let kept_messages: Vec<ChatCompletionRequestMessage> =
+        messages[to_compress + 1..].to_vec();
+    let summary_msg: ChatCompletionRequestMessage =
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(format!("[Previous analysis summary]: {summary}"))
+            .build()?
+            .into();
+
+    // Rebuild: system + summary + kept recent messages
+    let system_msg = messages[0].clone();
+    messages.clear();
+    messages.push(system_msg);
+    messages.push(summary_msg);
+    messages.extend(kept_messages);
+
+    Ok(())
 }
 
 #[cfg(test)]

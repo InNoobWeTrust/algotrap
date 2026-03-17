@@ -3,5 +3,8 @@ pub mod chart;
 pub mod commands;
 pub mod config;
 pub mod data;
+pub mod kb;
 pub mod llm;
+pub mod memory;
+pub mod scoring;
 pub mod telegram;

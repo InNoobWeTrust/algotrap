@@ -53,8 +53,32 @@ pub struct EnvConf {
     // Alert scanning
     #[serde(default = "default_scan_interval")]
     pub scan_interval_secs: u64,
-    #[serde(default = "default_confidence_threshold")]
-    pub confidence_threshold: f64,
+
+    // Adaptive scoring — weight guardrails
+    #[serde(default = "default_weight_rate_limit")]
+    pub weight_rate_limit: f64,
+    #[serde(default = "default_weight_min")]
+    pub weight_min: f64,
+    #[serde(default = "default_weight_max")]
+    pub weight_max: f64,
+
+    // Memory
+    #[serde(default = "default_memory_dir")]
+    pub memory_dir: String,
+    #[serde(default = "default_max_predictions")]
+    pub max_predictions: usize,
+    #[serde(default = "default_keep_recent_messages")]
+    pub keep_recent_messages: usize,
+
+    // Tier boundaries
+    #[serde(default = "default_tier_alert_threshold")]
+    pub tier_alert_threshold: f64,
+    #[serde(default = "default_tier_watch_threshold")]
+    pub tier_watch_threshold: f64,
+
+    // Change detection
+    #[serde(default = "default_change_detection_indicators")]
+    pub change_detection_indicators: String,
 
     // HTTP request timeout
     #[serde(default = "default_timeout_secs")]
@@ -74,8 +98,40 @@ fn default_scan_interval() -> u64 {
     900 // 15 minutes
 }
 
-fn default_confidence_threshold() -> f64 {
+fn default_weight_rate_limit() -> f64 {
+    0.05
+}
+
+fn default_weight_min() -> f64 {
+    0.05
+}
+
+fn default_weight_max() -> f64 {
+    0.50
+}
+
+fn default_memory_dir() -> String {
+    "/data/memory".to_string()
+}
+
+fn default_max_predictions() -> usize {
+    8
+}
+
+fn default_keep_recent_messages() -> usize {
+    10
+}
+
+fn default_tier_alert_threshold() -> f64 {
     70.0
+}
+
+fn default_tier_watch_threshold() -> f64 {
+    40.0
+}
+
+fn default_change_detection_indicators() -> String {
+    "rssi,structure_power,climax_signal".to_string()
 }
 
 fn default_timeout_secs() -> u64 {
@@ -147,20 +203,31 @@ mod tests {
         let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
 
         assert_eq!(conf.scan_interval_secs, 900);
-        assert!((conf.confidence_threshold - 70.0).abs() < f64::EPSILON);
+        assert!((conf.tier_alert_threshold - 70.0).abs() < f64::EPSILON);
+        assert!((conf.tier_watch_threshold - 40.0).abs() < f64::EPSILON);
+        assert!((conf.weight_rate_limit - 0.05).abs() < f64::EPSILON);
+        assert!((conf.weight_min - 0.05).abs() < f64::EPSILON);
+        assert!((conf.weight_max - 0.50).abs() < f64::EPSILON);
+        assert_eq!(conf.max_predictions, 8);
+        assert_eq!(conf.keep_recent_messages, 10);
+        assert_eq!(conf.memory_dir, "/data/memory");
         assert_eq!(conf.timeout_secs, 30);
         assert_eq!(conf.prompts_dir, "config/prompts");
+        assert_eq!(
+            conf.change_detection_indicators,
+            "rssi,structure_power,climax_signal"
+        );
     }
 
     #[test]
     fn test_custom_scan_interval() {
         let mut env = base_env();
         env.insert("SCAN_INTERVAL_SECS".into(), "300".into());
-        env.insert("CONFIDENCE_THRESHOLD".into(), "85".into());
+        env.insert("TIER_ALERT_THRESHOLD".into(), "85".into());
         let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
 
         assert_eq!(conf.scan_interval_secs, 300);
-        assert!((conf.confidence_threshold - 85.0).abs() < f64::EPSILON);
+        assert!((conf.tier_alert_threshold - 85.0).abs() < f64::EPSILON);
     }
 
     #[test]

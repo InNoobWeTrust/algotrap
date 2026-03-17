@@ -1,0 +1,1 @@
+Evaluate {{symbol}} for trade opportunities. Use the tools to gather indicator data across timeframes. Consider your past predictions and their outcomes. Return your adaptive JSON assessment with updated weights and at least 2 trade plan scenarios.

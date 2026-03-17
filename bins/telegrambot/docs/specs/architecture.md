@@ -83,15 +83,25 @@ config/prompts/          — runtime-loaded prompt templates
 
 The agent uses a multi-turn conversation with tool calling:
 
-1. **System prompt** loaded from `config/prompts/system.txt` with `{{placeholder}}` substitution
-2. **User message** loaded from `config/prompts/user.txt`
-3. **Tool schemas** loaded from `config/prompts/tools.json`
-4. The LLM iteratively calls tools (max 10 turns):
-   - `get_multi_tf_overview` — bird's eye view across all timeframes
-   - `get_indicator_summary` — last 3 candles of key indicators for a TF
-   - `get_price_action` — raw OHLCV data for a TF
-   - `capture_chart` — Browserless screenshot (cached per TF)
-5. When done, LLM returns structured analysis text (≤300 words, no follow-ups)
+### Full Analysis Mode (`FullAnalysis`)
+1. System prompt from `system.txt` with `{{placeholder}}` substitution
+2. User message from `user.txt`
+3. LLM returns structured analysis text (≤300 words)
+
+### Adaptive Alert Mode (`AlertScan`)
+1. System prompt from `system_adaptive.txt` with memory/weights/outcome context injection
+2. User message from `user_adaptive.txt`
+3. LLM returns JSON: `{ confidence, direction, summary, weights, trade_plans, significance_threshold }`
+4. See `docs/specs/llm-prompt-engineering.md` for template variable contract
+
+### Shared (Both Modes)
+- **Tool schemas** from `tools.json` (market data tools + `read_kb`/`write_kb`)
+- LLM iteratively calls tools (max 10 turns):
+  - `get_multi_tf_overview` — bird's eye view across all timeframes
+  - `get_indicator_summary` — last 3 candles of key indicators for a TF
+  - `get_price_action` — raw OHLCV data for a TF
+  - `capture_chart` — Browserless screenshot (cached per TF)
+  - `read_kb` / `write_kb` — persistent knowledge base access
 
 ## Telegram Output Format
 

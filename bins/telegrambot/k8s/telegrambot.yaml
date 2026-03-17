@@ -41,6 +41,9 @@ spec:
               value: "http://litellm.default.svc.cluster.local:4000/v1"
             - name: BROWSERLESS_URL
               value: "http://browserless.default.svc.cluster.local:3000"
+            # Memory/KB storage
+            - name: MEMORY_DIR
+              value: "/data/memory"
             # Point to mounted prompt config
             - name: PROMPTS_DIR
               value: "/etc/telegrambot/prompts"
@@ -48,6 +51,8 @@ spec:
             - name: prompts
               mountPath: /etc/telegrambot/prompts
               readOnly: true
+            - name: memory-data
+              mountPath: /data/memory
           resources:
             requests:
               cpu: "50m"
@@ -59,4 +64,21 @@ spec:
         - name: prompts
           configMap:
             name: telegrambot-prompts
+        - name: memory-data
+          persistentVolumeClaim:
+            claimName: telegrambot-memory
       restartPolicy: Always
+---
+# PVC for persistent memory and knowledge base storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telegrambot-memory
+  labels:
+    app: telegrambot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi

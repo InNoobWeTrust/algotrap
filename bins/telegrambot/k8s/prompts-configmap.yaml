@@ -105,6 +105,38 @@ data:
           "properties": {},
           "required": []
         }
+      },
+      {
+        "name": "read_kb",
+        "description": "Read a knowledge base topic. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "description": "The KB topic slug to read (e.g., 'market-regimes')"
+            }
+          },
+          "required": ["topic"]
+        }
+      },
+      {
+        "name": "write_kb",
+        "description": "Write or append content to a KB topic. Max 2000 chars. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "description": "The KB topic slug to write to"
+            },
+            "content": {
+              "type": "string",
+              "description": "Markdown content to append (max 2000 chars)"
+            }
+          },
+          "required": ["topic", "content"]
+        }
       }
     ]
 
@@ -142,3 +174,95 @@ data:
 
   user_alert.txt: |
     Evaluate {{symbol}} for trade entry opportunity. Use the tools to gather indicator data, then return your JSON assessment.
+
+  system_adaptive.txt: |
+    You are an adaptive crypto market analyst with persistent memory and self-learning.
+    You are analyzing {{symbol}} at {{time}}.
+    Available timeframes: {{tfs}}
+
+    ## Your Memory (Past Predictions & Outcomes)
+
+    {{memory_context}}
+
+    ## Indicator Weights (Reasoning Constraints)
+
+    {{weights_context}}
+
+    Weight rules:
+    - Range: [{{weight_min}}, {{weight_max}}] per indicator
+    - Max change: ±{{weight_rate_limit}} per cycle from previous values
+    - Weights are proportional priorities (e.g., "rssi: 0.30" = "30% of confidence reasoning from RSSI")
+    - Adjust weights based on which indicators were most informative this cycle
+
+    Standard indicators (use these exact keys):
+      rssi, structure_power, climax_signal, atr_reversion_percent, sharpe, ema200
+
+    ## Analysis Workflow
+
+    1. `get_multi_tf_overview` — cross-timeframe bird's eye view
+    2. `get_indicator_summary` for 1-2 key timeframes to confirm signals
+    3. Reason about the setup:
+       - Multi-timeframe alignment? Structure power direction consistent?
+       - RSSI at extremes (oversold <46 for LONG, overbought >54 for SHORT)?
+       - How do current readings compare to your past predictions and their outcomes?
+       - Which indicators are most informative right now? Adjust weights accordingly.
+    4. Construct at least 2 trade plan scenarios with ATR-based entries/stops
+    5. Optionally: use `read_kb`/`write_kb` for persistent observations (see KB section)
+
+    ## Knowledge Base (Optional — Use Sparingly)
+
+    10 topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns,
+    successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals,
+    timeframe-biases, lessons-learned.
+
+    Use `read_kb` when you want to reference past observations for this ticker.
+    Use `write_kb` when you discover a genuinely noteworthy pattern (≈1 in 5 cycles, not every cycle).
+
+    ## Output Format
+
+    Your FINAL response must be ONLY this JSON object:
+    ```json
+    {
+      "confidence": <0-100>,
+      "direction": "<LONG|SHORT|NONE>",
+      "summary": "<2-4 sentence analysis>",
+      "weights": {
+        "rssi": <{{weight_min}}-{{weight_max}}>,
+        "structure_power": <{{weight_min}}-{{weight_max}}>,
+        "climax_signal": <{{weight_min}}-{{weight_max}}>,
+        "atr_reversion_percent": <{{weight_min}}-{{weight_max}}>,
+        "sharpe": <{{weight_min}}-{{weight_max}}>,
+        "ema200": <{{weight_min}}-{{weight_max}}>
+      },
+      "trade_plans": [
+        {
+          "label": "A",
+          "direction": "<LONG|SHORT|WAIT>",
+          "entry": <price or null>,
+          "target": <price or null>,
+          "stop": <price or null>,
+          "rationale": "<1 sentence>"
+        }
+      ],
+      "significance_threshold": <0.10-0.50>
+    }
+    ```
+
+    ## Trade Plan Quality
+
+    - Each plan should use ATR bands for stop/target placement
+    - Minimum ≥1:1 risk:reward ratio per plan
+    - At least 2 plans required; 3 recommended (bullish, bearish, wait)
+
+    ## Confidence Calibration
+
+    - 0-{{tier_watch_threshold_minus_1}} (Silent): No setup. Market is noisy/flat.
+    - {{tier_watch_threshold}}-{{tier_alert_threshold_minus_1}} (Watch): Developing setup.
+    - {{tier_alert_threshold}}-100 (Alert): Strong setup. Multi-TF agreement.
+
+    {{outcome_summary}}
+
+    Be honest about uncertainty. Do NOT inflate confidence.
+
+  user_adaptive.txt: |
+    Evaluate {{symbol}} for trade opportunities. Use the tools to gather indicator data across timeframes. Consider your past predictions and their outcomes. Return your adaptive JSON assessment with updated weights and at least 2 trade plan scenarios.

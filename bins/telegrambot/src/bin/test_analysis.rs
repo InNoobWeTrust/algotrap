@@ -52,21 +52,23 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
         // 2. Run LLM agent in alert scan mode
         println!("\n🤖 Running LLM alert scan...");
+        let mem = telegrambot::memory::load_memory(&conf.memory_dir, &ticker.symbol);
         let result = llm::run_agent(
             &llm_client,
             &conf,
             ticker,
             &all_dfs,
             llm::AnalysisMode::AlertScan,
+            Some(&mem),
         )
         .await?;
 
         // 3. Print result
-        let threshold_icon = if result.confidence >= conf.confidence_threshold {
-            "🎯 ABOVE THRESHOLD"
-        } else {
-            "📉 Below threshold"
-        };
+        let tier = telegrambot::scoring::classify_tier(
+            result.confidence,
+            conf.tier_alert_threshold,
+            conf.tier_watch_threshold,
+        );
 
         println!("\n  ┌─────────────────────────────────────────┐");
         println!(
@@ -74,10 +76,15 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             ticker.symbol, result.confidence
         );
         println!("  │ Direction: {}", result.direction);
-        println!(
-            "  │ {} (threshold: {:.0}%)",
-            threshold_icon, conf.confidence_threshold
-        );
+        println!("  │ Tier: {tier}");
+        if !result.trade_plans.is_empty() {
+            for plan in &result.trade_plans {
+                println!(
+                    "  │ Plan {}: {} entry={:?} target={:?} stop={:?}",
+                    plan.label, plan.direction, plan.entry, plan.target, plan.stop
+                );
+            }
+        }
         println!("  └─────────────────────────────────────────┘");
         println!("\n  Summary: {}", result.text);
     }

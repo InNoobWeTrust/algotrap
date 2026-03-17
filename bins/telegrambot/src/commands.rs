@@ -7,7 +7,7 @@ use teloxide::utils::command::BotCommands;
 use tracing::{error, info};
 
 use crate::config::EnvConf;
-use crate::{data, llm, telegram};
+use crate::{data, llm, memory, telegram};
 
 // ─── Slash Commands ──────────────────────────────────────────────────────────
 
@@ -17,11 +17,23 @@ pub enum Command {
     #[command(description = "Show available commands")]
     Help,
 
+    #[command(description = "Welcome message + system overview")]
+    Start,
+
     #[command(description = "Run full analysis for a ticker — /analyze BTC-USDT")]
     Analyze(String),
 
     #[command(description = "List configured tickers")]
     List,
+
+    #[command(description = "Show current scan status + prediction history")]
+    Status(String),
+
+    #[command(description = "Show latest prediction digest — /digest BTC-USDT")]
+    Digest(String),
+
+    #[command(description = "Show current indicator weights — /weights BTC-USDT")]
+    Weights(String),
 }
 
 // ─── Shared State ────────────────────────────────────────────────────────────
@@ -89,10 +101,80 @@ async fn handle_command(bot: Bot, msg: Message, cmd: Command, state: HandlerStat
                 error!("Failed to send help: {e}");
             }
         }
+        Command::Start => {
+            let text = format!(
+                "━━━ 🤖 AlgoTrap Bot ━━━\n\
+                 Adaptive alert system with self-learning.\n\
+                 \n\
+                 {} tickers configured\n\
+                 Scan interval: {}s\n\
+                 Tiers: Alert≥{:.0}%, Watch≥{:.0}%\n\
+                 \n\
+                 Use /help to see commands.",
+                state.conf.tickers.len(),
+                state.conf.scan_interval_secs,
+                state.conf.tier_alert_threshold,
+                state.conf.tier_watch_threshold,
+            );
+            if let Err(e) = bot.send_message(msg.chat.id, text).await {
+                error!("Failed to send start: {e}");
+            }
+        }
         Command::List => {
             let text = telegram::available_tickers_message(&state.conf);
             if let Err(e) = bot.send_message(msg.chat.id, text).await {
                 error!("Failed to send list: {e}");
+            }
+        }
+        Command::Status(symbol) => {
+            let symbol = resolve_symbol(&symbol, &state.conf);
+            match symbol {
+                Some(sym) => {
+                    let mem = memory::load_memory(&state.conf.memory_dir, &sym);
+                    let text = format_status(&sym, &mem);
+                    if let Err(e) = bot.send_message(msg.chat.id, text).await {
+                        error!("Failed to send status: {e}");
+                    }
+                }
+                None => {
+                    let _ = bot
+                        .send_message(msg.chat.id, "Usage: /status <SYMBOL>\nExample: /status BTC-USDT")
+                        .await;
+                }
+            }
+        }
+        Command::Digest(symbol) => {
+            let symbol = resolve_symbol(&symbol, &state.conf);
+            match symbol {
+                Some(sym) => {
+                    let mem = memory::load_memory(&state.conf.memory_dir, &sym);
+                    let text = format_digest(&sym, &mem);
+                    if let Err(e) = bot.send_message(msg.chat.id, text).await {
+                        error!("Failed to send digest: {e}");
+                    }
+                }
+                None => {
+                    let _ = bot
+                        .send_message(msg.chat.id, "Usage: /digest <SYMBOL>\nExample: /digest BTC-USDT")
+                        .await;
+                }
+            }
+        }
+        Command::Weights(symbol) => {
+            let symbol = resolve_symbol(&symbol, &state.conf);
+            match symbol {
+                Some(sym) => {
+                    let mem = memory::load_memory(&state.conf.memory_dir, &sym);
+                    let text = format_weights(&sym, &mem);
+                    if let Err(e) = bot.send_message(msg.chat.id, text).await {
+                        error!("Failed to send weights: {e}");
+                    }
+                }
+                None => {
+                    let _ = bot
+                        .send_message(msg.chat.id, "Usage: /weights <SYMBOL>\nExample: /weights BTC-USDT")
+                        .await;
+                }
             }
         }
         Command::Analyze(symbol) => {
@@ -151,6 +233,124 @@ async fn handle_command(bot: Bot, msg: Message, cmd: Command, state: HandlerStat
     }
 }
 
+// ─── Command Helpers ─────────────────────────────────────────────────────────
+
+/// Resolve a symbol argument: if empty and only one ticker configured, use it.
+fn resolve_symbol(input: &str, conf: &EnvConf) -> Option<String> {
+    let trimmed = input.trim().to_uppercase();
+    if trimmed.is_empty() {
+        // Auto-resolve if single ticker
+        if conf.tickers.len() == 1 {
+            Some(conf.tickers[0].symbol.clone())
+        } else {
+            None
+        }
+    } else if conf.find_ticker(&trimmed).is_some() {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn format_status(symbol: &str, mem: &memory::TickerMemory) -> String {
+    let pred_count = mem.predictions.len();
+    let scored = mem
+        .predictions
+        .iter()
+        .filter(|p| p.outcome_score.is_some())
+        .count();
+
+    let last_scan = mem
+        .predictions
+        .last()
+        .map(|p| p.timestamp.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "never".to_string());
+
+    let last_tier = mem
+        .last_notified
+        .tier
+        .as_deref()
+        .unwrap_or("none");
+
+    format!(
+        "━━━ 📊 {symbol} Status ━━━\n\
+         Last scan: {last_scan}\n\
+         Predictions: {pred_count} ({scored} validated)\n\
+         Weights: {} indicators\n\
+         Last tier: {last_tier}",
+        mem.weights.values.len(),
+    )
+}
+
+fn format_digest(symbol: &str, mem: &memory::TickerMemory) -> String {
+    if let Some(latest) = mem.predictions.last() {
+        let age = chrono::Utc::now() - latest.timestamp;
+        let age_str = if age.num_hours() > 0 {
+            format!("{}h ago", age.num_hours())
+        } else {
+            format!("{}m ago", age.num_minutes())
+        };
+
+        let price_str = latest
+            .indicators
+            .get("close")
+            .map(|p| format!("{p:.2}"))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let mut text = format!(
+            "━━━ 📝 {symbol} Digest ━━━\n\
+             Confidence: {:.0}% | {} | {age_str}\n\
+             Last-scan price: {price_str}\n\
+             \n\
+             {}",
+            latest.confidence, latest.direction, latest.summary,
+        );
+
+        if !latest.trade_plans.is_empty() {
+            text.push_str("\n\n📋 Plans:");
+            for plan in &latest.trade_plans {
+                text.push_str(&format!("\n  {} {} ", plan.label, plan.direction));
+                if let Some(e) = plan.entry {
+                    text.push_str(&format!("entry={e:.2} "));
+                }
+                if let Some(t) = plan.target {
+                    text.push_str(&format!("target={t:.2} "));
+                }
+                if let Some(s) = plan.stop {
+                    text.push_str(&format!("stop={s:.2}"));
+                }
+            }
+        }
+
+        text
+    } else {
+        format!("📝 {symbol}: No predictions yet. Wait for the next scan cycle.")
+    }
+}
+
+fn format_weights(symbol: &str, mem: &memory::TickerMemory) -> String {
+    if mem.weights.values.is_empty() {
+        return format!("⚖️ {symbol}: No weights yet (cold start). Defaults to equal weights.");
+    }
+
+    let mut lines = vec![format!("━━━ ⚖️ {symbol} Weights ━━━")];
+    let mut weights: Vec<_> = mem.weights.values.iter().collect();
+    weights.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (key, val) in &weights {
+        let bar_len = (**val * 20.0).round() as usize;
+        let bar = "█".repeat(bar_len);
+        lines.push(format!("  {key}: {val:.3} {bar}"));
+    }
+
+    lines.push(format!(
+        "\n🎯 Significance threshold: {:.0}%",
+        mem.weights.significance_threshold * 100.0
+    ));
+
+    lines.join("\n")
+}
+
 // ─── Manual Analysis Pipeline ────────────────────────────────────────────────
 
 async fn run_manual_analysis(
@@ -202,6 +402,7 @@ async fn run_manual_analysis(
         ticker,
         &all_dfs,
         llm::AnalysisMode::FullAnalysis,
+        None,
     )
     .await?;
 

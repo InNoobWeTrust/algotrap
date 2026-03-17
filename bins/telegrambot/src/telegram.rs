@@ -117,6 +117,91 @@ pub async fn send_alert(
     Ok(())
 }
 
+/// Send a Watch-tier notification with summary + trade plans.
+///
+/// Lighter than a full alert — no charts unless confidence ≥ 50.
+pub async fn send_watch_notification(
+    bot: &Bot,
+    chat_id: ChatId,
+    symbol: &str,
+    direction: &str,
+    confidence: f64,
+    summary: &str,
+    trade_plans: &[crate::memory::TradePlan],
+    tf_charts: &[(String, Vec<u8>)],
+) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    // Send charts if available
+    if !tf_charts.is_empty() {
+        let media: Vec<InputMedia> = tf_charts
+            .iter()
+            .enumerate()
+            .map(|(i, (tf_label, png_bytes))| {
+                let file_name = format!("{symbol}_{tf_label}.png");
+                let input_file = InputFile::memory(png_bytes.clone()).file_name(file_name);
+                let mut photo = InputMediaPhoto::new(input_file);
+                if i == 0 {
+                    photo = photo.caption(format!("👁️ {symbol} — Watch"));
+                } else {
+                    photo = photo.caption(tf_label.as_str());
+                }
+                InputMedia::Photo(photo)
+            })
+            .collect();
+
+        for chunk in media.chunks(10) {
+            if let Err(e) = bot.send_media_group(chat_id, chunk.to_vec()).await {
+                warn!("Failed to send watch media group: {e}");
+            }
+        }
+    }
+
+    let direction_emoji = match direction.to_uppercase().as_str() {
+        "LONG" => "🟢 LONG",
+        "SHORT" => "🔴 SHORT",
+        _ => "⚪ NONE",
+    };
+
+    let bold_symbol = to_bold_sans(symbol);
+    let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+
+    let mut text = format!(
+        "━━━ 👁️ WATCH ━━━\n\
+         📊 {bold_symbol}\n\
+         {direction_emoji} | Confidence: {confidence:.0}%\n\
+         🕐 {ts}\n\
+         \n\
+         {summary}"
+    );
+
+    // Append trade plans
+    if !trade_plans.is_empty() {
+        text.push_str("\n\n📋 Trade Plans:");
+        for plan in trade_plans {
+            text.push_str(&format!("\n  {} {} ", plan.label, plan.direction));
+            if let Some(e) = plan.entry {
+                text.push_str(&format!("entry={e:.2} "));
+            }
+            if let Some(t) = plan.target {
+                text.push_str(&format!("target={t:.2} "));
+            }
+            if let Some(s) = plan.stop {
+                text.push_str(&format!("stop={s:.2}"));
+            }
+            if !plan.rationale.is_empty() {
+                text.push_str(&format!("\n    {}", plan.rationale));
+            }
+        }
+    }
+
+    for chunk in split_message(&text, 4000) {
+        if let Err(e) = bot.send_message(chat_id, &chunk).await {
+            warn!("Failed to send watch message: {e}");
+        }
+    }
+
+    Ok(())
+}
+
 /// Format a message listing all configured tickers for the /list command.
 pub fn available_tickers_message(conf: &EnvConf) -> String {
     let mut lines = vec!["📋 Configured tickers:\n".to_string()];
@@ -131,8 +216,8 @@ pub fn available_tickers_message(conf: &EnvConf) -> String {
     }
 
     lines.push(format!(
-        "\n⚙️ Scan interval: {}s | Confidence threshold: {:.0}%",
-        conf.scan_interval_secs, conf.confidence_threshold
+        "\n⚙️ Scan: {}s | Tiers: Alert≥{:.0}%, Watch≥{:.0}%",
+        conf.scan_interval_secs, conf.tier_alert_threshold, conf.tier_watch_threshold
     ));
 
     lines.join("\n")
@@ -270,7 +355,15 @@ mod tests {
             browserless_url: "http://localhost".into(),
             prompts_dir: "config/prompts".into(),
             scan_interval_secs: 900,
-            confidence_threshold: 70.0,
+            weight_rate_limit: 0.05,
+            weight_min: 0.05,
+            weight_max: 0.50,
+            memory_dir: "/data/memory".into(),
+            max_predictions: 8,
+            keep_recent_messages: 10,
+            tier_alert_threshold: 70.0,
+            tier_watch_threshold: 40.0,
+            change_detection_indicators: "rssi,structure_power,climax_signal".into(),
             timeout_secs: 30,
         }
     }
@@ -293,7 +386,7 @@ mod tests {
         let msg = available_tickers_message(&conf);
         assert!(msg.contains("Configured tickers"));
         // Should still have the settings line
-        assert!(msg.contains("Scan interval"));
+        assert!(msg.contains("Scan:"));
     }
 }
 

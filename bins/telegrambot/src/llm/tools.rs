@@ -140,6 +140,23 @@ pub async fn execute_tool_call(
             let overview = build_multi_tf_overview(all_dfs, ticker)?;
             Ok(overview)
         }
+        "read_kb" => {
+            let topic = args["topic"].as_str().unwrap_or("");
+            let content = crate::kb::read_topic(&conf.memory_dir, topic);
+            if content.is_empty() {
+                Ok(format!("KB topic '{topic}' is empty."))
+            } else {
+                Ok(content)
+            }
+        }
+        "write_kb" => {
+            let topic = args["topic"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            match crate::kb::write_topic(&conf.memory_dir, topic, content) {
+                Ok(msg) => Ok(msg),
+                Err(e) => Ok(format!("Failed to write KB: {e}")),
+            }
+        }
         _ => Ok(format!("Unknown tool: {}", tool_call.function.name)),
     }
 }

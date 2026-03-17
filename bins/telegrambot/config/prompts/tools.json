@@ -60,5 +60,37 @@
             "properties": {},
             "required": []
         }
+    },
+    {
+        "name": "read_kb",
+        "description": "Read a knowledge base topic. The KB stores persistent insights across scan cycles. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "The KB topic slug to read (e.g., 'market-regimes', 'lessons-learned')"
+                }
+            },
+            "required": ["topic"]
+        }
+    },
+    {
+        "name": "write_kb",
+        "description": "Write or append content to a knowledge base topic. Use markdown format. Content is appended to existing content. Max 2000 chars per write. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "The KB topic slug to write to (e.g., 'lessons-learned')"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The markdown content to append to the topic file (max 2000 chars)"
+                }
+            },
+            "required": ["topic", "content"]
+        }
     }
 ]
