@@ -80,6 +80,10 @@ pub struct EnvConf {
     #[serde(default = "default_change_detection_indicators")]
     pub change_detection_indicators: String,
 
+    // Notification cooldown — minimum seconds between notifications per ticker
+    #[serde(default = "default_notification_cooldown_secs")]
+    pub notification_cooldown_secs: u64,
+
     // HTTP request timeout
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -136,6 +140,10 @@ fn default_change_detection_indicators() -> String {
 
 fn default_timeout_secs() -> u64 {
     30
+}
+
+fn default_notification_cooldown_secs() -> u64 {
+    3600 // 1 hour
 }
 
 fn default_prompts_dir() -> String {

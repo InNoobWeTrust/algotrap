@@ -69,26 +69,49 @@ pub fn detect_significant_change(
     (max_delta >= threshold, max_delta)
 }
 
-/// Determine whether a notification should be sent based on tier change and
-/// significant-change detection.
+/// Determine whether a notification should be sent based on tier change,
+/// significant-change detection, time-based cooldown, and direction filter.
 pub fn should_notify(
     current_tier: Tier,
     previous_tier: Option<&str>,
     has_significant_change: bool,
+    last_notified_at: Option<chrono::DateTime<chrono::Utc>>,
+    cooldown_secs: u64,
+    direction: &str,
 ) -> bool {
-    // Tier change always triggers notification
+    // Filter: Watch/Silent with direction NONE is never actionable
+    if current_tier != Tier::Alert && direction.eq_ignore_ascii_case("NONE") {
+        return false;
+    }
+
+    // Silent tier never notifies
+    if current_tier == Tier::Silent {
+        return false;
+    }
+
+    // Check cooldown: has enough time passed since last notification?
+    let cooldown_expired = match last_notified_at {
+        Some(ts) => {
+            let elapsed = chrono::Utc::now() - ts;
+            elapsed.num_seconds() >= cooldown_secs as i64
+        }
+        None => true, // Cold start — no prior notification
+    };
+
+    // Tier change (or cold start) bypasses cooldown
     let tier_str = current_tier.to_string();
-    if previous_tier.map_or(true, |prev| prev != tier_str) {
+    let tier_changed = previous_tier.map_or(true, |prev| prev != tier_str);
+    if tier_changed {
         return true;
     }
 
-    // Within Watch tier, significant change triggers notification
-    if current_tier == Tier::Watch && has_significant_change {
+    // Alert tier always notifies if cooldown expired
+    if current_tier == Tier::Alert && cooldown_expired {
         return true;
     }
 
-    // Alert tier always notifies (tier didn't change, so this is a sustained alert)
-    if current_tier == Tier::Alert {
+    // Watch tier: significant change AND cooldown must both pass
+    if current_tier == Tier::Watch && has_significant_change && cooldown_expired {
         return true;
     }
 
@@ -204,32 +227,56 @@ mod tests {
 
     #[test]
     fn test_should_notify_tier_change() {
-        assert!(should_notify(Tier::Alert, Some("WATCH"), false));
-        assert!(should_notify(Tier::Watch, Some("SILENT"), false));
-        assert!(should_notify(Tier::Silent, Some("ALERT"), false));
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        assert!(should_notify(Tier::Alert, Some("WATCH"), false, Some(past), 3600, "LONG"));
+        assert!(should_notify(Tier::Watch, Some("SILENT"), false, Some(past), 3600, "LONG"));
+        // Tier change to Silent still doesn't notify (Silent never notifies)
+        assert!(!should_notify(Tier::Silent, Some("ALERT"), false, Some(past), 3600, "LONG"));
     }
 
     #[test]
     fn test_should_notify_cold_start() {
-        // No previous tier → always notify
-        assert!(should_notify(Tier::Watch, None, false));
+        // No previous tier → always notify (unless NONE direction)
+        assert!(should_notify(Tier::Watch, None, false, None, 3600, "LONG"));
     }
 
     #[test]
     fn test_should_notify_significant_change_in_watch() {
-        assert!(should_notify(Tier::Watch, Some("WATCH"), true));
-        assert!(!should_notify(Tier::Watch, Some("WATCH"), false));
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        let recent = chrono::Utc::now() - chrono::Duration::minutes(5);
+        // Significant change + cooldown expired → notify
+        assert!(should_notify(Tier::Watch, Some("WATCH"), true, Some(past), 3600, "LONG"));
+        // Significant change but still in cooldown → suppress
+        assert!(!should_notify(Tier::Watch, Some("WATCH"), true, Some(recent), 3600, "LONG"));
+        // No significant change + cooldown expired → suppress
+        assert!(!should_notify(Tier::Watch, Some("WATCH"), false, Some(past), 3600, "LONG"));
     }
 
     #[test]
-    fn test_should_notify_alert_always() {
-        assert!(should_notify(Tier::Alert, Some("ALERT"), false));
+    fn test_should_notify_alert_with_cooldown() {
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        let recent = chrono::Utc::now() - chrono::Duration::minutes(5);
+        // Alert + cooldown expired → notify
+        assert!(should_notify(Tier::Alert, Some("ALERT"), false, Some(past), 3600, "LONG"));
+        // Alert but in cooldown → suppress
+        assert!(!should_notify(Tier::Alert, Some("ALERT"), false, Some(recent), 3600, "LONG"));
     }
 
     #[test]
     fn test_should_notify_silent_suppressed() {
-        assert!(!should_notify(Tier::Silent, Some("SILENT"), false));
-        assert!(!should_notify(Tier::Silent, Some("SILENT"), true));
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        assert!(!should_notify(Tier::Silent, Some("SILENT"), false, Some(past), 3600, "LONG"));
+        assert!(!should_notify(Tier::Silent, Some("SILENT"), true, Some(past), 3600, "LONG"));
+    }
+
+    #[test]
+    fn test_should_notify_direction_none_suppressed() {
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        // Watch + NONE direction → always suppress
+        assert!(!should_notify(Tier::Watch, Some("WATCH"), true, Some(past), 3600, "NONE"));
+        assert!(!should_notify(Tier::Watch, None, true, None, 3600, "NONE"));
+        // Alert + NONE → still notifies (Alert overrides direction filter)
+        assert!(should_notify(Tier::Alert, Some("WATCH"), false, Some(past), 3600, "NONE"));
     }
 
     #[test]

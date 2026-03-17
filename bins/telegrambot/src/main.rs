@@ -210,13 +210,21 @@ async fn scan_ticker(
 
     // 9. Decide whether to notify
     let prev_tier = mem.last_notified.tier.as_deref();
-    let should_send = telegrambot::scoring::should_notify(tier, prev_tier, has_change);
+    let should_send = telegrambot::scoring::should_notify(
+        tier,
+        prev_tier,
+        has_change,
+        mem.last_notified.timestamp,
+        conf.notification_cooldown_secs,
+        &result.direction,
+    );
 
     info!(
         symbol = %ticker.symbol,
         tier = %tier,
         should_send,
         max_delta,
+        direction = %result.direction,
         "Notification decision"
     );
 
