@@ -56,3 +56,36 @@
 - `cargo test -p telegrambot` — 50/50 tests pass ✅
 - Adversarial review: 8 challenges, all resolved
 - Goal alignment check: all 7 PRD scope items implemented, no drift
+
+## Session: 2026-03-18T03:30 — Hotfix: Notification Spam
+
+### Root Cause
+
+Production observation after first deployment: (1) BTC spamming same LONG
+direction every 15-min cycle — `should_notify` had no time-based cooldown,
+high indicator deltas (>50%) triggered Watch-tier on every scan. (2) XAUT
+posting direction=NONE — Watch tier sent regardless of direction, but NONE
+is not an actionable entry.
+
+### Source Code
+
+- [MODIFIED] `src/config.rs` — Added `NOTIFICATION_COOLDOWN_SECS` (default 3600)
+- [MODIFIED] `src/scoring.rs` — `should_notify` now enforces time-based cooldown
+  and direction=NONE filter; tier change bypasses cooldown; +1 new test
+- [MODIFIED] `src/main.rs` — Passes `last_notified.timestamp`, `cooldown_secs`,
+  and `direction` to updated `should_notify`; added direction to log output
+- [MODIFIED] `src/telegram.rs` — Added `notification_cooldown_secs` to test_conf
+
+### Docs
+
+- [MODIFIED] `docs/specs/tiered-response.md` — Added 4 new BDD scenarios
+  (cooldown suppress/allow, NONE suppress/allow), updated validation rules,
+  removed cooldown from out-of-scope
+- [MODIFIED] `docs/trds/adaptive-alert-v2.md` — ADR-4 post-deployment revision
+  (cooldown rationale), updated scoring.rs and config.rs component descriptions
+
+### Verification
+
+- `cargo check -p telegrambot` ✅
+- `cargo test -p telegrambot` — 51/51 tests pass ✅
+- Live K8s logs confirm `should_send=false` with cooldown enforcement

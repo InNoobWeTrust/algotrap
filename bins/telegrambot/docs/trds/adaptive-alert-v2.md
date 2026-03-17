@@ -102,8 +102,17 @@ tune weights, produce scenario-based trade plans, and maintain the knowledge bas
   B→A). The 1.0 floor handles indicators that cross zero (structure_power
   from +1 to -1 = delta of 1.0/1.0 = 100%, correctly flagged). Configurable
   indicator set prevents volatile minor indicators from triggering noise.
+- **Post-deployment revision**: Time-based cooldown (`NOTIFICATION_COOLDOWN_SECS`,
+  default 3600) was added alongside delta-based detection. Production observation
+  showed that high-delta indicators (>50% swings) triggered Watch-tier
+  notifications every 15-min cycle even when the overall signal hadn't changed
+  meaningfully. The cooldown acts as a frequency cap: both significant change AND
+  cooldown expiry are required. Tier changes still bypass cooldown (important
+  state transitions). Additionally, Watch/Silent with direction=NONE are now
+  suppressed — only actionable entries (LONG/SHORT) trigger Watch-tier messages.
 - **Alternatives Considered**:
-  - Fixed time-based cooldown (1h) — rejected: misses fast-moving markets
+  - No cooldown, delta-only (original design) — rejected post-deployment:
+    volatile indicators caused excessive notifications
   - No cooldown (send every cycle) — rejected: too noisy at 15-min intervals
   - Percentage relative to old value only — rejected: breaks on zero-crossing
 
@@ -150,7 +159,9 @@ tune weights, produce scenario-based trade plans, and maintain the knowledge bas
 - **`scoring.rs`** [NEW]: Tier engine — determine tier (Alert/Watch/Silent)
   from LLM-produced confidence score. Significant-change detection via
   symmetric indicator delta. Weight guardrails (bounds, rate limiting).
-  Tier thresholds configurable via env vars.
+  Tier thresholds configurable via env vars. Notification gating via
+  `should_notify`: time-based cooldown + direction filter (NONE suppressed
+  for non-Alert tiers) + tier-change bypass.
 - **`llm/mod.rs`** [MODIFY]: Add memory + KB context injection to prompts.
   Parse expanded LLM response (weights, trade plans, KB updates,
   significance threshold). New `AnalysisMode::AdaptiveScan` or refactor
@@ -178,6 +189,7 @@ tune weights, produce scenario-based trade plans, and maintain the knowledge bas
   threshold. Add `TIER_ALERT_THRESHOLD` (default 70) and
   `TIER_WATCH_THRESHOLD` (default 40) for configurable tier boundaries.
   Add `CHANGE_DETECTION_INDICATORS` (default `rssi,structure_power,climax_signal`).
+  Add `NOTIFICATION_COOLDOWN_SECS` (default 3600) for per-ticker cooldown.
   Remove deprecated `CONFIDENCE_THRESHOLD` (now LLM-tuned).
 
 ## API Contracts / Interfaces

@@ -99,7 +99,39 @@ triggers notifications when indicators shift meaningfully between scan cycles.
 - **And** the current scan produces a confidence of 72 (Alert tier)
 - **When** the tier engine evaluates the score
 - **Then** a notification is sent regardless of significant-change threshold
-  (tier change always triggers notification)
+  or cooldown (tier change always bypasses cooldown)
+
+### Scenario: Notification cooldown — suppress within 1 hour
+
+- **Given** the last notification for BTC-USDT was sent 15 minutes ago
+- **And** the current scan still produces Watch tier with LONG direction
+- **And** indicators have changed significantly (delta > threshold)
+- **When** the notification engine evaluates the cooldown
+- **Then** the notification is suppressed (within 1-hour cooldown window)
+- **And** the prediction is stored in memory
+- **And** the notification decision is logged with `should_send=false`
+
+### Scenario: Notification cooldown — allow after 1 hour
+
+- **Given** the last notification for BTC-USDT was sent 75 minutes ago
+- **And** the current scan produces Watch tier with LONG direction
+- **And** indicators have changed significantly
+- **When** the notification engine evaluates the cooldown
+- **Then** the notification is sent (cooldown has expired)
+
+### Scenario: Direction NONE suppressed for Watch tier
+
+- **Given** XAUT-USDT scan produces confidence 55, direction NONE
+- **When** the notification engine evaluates the decision
+- **Then** the notification is suppressed (direction NONE is not actionable)
+- **And** the prediction is stored in memory
+
+### Scenario: Direction NONE allowed for Alert tier
+
+- **Given** a scan produces confidence 75 (Alert tier), direction NONE
+- **And** the tier changed from Watch to Alert
+- **When** the notification engine evaluates the decision
+- **Then** the notification is sent (Alert tier overrides the NONE filter)
 
 ### Scenario: Watch message format
 
@@ -117,16 +149,19 @@ triggers notifications when indicators shift meaningfully between scan cycles.
 - Tier boundaries configurable via `TIER_ALERT_THRESHOLD` (default 70) and
   `TIER_WATCH_THRESHOLD` (default 40)
 - Charts are captured only when confidence ≥ 50
-- Tier change always triggers notification regardless of delta threshold
+- Tier change always triggers notification (bypasses cooldown and delta check)
 - Significant-change threshold is LLM-tuned (seeded at 25%), stored in memory
 - Delta formula: `|new - old| / max(|old|, |new|, 1.0)` (symmetric, zero-safe)
 - Change detection runs on configurable indicator set (`CHANGE_DETECTION_INDICATORS`)
-- Max notification frequency: at most once per ticker per scan cycle
+- Per-ticker notification cooldown: `NOTIFICATION_COOLDOWN_SECS` (default 3600 = 1 hour)
+  — Watch-tier requires **both** significant change AND cooldown expired;
+  Alert-tier requires only cooldown expired; tier change bypasses cooldown entirely
+- Direction filter: Watch/Silent with direction=NONE is suppressed; Alert
+  tier overrides this filter (important state transitions shouldn't be missed)
 - Silent-tier predictions are still stored in memory for trajectory tracking
 
 ## Out of Scope
 
-- Time-based notification cooldowns (uses delta-based detection instead)
 - Scheduled notifications (only event-driven)
 
 ## Dependencies
@@ -150,7 +185,17 @@ triggers notifications when indicators shift meaningfully between scan cycles.
 ### Challenge Summary
 
 - **Challenges raised**: 2
-- **Author victories**: 2
-- **Challenger victories**: 0
+- **Author victories**: 1
+- **Challenger victories**: 1 (challenge #2 proven correct post-deployment)
 - **Escalated**: 0
-- **Overall verdict**: ACCEPTED
+- **Overall verdict**: ACCEPTED (after revision)
+
+### Post-Deployment Revision (2026-03-18)
+
+Challenge #2 proved prescient: delta-only gating was insufficient. High-delta
+indicators (>50% swings in structure_power) triggered Watch-tier notifications
+every 15-min cycle for the same LONG signal. An explicit per-ticker cooldown
+(`NOTIFICATION_COOLDOWN_SECS`, default 3600) was added alongside delta-based
+detection. Additionally, direction=NONE was suppressed for non-Alert tiers,
+as non-directional Watch messages provided no actionable value.
+
