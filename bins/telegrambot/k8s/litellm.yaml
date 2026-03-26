@@ -78,7 +78,8 @@ spec:
     spec:
       containers:
         - name: litellm
-          image: ghcr.io/berriai/litellm:main-latest
+          # Pinned to last safe version before supply chain attack (v1.82.7+8 compromised)
+          image: ghcr.io/berriai/litellm:main-v1.82.3-stable.patch.2
           args:
             - "--config"
             - "/etc/litellm/config.yaml"
@@ -98,20 +99,25 @@ spec:
               cpu: "100m"
               memory: "256Mi"
             limits:
-              cpu: "500m"
+              cpu: "2000m"
               memory: "1Gi"
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /health/liveliness
               port: 4000
             initialDelaySeconds: 120
+            periodSeconds: 10
+            failureThreshold: 30  # up to 420s for first startup
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
             periodSeconds: 30
             failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /health/readiness
               port: 4000
-            initialDelaySeconds: 60
             periodSeconds: 10
       volumes:
         - name: config
