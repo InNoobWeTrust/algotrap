@@ -25,15 +25,10 @@ data:
       - model_name: raptor-mini
         litellm_params:
           model: github_copilot/raptor-mini
-      # ── Add paid/other models below ─────────────────────────────
-      # - model_name: claude-sonnet
-      #   litellm_params:
-      #     model: anthropic/claude-sonnet-4-20250514
-      #     api_key: os.environ/ANTHROPIC_API_KEY
 
     general_settings:
       master_key: sk-litellm-proxy
-      # Stateless proxy — no DB required
+      # Persistent proxy — using PVC for SQLite
       allow_requests_on_db_unavailable: true
       store_model_in_db: false
       disable_spend_logs: true
@@ -45,7 +40,7 @@ data:
 ---
 # ─── Secret: API keys (for non-Copilot providers) ────────────────────────────
 # GitHub Copilot uses OAuth device flow (no key needed).
-# No DATABASE_URL = stateless proxy mode.
+# Persistent DATABASE_URL on PVC.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -54,10 +49,8 @@ metadata:
     app: litellm
 type: Opaque
 stringData:
-  PLACEHOLDER: "unused"
-  # Uncomment as needed for non-Copilot providers:
-  # ANTHROPIC_API_KEY: ""
-  # GEMINI_API_KEY: ""
+  DATABASE_URL: "sqlite:////root/.config/litellm/litellm.db"
+  LITELLM_MASTER_KEY: "sk-litellm-proxy"
 ---
 # ─── Deployment ───────────────────────────────────────────────────────────────
 apiVersion: apps/v1
@@ -78,8 +71,8 @@ spec:
     spec:
       containers:
         - name: litellm
-          # Pinned to last safe version before supply chain attack (v1.82.7+8 compromised)
-          image: ghcr.io/berriai/litellm:main-v1.82.3-stable.patch.2
+          # Pinned to current working digest of main-latest
+          image: ghcr.io/berriai/litellm@sha256:59a2736ac84800821fa0e1656487366089f2d29d10f8ae05c918df9c6e4940af
           args:
             - "--config"
             - "/etc/litellm/config.yaml"
@@ -94,35 +87,41 @@ spec:
             - name: config
               mountPath: /etc/litellm
               readOnly: true
+            - name: litellm-data
+              mountPath: /root/.config/litellm
           resources:
             requests:
               cpu: "100m"
               memory: "256Mi"
             limits:
-              cpu: "2000m"
-              memory: "1Gi"
+              cpu: "1"
+              memory: "1.5Gi"
           startupProbe:
             httpGet:
               path: /health/liveliness
               port: 4000
-            initialDelaySeconds: 120
+            initialDelaySeconds: 30
             periodSeconds: 10
-            failureThreshold: 30  # up to 420s for first startup
+            failureThreshold: 120  # 1200s for OAuth login
           livenessProbe:
             httpGet:
               path: /health/liveliness
               port: 4000
             periodSeconds: 30
-            failureThreshold: 5
+            failureThreshold: 10
           readinessProbe:
             httpGet:
               path: /health/readiness
               port: 4000
             periodSeconds: 10
+            failureThreshold: 120
       volumes:
         - name: config
           configMap:
             name: litellm-config
+        - name: litellm-data
+          persistentVolumeClaim:
+            claimName: litellm-data
 ---
 # ─── Service ──────────────────────────────────────────────────────────────────
 apiVersion: v1
