@@ -135,7 +135,7 @@ fn default_tier_watch_threshold() -> f64 {
 }
 
 fn default_change_detection_indicators() -> String {
-    "rssi,structure_power,climax_signal".to_string()
+    "rssi,structure_power".to_string()
 }
 
 fn default_timeout_secs() -> u64 {
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(conf.prompts_dir, "config/prompts");
         assert_eq!(
             conf.change_detection_indicators,
-            "rssi,structure_power,climax_signal"
+            "rssi,structure_power"
         );
     }
 

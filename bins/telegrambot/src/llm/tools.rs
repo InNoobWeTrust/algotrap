@@ -179,7 +179,6 @@ fn extract_indicator_summary(
         "ema200",
         "atr_percent",
         "leverage",
-        "climax_signal",
     ];
 
     for col_name in &cols {
@@ -248,11 +247,10 @@ fn build_multi_tf_overview(
             };
 
             lines.push(format!(
-                "  {tf}: RSSI={rssi}, ATR_rev={atr_rev}%, signal={signal}, \
+                "  {tf}: RSSI={rssi}, ATR_rev={atr_rev}%, \
                  structure_pwr={pwr}, sharpe={sharpe}, close={close}",
                 rssi = get_val("rssi"),
                 atr_rev = get_val("atr_reversion_percent"),
-                signal = get_val("climax_signal"),
                 pwr = get_val("structure_power"),
                 sharpe = get_val("sharpe"),
                 close = get_val("close"),

@@ -363,7 +363,7 @@ mod tests {
             keep_recent_messages: 10,
             tier_alert_threshold: 70.0,
             tier_watch_threshold: 40.0,
-            change_detection_indicators: "rssi,structure_power,climax_signal".into(),
+            change_detection_indicators: "rssi,structure_power".into(),
             notification_cooldown_secs: 3600,
             timeout_secs: 30,
         }

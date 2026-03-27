@@ -138,6 +138,47 @@ pub fn save_memory(
     Ok(())
 }
 
+/// Check if the stored indicator schema matches the current pipeline.
+///
+/// Compares the indicator key set from the most recent prediction's snapshot
+/// against the provided `current_keys`. If they differ (indicator added/removed),
+/// clears predictions and weights (KB is retained — it's ticker personality, not
+/// schema-dependent).
+///
+/// Returns `true` if a reset was performed, `false` if compatible or empty.
+pub fn check_schema_compatibility(
+    mem: &mut TickerMemory,
+    current_keys: &[&str],
+) -> bool {
+    // No predictions → nothing to compare against, skip
+    let stored_keys = match mem.predictions.last() {
+        Some(pred) => {
+            let mut keys: Vec<String> = pred.indicators.keys().cloned().collect();
+            keys.sort();
+            keys
+        }
+        None => return false,
+    };
+
+    let mut current_sorted: Vec<String> = current_keys.iter().map(|s| s.to_string()).collect();
+    current_sorted.sort();
+
+    if stored_keys == current_sorted {
+        return false; // Compatible
+    }
+
+    // Schema mismatch — clear predictions and weights
+    info!(
+        symbol = %mem.symbol,
+        stored = ?stored_keys,
+        current = ?current_sorted,
+        "Schema mismatch: indicator key set changed. Clearing predictions and weights."
+    );
+    mem.predictions.clear();
+    mem.weights.values.clear();
+    true
+}
+
 /// Append a prediction to memory, enforcing the sliding window limit.
 pub fn append_prediction(mem: &mut TickerMemory, pred: Prediction, max_predictions: usize) {
     mem.predictions.push(pred);
@@ -257,5 +298,84 @@ mod tests {
         assert!((loaded.weights.values["rssi"] - 0.30).abs() < f64::EPSILON);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_schema_compat_keys_match() {
+        let mut mem = TickerMemory::new("TEST");
+        append_prediction(
+            &mut mem,
+            Prediction {
+                timestamp: Utc::now(),
+                confidence: 50.0,
+                direction: "LONG".into(),
+                summary: "t".into(),
+                trade_plans: vec![],
+                indicators: HashMap::from([
+                    ("rssi".into(), 50.0),
+                    ("close".into(), 100.0),
+                ]),
+                outcome_score: None,
+            },
+            8,
+        );
+        let reset = check_schema_compatibility(&mut mem, &["rssi", "close"]);
+        assert!(!reset);
+        assert_eq!(mem.predictions.len(), 1); // retained
+    }
+
+    #[test]
+    fn test_schema_compat_key_added() {
+        let mut mem = TickerMemory::new("TEST");
+        mem.weights.values.insert("rssi".into(), 0.5);
+        append_prediction(
+            &mut mem,
+            Prediction {
+                timestamp: Utc::now(),
+                confidence: 50.0,
+                direction: "LONG".into(),
+                summary: "t".into(),
+                trade_plans: vec![],
+                indicators: HashMap::from([("rssi".into(), 50.0)]),
+                outcome_score: Some(0.8),
+            },
+            8,
+        );
+        let reset = check_schema_compatibility(&mut mem, &["rssi", "sharpe"]);
+        assert!(reset);
+        assert!(mem.predictions.is_empty()); // cleared
+        assert!(mem.weights.values.is_empty()); // cleared
+    }
+
+    #[test]
+    fn test_schema_compat_key_removed() {
+        let mut mem = TickerMemory::new("TEST");
+        append_prediction(
+            &mut mem,
+            Prediction {
+                timestamp: Utc::now(),
+                confidence: 50.0,
+                direction: "LONG".into(),
+                summary: "t".into(),
+                trade_plans: vec![],
+                indicators: HashMap::from([
+                    ("rssi".into(), 50.0),
+                    ("climax_signal".into(), 1.0),
+                ]),
+                outcome_score: None,
+            },
+            8,
+        );
+        // climax_signal removed from pipeline
+        let reset = check_schema_compatibility(&mut mem, &["rssi"]);
+        assert!(reset);
+        assert!(mem.predictions.is_empty());
+    }
+
+    #[test]
+    fn test_schema_compat_empty_predictions() {
+        let mut mem = TickerMemory::new("TEST");
+        let reset = check_schema_compatibility(&mut mem, &["rssi", "close"]);
+        assert!(!reset); // No predictions = nothing to compare, skip
     }
 }

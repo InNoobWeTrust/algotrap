@@ -90,21 +90,6 @@ pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
         .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
         .alias("atr_reversion_percent");
 
-    let overbought = rssi
-        .clone()
-        .gt(lit(54))
-        .logical_and(atr_rev_percent.clone().lt(lit(-50)))
-        .alias("overbought");
-    let oversold = rssi
-        .clone()
-        .lt(lit(46))
-        .logical_and(atr_rev_percent.clone().gt(lit(50)))
-        .alias("oversold");
-    let climax_signal = when(overbought.clone().not().logical_and(oversold.clone().not()))
-        .then(lit(0))
-        .otherwise(when(overbought).then(lit(1)).otherwise(lit(-1)))
-        .alias("climax_signal");
-
     let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
     let sharpe_ratio = col("close").sharpe(200).alias("sharpe");
@@ -125,7 +110,6 @@ pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
         structure_pwr_sma,
         atr_percent,
         atr_rev_percent,
-        climax_signal,
         lvrg,
         sharpe_ratio,
     ]

@@ -17,7 +17,7 @@ Weight rules:
 - Adjust weights based on which indicators were most informative this cycle
 
 Standard indicators (use these exact keys):
-  rssi, structure_power, climax_signal, atr_reversion_percent, sharpe, ema200
+  rssi, structure_power, atr_reversion_percent, sharpe, ema200
 
 ## Analysis Workflow
 
@@ -51,7 +51,6 @@ Your FINAL response must be ONLY this JSON object:
   "weights": {
     "rssi": <{{weight_min}}-{{weight_max}}>,
     "structure_power": <{{weight_min}}-{{weight_max}}>,
-    "climax_signal": <{{weight_min}}-{{weight_max}}>,
     "atr_reversion_percent": <{{weight_min}}-{{weight_max}}>,
     "sharpe": <{{weight_min}}-{{weight_max}}>,
     "ema200": <{{weight_min}}-{{weight_max}}>

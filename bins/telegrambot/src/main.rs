@@ -132,6 +132,17 @@ async fn scan_ticker(
     // 1. Load persistent memory
     let mut mem = telegrambot::memory::load_memory(&conf.memory_dir, &ticker.symbol);
 
+    // 1.5. Structural compatibility check — compare stored indicator key set
+    // against the current pipeline. Mismatch = reset predictions + weights.
+    const INDICATOR_KEYS: &[&str] = &[
+        "rssi",
+        "structure_power",
+        "atr_reversion_percent",
+        "sharpe",
+        "close",
+    ];
+    telegrambot::memory::check_schema_compatibility(&mut mem, INDICATOR_KEYS);
+
     // 2. Fetch market data
     let all_dfs = data::fetch_all_data(bingx, ticker).await?;
     info!(
@@ -139,30 +150,6 @@ async fn scan_ticker(
         timeframes = all_dfs.len(),
         "Fetched market data"
     );
-
-    // 2.5. One-time score migration: reset old plan-counting outcome scores
-    // Old formula always produced 0.333/0.667 — these are invalid under the new
-    // direction-based scoring. Reset to None so they get re-scored.
-    let mut migrated = 0usize;
-    for pred in &mut mem.predictions {
-        if let Some(score) = pred.outcome_score {
-            // Old formula only produced multiples of 1/3 (0.333, 0.667, 1.0, 0.0).
-            // New formula produces values in [0.6, 1.0] for correct or exactly 0.0.
-            // 0.333 and 0.667 are signatures of the old formula.
-            let is_old = (score - 1.0/3.0).abs() < 0.01 || (score - 2.0/3.0).abs() < 0.01;
-            if is_old {
-                pred.outcome_score = None;
-                migrated += 1;
-            }
-        }
-    }
-    if migrated > 0 {
-        info!(
-            symbol = %ticker.symbol,
-            migrated,
-            "Migrated old plan-counting outcome scores to None for re-scoring"
-        );
-    }
 
     // 3. Outcome validation at scan start — validate non-scored predictions
     if let Some(current_price) = get_latest_close(&all_dfs, &ticker.default_tf) {
@@ -375,7 +362,6 @@ fn extract_indicator_snapshot(
         for col_name in &[
             "rssi",
             "structure_power",
-            "climax_signal",
             "atr_reversion_percent",
             "sharpe",
             "close",

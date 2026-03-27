@@ -341,8 +341,8 @@ mod tests {
 
     #[test]
     fn test_parse_indicator_keys() {
-        let keys = parse_indicator_keys("rssi,structure_power,climax_signal");
-        assert_eq!(keys.len(), 3);
+        let keys = parse_indicator_keys("rssi,structure_power");
+        assert_eq!(keys.len(), 2);
         assert_eq!(keys[0], "rssi");
     }
 
