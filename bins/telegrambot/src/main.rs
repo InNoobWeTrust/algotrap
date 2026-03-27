@@ -140,25 +140,53 @@ async fn scan_ticker(
         "Fetched market data"
     );
 
+    // 2.5. One-time score migration: reset old plan-counting outcome scores
+    // Old formula always produced 0.333/0.667 — these are invalid under the new
+    // direction-based scoring. Reset to None so they get re-scored.
+    let mut migrated = 0usize;
+    for pred in &mut mem.predictions {
+        if let Some(score) = pred.outcome_score {
+            // Old formula only produced multiples of 1/3 (0.333, 0.667, 1.0, 0.0).
+            // New formula produces values in [0.6, 1.0] for correct or exactly 0.0.
+            // 0.333 and 0.667 are signatures of the old formula.
+            let is_old = (score - 1.0/3.0).abs() < 0.01 || (score - 2.0/3.0).abs() < 0.01;
+            if is_old {
+                pred.outcome_score = None;
+                migrated += 1;
+            }
+        }
+    }
+    if migrated > 0 {
+        info!(
+            symbol = %ticker.symbol,
+            migrated,
+            "Migrated old plan-counting outcome scores to None for re-scoring"
+        );
+    }
+
     // 3. Outcome validation at scan start — validate non-scored predictions
     if let Some(current_price) = get_latest_close(&all_dfs, &ticker.default_tf) {
         for pred in &mut mem.predictions {
-            if pred.outcome_score.is_none() && !pred.trade_plans.is_empty() {
+            if pred.outcome_score.is_none() {
                 let entry_price = pred
                     .indicators
                     .get("close")
                     .copied()
                     .unwrap_or(current_price);
+                let atr = telegrambot::scoring::reconstruct_atr(&pred.indicators);
                 let score = telegrambot::scoring::compute_outcome_score(
-                    &pred.trade_plans,
+                    &pred.direction,
                     entry_price,
                     current_price,
+                    atr,
                 );
                 pred.outcome_score = Some(score);
                 info!(
                     symbol = %ticker.symbol,
                     ts = %pred.timestamp,
+                    direction = %pred.direction,
                     score,
+                    atr = ?atr,
                     "Validated prediction outcome"
                 );
             }
@@ -225,6 +253,7 @@ async fn scan_ticker(
         should_send,
         max_delta,
         direction = %result.direction,
+        conviction_aligned = result.conviction_aligned,
         "Notification decision"
     );
 
@@ -280,13 +309,19 @@ async fn scan_ticker(
                 .await?;
             }
             telegrambot::scoring::Tier::Watch => {
+                // Prepend conviction marker if misaligned
+                let summary_text = if !result.conviction_aligned {
+                    format!("⚠️ Low conviction\n\n{}", result.text)
+                } else {
+                    result.text.clone()
+                };
                 telegram::send_watch_notification(
                     bot,
                     chat_id,
                     &ticker.symbol,
                     &result.direction,
                     result.confidence,
-                    &result.text,
+                    &summary_text,
                     &result.trade_plans,
                     &tf_charts,
                 )

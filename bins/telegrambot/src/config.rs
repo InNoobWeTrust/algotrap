@@ -107,7 +107,7 @@ fn default_weight_rate_limit() -> f64 {
 }
 
 fn default_weight_min() -> f64 {
-    0.05
+    0.01
 }
 
 fn default_weight_max() -> f64 {
@@ -214,7 +214,7 @@ mod tests {
         assert!((conf.tier_alert_threshold - 70.0).abs() < f64::EPSILON);
         assert!((conf.tier_watch_threshold - 40.0).abs() < f64::EPSILON);
         assert!((conf.weight_rate_limit - 0.05).abs() < f64::EPSILON);
-        assert!((conf.weight_min - 0.05).abs() < f64::EPSILON);
+        assert!((conf.weight_min - 0.01).abs() < f64::EPSILON);
         assert!((conf.weight_max - 0.50).abs() < f64::EPSILON);
         assert_eq!(conf.max_predictions, 8);
         assert_eq!(conf.keep_recent_messages, 10);

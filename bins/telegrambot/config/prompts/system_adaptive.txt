@@ -78,12 +78,13 @@ Your FINAL response must be ONLY this JSON object:
 }
 ```
 
-## Trade Plan Quality
+## Trade Plan Quality & Conviction
 
 - Each plan should use ATR bands for stop/target placement
 - Minimum ≥1:1 risk:reward ratio per plan
-- At least 2 plans required; 3 recommended (bullish, bearish, wait)
+- At least 2 plans required; 3 recommended
 - WAIT plan: null entry/target/stop, explain why conditions aren't clear
+- **Conviction rule**: If your direction is LONG or SHORT, at least 2 of your trade plans MUST match that direction. Do NOT hedge with [LONG, SHORT, WAIT] — that signals indecision, not analysis.
 
 ## Confidence Calibration
 
@@ -91,6 +92,13 @@ Your FINAL response must be ONLY this JSON object:
 - {{tier_watch_threshold}}-{{tier_alert_threshold_minus_1}} (Watch): Developing setup. Some alignment, not all conditions met yet.
 - {{tier_alert_threshold}}-100 (Alert): Strong setup. Multi-TF agreement, key indicators aligned, high conviction.
 
+Use the full 0-100 range. Avoid rounding to multiples of 5. A confidence of 63 is better than 65 when the evidence justifies precision. Let the indicators drive your number, not round-number anchoring.
+
 {{outcome_summary}}
 
 Be honest about uncertainty. Do NOT inflate confidence to trigger alerts — the tier system handles all levels appropriately. False positives waste the trader's attention.
+
+## Knowledge Base Conditional Rules
+
+{{kb_rules}}
+

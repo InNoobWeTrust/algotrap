@@ -129,41 +129,101 @@ pub fn parse_indicator_keys(config_str: &str) -> Vec<String> {
 
 // ─── Outcome Validation ─────────────────────────────────────────────────────
 
-/// Compute outcome score for a prediction by checking how many trade plans
-/// matched the actual price movement.
+/// Compute outcome score for a prediction using direction-based composite
+/// scoring.
 ///
-/// For each plan: +1 if direction matches reality (price crossed entry in the
-/// right direction). Score = matching_plans / total_plans.
-/// Returns 0.0 if no plans or no match.
+/// Formula (LONG/SHORT):
+///   `direction_match × (0.6 + magnitude_factor × 0.4)`
+///   where `magnitude_factor = min(1.0, |Δprice| / atr)`
+///
+/// Wrong direction always scores 0.0 — magnitude only amplifies correct calls.
+///
+/// NONE direction:
+///   - With ATR: 1.0 if `|Δprice| < 0.5 × atr` (market stayed flat), 0.0
+///     otherwise
+///   - Without ATR: 0.0 (can't verify flatness)
+///
+/// Falls back to binary scoring (1.0 or 0.0) when ATR is unavailable.
 pub fn compute_outcome_score(
-    plans: &[crate::memory::TradePlan],
+    direction: &str,
     prediction_price: f64,
     current_price: f64,
+    atr: Option<f64>,
 ) -> f64 {
-    if plans.is_empty() {
-        return 0.0;
+    let delta = current_price - prediction_price;
+    let abs_delta = delta.abs();
+    let dir = direction.to_uppercase();
+
+    // NONE direction: scored conditionally against ATR
+    if dir == "NONE" {
+        return match atr {
+            Some(atr_val) if atr_val > 0.0 => {
+                if abs_delta < 0.5 * atr_val {
+                    1.0 // Correctly identified no-trade
+                } else {
+                    0.0 // Missed a significant move
+                }
+            }
+            _ => 0.0, // Can't verify without ATR
+        };
     }
 
-    let actual_direction = if current_price > prediction_price {
-        "LONG"
-    } else if current_price < prediction_price {
-        "SHORT"
-    } else {
-        return 0.0;
+    // Determine if the prediction direction was correct
+    let direction_correct = match dir.as_str() {
+        "LONG" => delta > 0.0,
+        "SHORT" => delta < 0.0,
+        _ => false,
     };
 
-    let matches: usize = plans
-        .iter()
-        .filter(|plan| {
-            let plan_dir = plan.direction.to_uppercase();
-            if plan_dir == "WAIT" {
-                return false;
-            }
-            plan_dir == actual_direction
-        })
-        .count();
+    if !direction_correct {
+        return 0.0; // Wrong direction always scores 0.0
+    }
 
-    matches as f64 / plans.len() as f64
+    // Direction was correct — compute composite with magnitude bonus
+    match atr {
+        Some(atr_val) if atr_val > 0.0 => {
+            let magnitude_factor = (abs_delta / atr_val).min(1.0);
+            0.6 + magnitude_factor * 0.4 // Range: [0.6, 1.0]
+        }
+        _ => 1.0, // Binary fallback — correct direction without ATR
+    }
+}
+
+/// Compute direction accuracy across scored predictions.
+///
+/// Returns `(correct_count, total_scored, accuracy_pct)`.
+/// A prediction is "correct" if its outcome score ≥ 0.5.
+/// Unscored predictions (outcome_score = None) are excluded.
+pub fn compute_direction_accuracy(
+    predictions: &[crate::memory::Prediction],
+) -> (usize, usize, f64) {
+    let scored: Vec<f64> = predictions
+        .iter()
+        .filter_map(|p| p.outcome_score)
+        .collect();
+
+    let total = scored.len();
+    if total == 0 {
+        return (0, 0, 0.0);
+    }
+
+    let correct = scored.iter().filter(|&&s| s >= 0.5).count();
+    let accuracy = correct as f64 / total as f64;
+
+    (correct, total, accuracy)
+}
+
+/// Reconstruct approximate ATR from indicator snapshot.
+///
+/// ATR ≈ close × atr_reversion_percent / 100
+/// Returns None if either `close` or `atr_reversion_percent` is missing.
+pub fn reconstruct_atr(indicators: &HashMap<String, f64>) -> Option<f64> {
+    let close = indicators.get("close").copied()?;
+    let atr_pct = indicators.get("atr_reversion_percent").copied()?;
+    if close <= 0.0 || atr_pct <= 0.0 {
+        return None;
+    }
+    Some(close * atr_pct / 100.0)
 }
 
 #[cfg(test)]
@@ -286,49 +346,139 @@ mod tests {
         assert_eq!(keys[0], "rssi");
     }
 
+    // ─── Outcome Scoring v2 Tests ────────────────────────────────────────────
+
     #[test]
-    fn test_outcome_score_all_match() {
-        let plans = vec![
-            crate::memory::TradePlan {
-                label: "A".into(),
-                direction: "LONG".into(),
-                entry: Some(80000.0),
-                target: Some(82000.0),
-                stop: Some(79000.0),
-                rationale: "bullish".into(),
-            },
-            crate::memory::TradePlan {
-                label: "B".into(),
-                direction: "LONG".into(),
-                entry: Some(80500.0),
-                target: Some(83000.0),
-                stop: Some(79500.0),
-                rationale: "also bullish".into(),
-            },
-        ];
-        // Price went up → LONG correct
-        let score = compute_outcome_score(&plans, 80000.0, 82000.0);
+    fn test_outcome_score_long_correct() {
+        // LONG prediction, price went up, ATR = 500
+        let score = compute_outcome_score("LONG", 87000.0, 87800.0, Some(500.0));
+        // magnitude = min(1.0, 800/500) = 1.0
+        // score = 1.0 × (0.6 + 1.0 × 0.4) = 1.0
         assert!((score - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_outcome_score_no_match() {
-        let plans = vec![crate::memory::TradePlan {
-            label: "A".into(),
-            direction: "SHORT".into(),
-            entry: Some(80000.0),
-            target: Some(78000.0),
-            stop: Some(81000.0),
-            rationale: "bearish".into(),
-        }];
-        // Price went up but plan was SHORT
-        let score = compute_outcome_score(&plans, 80000.0, 82000.0);
+    fn test_outcome_score_long_correct_small_move() {
+        // LONG prediction, price up slightly, ATR = 500
+        let score = compute_outcome_score("LONG", 87000.0, 87100.0, Some(500.0));
+        // magnitude = min(1.0, 100/500) = 0.2
+        // score = 1.0 × (0.6 + 0.2 × 0.4) = 0.68
+        assert!((score - 0.68).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_outcome_score_long_wrong() {
+        // LONG prediction, price went DOWN → 0.0
+        let score = compute_outcome_score("LONG", 87000.0, 86500.0, Some(500.0));
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_outcome_score_empty_plans() {
-        let score = compute_outcome_score(&[], 80000.0, 82000.0);
+    fn test_outcome_score_short_correct() {
+        // SHORT prediction, price went down
+        let score = compute_outcome_score("SHORT", 87000.0, 86200.0, Some(500.0));
+        // magnitude = min(1.0, 800/500) = 1.0
+        // score = 1.0 × (0.6 + 1.0 × 0.4) = 1.0
+        assert!((score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_outcome_score_short_wrong() {
+        // SHORT prediction, price went UP → 0.0
+        let score = compute_outcome_score("SHORT", 87000.0, 87500.0, Some(500.0));
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn test_outcome_score_none_flat_correct() {
+        // NONE prediction, market stayed flat (|Δ| < 0.5 × ATR)
+        let score = compute_outcome_score("NONE", 87000.0, 87100.0, Some(500.0));
+        // |100| < 250 → correct no-trade → 1.0
+        assert!((score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_outcome_score_none_missed_move() {
+        // NONE prediction, significant move missed (|Δ| > 0.5 × ATR)
+        let score = compute_outcome_score("NONE", 87000.0, 87600.0, Some(500.0));
+        // |600| > 250 → missed move → 0.0
+        assert!((score - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_outcome_score_no_atr_correct() {
+        // LONG prediction correct, no ATR → binary 1.0
+        let score = compute_outcome_score("LONG", 87000.0, 87500.0, None);
+        assert!((score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_outcome_score_no_atr_wrong() {
+        // LONG prediction wrong, no ATR → 0.0
+        let score = compute_outcome_score("LONG", 87000.0, 86500.0, None);
+        assert!((score - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_outcome_score_none_no_atr() {
+        // NONE without ATR → 0.0 (can't verify)
+        let score = compute_outcome_score("NONE", 87000.0, 87100.0, None);
+        assert!((score - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_direction_accuracy() {
+        use chrono::Utc;
+        let make_pred = |score: Option<f64>| crate::memory::Prediction {
+            timestamp: Utc::now(),
+            confidence: 60.0,
+            direction: "LONG".into(),
+            summary: "test".into(),
+            trade_plans: vec![],
+            indicators: HashMap::new(),
+            outcome_score: score,
+        };
+
+        let preds = vec![
+            make_pred(Some(1.0)),  // correct
+            make_pred(Some(0.0)),  // wrong
+            make_pred(Some(0.8)),  // correct
+            make_pred(Some(0.0)),  // wrong
+            make_pred(Some(1.0)),  // correct
+            make_pred(Some(0.7)),  // correct
+            make_pred(Some(0.0)),  // wrong
+            make_pred(None),       // pending
+        ];
+
+        let (correct, total, accuracy) = compute_direction_accuracy(&preds);
+        assert_eq!(correct, 4);
+        assert_eq!(total, 7);
+        assert!((accuracy - 4.0 / 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_direction_accuracy_empty() {
+        let (correct, total, accuracy) = compute_direction_accuracy(&[]);
+        assert_eq!(correct, 0);
+        assert_eq!(total, 0);
+        assert!((accuracy - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reconstruct_atr() {
+        let indicators = HashMap::from([
+            ("close".to_string(), 87000.0),
+            ("atr_reversion_percent".to_string(), 0.575),
+        ]);
+        let atr = reconstruct_atr(&indicators).unwrap();
+        // 87000 × 0.575 / 100 = 500.25
+        assert!((atr - 500.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reconstruct_atr_missing() {
+        let indicators = HashMap::from([("close".to_string(), 87000.0)]);
+        assert!(reconstruct_atr(&indicators).is_none());
+    }
 }
+

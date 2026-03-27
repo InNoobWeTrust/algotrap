@@ -46,6 +46,9 @@ pub struct AnalysisResult {
     pub proposed_weights: Option<HashMap<String, f64>>,
     /// LLM-tuned significance threshold for change detection.
     pub significance_threshold: Option<f64>,
+    /// True if trade plan directions align with the declared direction.
+    /// NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
+    pub conviction_aligned: bool,
 }
 
 // ─── Agent Entry Point ───────────────────────────────────────────────────────
@@ -167,6 +170,7 @@ pub async fn run_agent(
         trade_plans: vec![],
         proposed_weights: None,
         significance_threshold: None,
+        conviction_aligned: true, // NONE is always aligned
     })
 }
 
@@ -186,6 +190,7 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
             trade_plans: vec![],
             proposed_weights: None,
             significance_threshold: None,
+            conviction_aligned: true, // Full analysis has no direction constraint
         },
         AnalysisMode::AlertScan => parse_alert_json(&text),
     }
@@ -196,6 +201,22 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
 /// Looks for a JSON object anywhere in the text (between `{` and `}`).
 /// Falls back to confidence=0 on any parse failure (safe — no false alerts).
 fn parse_alert_json(text: &str) -> AnalysisResult {
+    // Inline helper: check if trade plans are aligned with declared direction.
+    // NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
+    fn check_conviction(direction: &str, plans: &[crate::memory::TradePlan]) -> bool {
+        let dir = direction.to_uppercase();
+        if dir == "NONE" {
+            return true; // NONE is inherently neutral
+        }
+        if plans.is_empty() {
+            return true; // No plans to check against
+        }
+        let matching = plans
+            .iter()
+            .filter(|p| p.direction.to_uppercase() == dir)
+            .count();
+        matching >= 2 // At least 2 of 3 plans should match
+    }
     // Try to find a JSON block in the text
     if let Some(start) = text.find('{') {
         if let Some(end) = text.rfind('}') {
@@ -235,7 +256,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                                         .to_string(),
                                 })
                             })
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
 
@@ -255,6 +276,20 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                     warn!("LLM response missing 'significance_threshold' — retaining previous value");
                 }
 
+                // Conviction check: do trade plans align with declared direction?
+                let conviction_aligned = check_conviction(&direction, &trade_plans);
+                if !conviction_aligned {
+                    let plan_dirs: Vec<&str> = trade_plans
+                        .iter()
+                        .map(|p| p.direction.as_str())
+                        .collect();
+                    warn!(
+                        direction = %direction,
+                        plans = ?plan_dirs,
+                        "Low conviction: trade plan directions don't align with declared direction"
+                    );
+                }
+
                 return AnalysisResult {
                     text: summary,
                     confidence,
@@ -262,6 +297,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                     trade_plans,
                     proposed_weights,
                     significance_threshold,
+                    conviction_aligned,
                 };
             }
         }
@@ -276,6 +312,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
         trade_plans: vec![],
         proposed_weights: None,
         significance_threshold: None,
+        conviction_aligned: true, // NONE is always aligned
     }
 }
 
@@ -341,7 +378,8 @@ fn render_prompt(
             rendered = rendered
                 .replace("{{memory_context}}", &format_memory_context(mem))
                 .replace("{{weights_context}}", &format_weights_context(mem))
-                .replace("{{outcome_summary}}", &format_outcome_summary(mem));
+                .replace("{{outcome_summary}}", &format_outcome_summary(mem))
+                .replace("{{kb_rules}}", &format_kb_rules(mem));
         }
         None => {
             rendered = rendered
@@ -356,6 +394,10 @@ fn render_prompt(
                 .replace(
                     "{{outcome_summary}}",
                     "No past predictions to evaluate yet.",
+                )
+                .replace(
+                    "{{kb_rules}}",
+                    "No accuracy data yet — KB rules will activate after 3+ scored predictions.",
                 );
         }
     }
@@ -367,7 +409,7 @@ fn render_prompt(
 
 /// Format memory into a compact text block for prompt injection (≤1600 chars).
 ///
-/// Each prediction is one line: `[timestamp] confidence=X direction=DIR outcome=SCORE|pending`
+/// Each prediction is one line: `[timestamp] conf=X dir=DIR outcome=SCORE dir=✓|✗|pending`
 fn format_memory_context(mem: &TickerMemory) -> String {
     if mem.predictions.is_empty() {
         return "No previous predictions. This is a cold start.".to_string();
@@ -377,11 +419,14 @@ fn format_memory_context(mem: &TickerMemory) -> String {
     for pred in &mem.predictions {
         let ts = pred.timestamp.format("%m-%d %H:%M");
         let outcome = match pred.outcome_score {
-            Some(score) => format!("outcome={score:.2}"),
+            Some(score) => {
+                let dir_marker = if score >= 0.5 { "✓" } else { "✗" };
+                format!("outcome={score:.2} dir={dir_marker}")
+            }
             None => "outcome=pending".to_string(),
         };
         lines.push(format!(
-            "[{ts}] confidence={:.0} direction={} {outcome}",
+            "[{ts}] conf={:.0} dir={} {outcome}",
             pred.confidence, pred.direction
         ));
     }
@@ -415,19 +460,15 @@ fn format_weights_context(mem: &TickerMemory) -> String {
     lines.join("\n")
 }
 
-/// Format outcome summary — aggregate accuracy stats.
+/// Format outcome summary — direction accuracy + composite score.
 fn format_outcome_summary(mem: &TickerMemory) -> String {
     let total = mem.predictions.len();
     if total == 0 {
         return "No past predictions to evaluate yet.".to_string();
     }
 
-    let scored: Vec<f64> = mem
-        .predictions
-        .iter()
-        .filter_map(|p| p.outcome_score)
-        .collect();
-    let scored_count = scored.len();
+    let (correct, scored_count, accuracy) =
+        crate::scoring::compute_direction_accuracy(&mem.predictions);
 
     if scored_count == 0 {
         return format!(
@@ -435,13 +476,83 @@ fn format_outcome_summary(mem: &TickerMemory) -> String {
         );
     }
 
-    let avg = scored.iter().sum::<f64>() / scored_count as f64;
+    let scored: Vec<f64> = mem
+        .predictions
+        .iter()
+        .filter_map(|p| p.outcome_score)
+        .collect();
+    let avg_composite = scored.iter().sum::<f64>() / scored_count as f64;
+
     format!(
-        "Your past {total} predictions: {scored_count} validated (avg accuracy: {avg:.2}). \
-         High accuracy means your signals are reliable. Low accuracy suggests some \
-         indicators may need re-weighting — do not simply suppress confidence."
+        "Your past {total} predictions: {scored_count} validated. \
+         Direction: {correct}/{scored_count} correct ({accuracy:.0}%). \
+         Composite avg: {avg_composite:.2}. \
+         High accuracy means your direction calls are reliable. \
+         Low accuracy suggests re-evaluating which indicators carry the signal."
     )
 }
+
+/// Format conditional KB rules based on direction accuracy stats.
+///
+/// Rules activate only when ≥3 predictions have been scored, avoiding noise from
+/// small sample sizes.
+fn format_kb_rules(mem: &TickerMemory) -> String {
+    let (correct, total, accuracy) =
+        crate::scoring::compute_direction_accuracy(&mem.predictions);
+
+    if total < 3 {
+        return "No accuracy data yet — KB rules will activate after 3+ scored predictions.".to_string();
+    }
+
+    let mut rules: Vec<String> = Vec::new();
+
+    if accuracy < 0.5 {
+        rules.push(format!(
+            "⚠️ Your direction accuracy is {correct}/{total} ({accuracy:.0}%), below 50%. \
+             You MUST call write_kb('lessons-learned', ...) with your hypothesis about \
+             why your direction calls have been wrong."
+        ));
+    } else if accuracy > 0.7 {
+        rules.push(format!(
+            "✅ Your direction accuracy is {correct}/{total} ({accuracy:.0}%), above 70%. \
+             Call write_kb('successful-setups', ...) to record what indicators/patterns \
+             are working."
+        ));
+    }
+
+    // Check for repeated same-direction errors (3+ of last 5 wrong in same dir)
+    let recent_scored: Vec<_> = mem
+        .predictions
+        .iter()
+        .rev()
+        .filter(|p| p.outcome_score.is_some())
+        .take(5)
+        .collect();
+    if recent_scored.len() >= 3 {
+        let mut dir_fails: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for pred in &recent_scored {
+            if pred.outcome_score.unwrap_or(1.0) < 0.5 {
+                *dir_fails.entry(&pred.direction).or_insert(0) += 1;
+            }
+        }
+        for (dir, count) in &dir_fails {
+            if *count >= 3 {
+                rules.push(format!(
+                    "🔴 You have {count} recent wrong {dir} calls. \
+                     Write to write_kb('false-signal-patterns', ...) your analysis of \
+                     why {dir} signals are failing."
+                ));
+            }
+        }
+    }
+
+    if rules.is_empty() {
+        "Your accuracy is in the normal range. Use KB tools when you notice noteworthy patterns.".to_string()
+    } else {
+        rules.join("\n")
+    }
+}
+
 
 // ─── Chat History Compression ────────────────────────────────────────────────
 

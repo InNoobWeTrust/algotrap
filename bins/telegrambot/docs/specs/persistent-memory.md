@@ -61,27 +61,9 @@ against actual price outcomes.
 
 ### Scenario: Outcome validation
 
-- **Given** the memory contains a prediction from 2 hours ago with trade plans:
-  - Plan A: LONG entry at 82,100, SL at 81,200
-  - Plan B: SHORT entry at 83,500, SL at 84,200
-  - Plan C: Wait (no entry)
-- **And** the current BTC-USDT price is 82,500 (above Plan A entry, in LONG
-  direction)
-- **When** the outcome validator runs
-- **Then** Plan A is marked as matching (price moved through entry in correct
-  direction)
-- **And** Plans B and C are marked as not matching
-- **And** `outcome_score` is set to 1/3 = 0.33
-- **And** the outcome is included in the LLM's context for the next cycle
-
-### Scenario: Outcome validation — no match
-
-- **Given** the memory contains a prediction with trade plans A (LONG at 82,100),
-  B (SHORT at 83,500), C (Wait)
-- **And** the current price is 82,050 (below all entry levels, moved sideways)
-- **When** the outcome validator runs
-- **Then** no plans match
-- **And** `outcome_score` is set to 0.0
+> **Superseded** by `docs/specs/outcome-scoring-v2.md`.
+> The original plan-counting formula (`matching_plans / total_plans`) was replaced
+> with direction-based composite scoring. See the v2 spec for all scenarios.
 
 ### Scenario: Outcome validation runs at scan start
 
