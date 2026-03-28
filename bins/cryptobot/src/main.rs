@@ -15,6 +15,7 @@ use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::ext::ntfy;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
+use algotrap::ta::gap_zones::OhlcGapZones;
 use algotrap::ta::prelude::*;
 use algotrap::time_utils::is_closing_timeframe;
 
@@ -335,6 +336,32 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         .otherwise(lit("rgba(242, 54, 70, 0.5)"))
         .alias("sharpe_color");
 
+    // Biased candle (strictly rising/falling)
+    let biased_candle = when(
+        col("open")
+            .gt(col("open").shift(lit(1)))
+            .and(col("close").gt(col("close").shift(lit(1))))
+            .and(col("high").gt(col("high").shift(lit(1))))
+            .and(col("low").gt(col("low").shift(lit(1)))),
+    )
+    .then(lit(1i32))
+    .otherwise(
+        when(
+            col("open")
+                .lt(col("open").shift(lit(1)))
+                .and(col("close").lt(col("close").shift(lit(1))))
+                .and(col("high").lt(col("high").shift(lit(1))))
+                .and(col("low").lt(col("low").shift(lit(1)))),
+        )
+        .then(lit(-1i32))
+        .otherwise(lit(0i32)),
+    )
+    .alias("biased_candle");
+
+    // Gap zone detection columns
+    let is_atr_gap_col = ohlc.is_atr_gap(42).alias("is_atr_gap");
+    let body_ratio_col = ohlc.body_ratio().alias("body_ratio");
+
     // Selected columns to export
     vec![
         time_to_date,
@@ -372,6 +399,9 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         climax_signal_shape,
         sharpe_ratio,
         sharpe_ratio_color,
+        biased_candle,
+        is_atr_gap_col,
+        body_ratio_col,
     ]
 }
 
@@ -419,6 +449,12 @@ const TDV_HTML_TEMPLATE: &str = r#"
 
         #container {
             height: 100%;
+        }
+        #container.rssi-bullish {
+            background: rgba(76,175,80,0.05);
+        }
+        #container.rssi-bearish {
+            background: rgba(242,54,69,0.05);
         }
 
         #overlay {
@@ -486,6 +522,68 @@ const TDV_HTML_TEMPLATE: &str = r#"
     </script>
     <script id="dataset" type="application/json">
         {{ dataset }}
+    </script>
+    <!-- Gap Zone Primitive classes (must be defined before onIntervalUpdate) -->
+    <script type="text/javascript">
+        class GapZoneBandRenderer {
+            constructor(zones, chartData) { this._zones = zones; this._data = chartData; this._series = null; this._chart = null; }
+            update(series, chart) { this._series = series; this._chart = chart; }
+            draw(target) {
+                const s = this._series; const c = this._chart;
+                if (!s || !c || !this._data.length) return;
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const ts = c.timeScale();
+                    const firstTime = this._data[0]?.time;
+                    const lastTime = this._data[this._data.length - 1]?.time;
+                    if (!firstTime || !lastTime) return;
+                    const xLeft = ts.timeToCoordinate(firstTime);
+                    const xRight = ts.timeToCoordinate(lastTime);
+                    if (xLeft === null || xRight === null) return;
+                    const ratio = scope.horizontalPixelRatio;
+                    const vRatio = scope.verticalPixelRatio;
+                    this._zones.forEach(z => {
+                        const yTop = s.priceToCoordinate(z.top);
+                        const yBot = s.priceToCoordinate(z.bottom);
+                        if (yTop === null || yBot === null) return;
+                        const opacity = Math.min(0.25, 0.05 + z.trust * 0.2);
+                        const borderOpacity = Math.min(0.5, 0.1 + z.trust * 0.4);
+                        ctx.fillStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,${opacity})`
+                            : `rgba(255,152,0,${opacity})`;
+                        const x = Math.round(xLeft * ratio);
+                        const w = Math.round((xRight - xLeft + 40) * ratio);
+                        const y = Math.round(Math.min(yTop, yBot) * vRatio);
+                        const h = Math.round(Math.abs(yBot - yTop) * vRatio);
+                        ctx.fillRect(x, y, w, h);
+                        ctx.strokeStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,${borderOpacity})`
+                            : `rgba(255,152,0,${borderOpacity})`;
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4 * ratio, 4 * ratio]);
+                        ctx.beginPath();
+                        ctx.moveTo(x, y); ctx.lineTo(x + w, y);
+                        ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                    });
+                });
+            }
+        }
+        class GapZonePaneView {
+            constructor(renderer) { this._renderer = renderer; }
+            renderer() { return this._renderer; }
+        }
+        class GapZonePrimitive {
+            constructor(zones, chartData) {
+                this._renderer = new GapZoneBandRenderer(zones, chartData);
+                this._paneView = new GapZonePaneView(this._renderer);
+            }
+            attached({ series, chart }) { this._renderer.update(series, chart); }
+            detached() { this._renderer.update(null, null); }
+            paneViews() { return [this._paneView]; }
+            updateAllViews() {}
+        }
     </script>
     <script id="tfs" type="application/json">
         {{ tfs }}
@@ -764,7 +862,100 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 color: d.climax_signal_color,
                 shape: d.climax_signal_shape,
             }))
+            // ATR Climax circles
+            data.forEach(d => {
+                if (d.close >= d.atr_upperband) {
+                    markers.push({
+                        time: d.time,
+                        position: 'aboveBar',
+                        shape: 'circle',
+                        color: 'rgba(157,225,159,0.7)',
+                        size: 3,
+                    });
+                }
+                if (d.close <= d.atr_lowerband) {
+                    markers.push({
+                        time: d.time,
+                        position: 'belowBar',
+                        shape: 'circle',
+                        color: 'rgba(201,134,134,0.7)',
+                        size: 3,
+                    });
+                }
+            });
+            // ATR Reversion arrows
+            data.forEach(d => {
+                if (d.atr_reversion_percent > 50 && d.rssi < 46) {
+                    markers.push({
+                        time: d.time,
+                        position: 'belowBar',
+                        shape: 'arrowUp',
+                        color: 'rgba(150,225,150,0.5)',
+                    });
+                }
+                if (d.atr_reversion_percent < -50 && d.rssi > 54) {
+                    markers.push({
+                        time: d.time,
+                        position: 'aboveBar',
+                        shape: 'arrowDown',
+                        color: 'rgba(220,80,80,0.5)',
+                    });
+                }
+            });
+            // Biased candle arrows
+            data.forEach(d => {
+                if (d.biased_candle > 0) {
+                    markers.push({
+                        time: d.time,
+                        position: 'belowBar',
+                        shape: 'arrowUp',
+                        color: 'rgba(33,150,243,0.8)',
+                    });
+                }
+                if (d.biased_candle < 0) {
+                    markers.push({
+                        time: d.time,
+                        position: 'aboveBar',
+                        shape: 'arrowDown',
+                        color: 'rgba(233,30,99,0.8)',
+                    });
+                }
+            });
+            markers.sort((a, b) => a.time - b.time);
             markersSeries.setMarkers(markers);
+
+            // ─── Gap Zone Bands ────────────────────────────────────────
+            // Extract gap zones from is_atr_gap + body_ratio columns
+            const gapZones = [];
+            const MIN_TRUST = 0.3;
+            data.forEach(d => {
+                if (d.is_atr_gap && d.body_ratio >= MIN_TRUST) {
+                    const bottom = Math.min(d.open, d.close);
+                    const top = Math.max(d.open, d.close);
+                    const bullish = d.close > d.open;
+                    // Composite trust with RSSI
+                    const rssiStrength = Math.abs((d.rssi || 50) - 50) / 50;
+                    const trust = d.body_ratio * (0.5 + 0.5 * rssiStrength);
+                    gapZones.push({ top, bottom, direction: bullish ? 'bullish' : 'bearish', trust });
+                }
+            });
+            // Keep last 10
+            const recentGaps = gapZones.slice(-10);
+            // Detach previous primitive if any
+            if (window._gapPrimitive) {
+                try { candlestickSeries.detachPrimitive(window._gapPrimitive); } catch(_) {}
+            }
+            if (recentGaps.length > 0) {
+                window._gapPrimitive = new GapZonePrimitive(recentGaps, data);
+                candlestickSeries.attachPrimitive(window._gapPrimitive);
+            }
+
+            // ─── RSSI Tint ─────────────────────────────────────────────
+            const lastRssi = data[data.length - 1]?.rssi || 50;
+            container.classList.remove('rssi-bullish', 'rssi-bearish');
+            if (lastRssi > 59) container.classList.add('rssi-bullish');
+            else if (lastRssi < 41) container.classList.add('rssi-bearish');
+
             watermarkUpdate();
         }
         const onSizeUpdate = () => {
