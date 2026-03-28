@@ -400,7 +400,11 @@ async fn capture_ticker_charts(
             Some(df) => df,
             None => continue,
         };
-        let chart_html = match telegrambot::chart::render_single_tf_chart_html(tf, df, ticker) {
+        let last_rssi = telegrambot::chart::last_rssi_from_df(df);
+        let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
+        let chart_html = match telegrambot::chart::render_single_tf_chart_html(
+            tf, df, ticker, "[]", rssi_tint,
+        ) {
             Ok(html) => html,
             Err(e) => {
                 error!(tf = %tf_label, "Failed to render chart: {e:#}");

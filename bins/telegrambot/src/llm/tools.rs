@@ -131,7 +131,9 @@ pub async fn execute_tool_call(
                     ));
                 }
             };
-            let chart_html = render_single_tf_chart_html(&tf, df, ticker)?;
+            let last_rssi = crate::chart::last_rssi_from_df(df);
+            let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
+            let chart_html = render_single_tf_chart_html(&tf, df, ticker, "[]", rssi_tint)?;
 
             match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
                 Ok(_png) => Ok(format!(

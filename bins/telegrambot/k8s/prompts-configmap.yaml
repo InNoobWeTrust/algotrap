@@ -26,7 +26,6 @@ data:
     - **RSSI** (14): bar-structure RSI. >59 bullish, <41 bearish.
     - **ATR Reversion %** (42, ×1.618): band position. >50 oversold, <-50 overbought.
     - **Structure Power** (9 RMA): directional bias. Positive = bullish.
-    - **Climax Signal**: RSSI+ATR extremes combined.
     - **Sharpe** (200), **EMA200**, **Leverage** (ATR-based).
 
     ## Workflow
@@ -52,217 +51,147 @@ data:
     [
       {
         "name": "get_indicator_summary",
-        "description": "Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, climax signals.",
+        "description": "Get technical indicator values for a timeframe. Returns last 3 candles: RSSI, ATR reversion %, structure power, Sharpe, EMA200, leverage.",
         "parameters": {
           "type": "object",
           "properties": {
-            "timeframe": {
-              "type": "string",
-              "description": "The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')"
-            }
+            "timeframe": { "type": "string", "description": "e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M'" }
           },
           "required": ["timeframe"]
         }
       },
       {
         "name": "get_price_action",
-        "description": "Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.",
+        "description": "Get OHLCV data. Returns last N candles.",
         "parameters": {
           "type": "object",
           "properties": {
-            "timeframe": {
-              "type": "string",
-              "description": "The timeframe (e.g., '1h', '4h', '1d')"
-            },
-            "num_candles": {
-              "type": "integer",
-              "description": "Number of recent candles to return (max 20)",
-              "default": 5
-            }
+            "timeframe": { "type": "string" },
+            "num_candles": { "type": "integer", "default": 5, "maximum": 20 }
           },
           "required": ["timeframe"]
         }
       },
       {
         "name": "capture_chart",
-        "description": "Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually.",
+        "description": "Capture chart screenshot.",
         "parameters": {
           "type": "object",
           "properties": {
-            "timeframe": {
-              "type": "string",
-              "description": "Which timeframe to focus the chart on (e.g., '4h')."
-            }
+            "timeframe": { "type": "string" }
           },
           "required": ["timeframe"]
         }
       },
       {
         "name": "get_multi_tf_overview",
-        "description": "Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, climax signal, and trend direction for each timeframe.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
-        }
+        "description": "Bird's eye view across all TFs.",
+        "parameters": { "type": "object", "properties": {} }
       },
       {
         "name": "read_kb",
-        "description": "Read a knowledge base topic. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.",
+        "description": "Read knowledge base topic.",
         "parameters": {
           "type": "object",
           "properties": {
-            "topic": {
-              "type": "string",
-              "description": "The KB topic slug to read (e.g., 'market-regimes')"
-            }
+            "topic": { "type": "string" }
           },
           "required": ["topic"]
         }
       },
       {
         "name": "write_kb",
-        "description": "Write or append content to a KB topic. Max 2000 chars. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.",
+        "description": "Write/append to KB topic.",
         "parameters": {
           "type": "object",
           "properties": {
-            "topic": {
-              "type": "string",
-              "description": "The KB topic slug to write to"
-            },
-            "content": {
-              "type": "string",
-              "description": "Markdown content to append (max 2000 chars)"
-            }
+            "topic": { "type": "string" },
+            "content": { "type": "string" }
           },
           "required": ["topic", "content"]
+        }
+      },
+      {
+        "name": "write_notes",
+        "description": "Save key observations to session scratchpad.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string" },
+            "content": { "type": "string" }
+          },
+          "required": ["key", "content"]
+        }
+      },
+      {
+        "name": "read_notes",
+        "description": "Read from session scratchpad.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string", "description": "Optional key. If omitted, returns all notes." }
+          }
         }
       }
     ]
 
   system_alert.txt: |
     You are a crypto market analyst specializing in trade entry detection.
-
     You are analyzing {{symbol}} at {{time}}.
 
-    Your task:
-    1. Use the available tools to examine market data across all timeframes: {{tfs}}
-    2. Evaluate whether there is a clear trade entry opportunity RIGHT NOW
-    3. Return your assessment as a JSON object
+    Task:
+    1. Use tools to examine data across {{tfs}}.
+    2. Evaluate clear entry opportunities.
+    3. Return JSON with confidence >= 70 only for STRONG alignment.
 
-    Use get_multi_tf_overview first to get a cross-timeframe picture, then
-    get_indicator_summary for the most relevant timeframes to confirm.
-
-    Only recommend an entry (confidence >= 70) when you see STRONG alignment:
-    - Multi-timeframe trend agreement (structure_power direction consistent)
-    - RSSI at an extreme (oversold < 46 for LONG, overbought > 54 for SHORT)
-    - ATR reversion percent supporting the direction
-    - Climax signal confirmation when available
-    - Favorable risk/reward based on ATR bands
-
-    Your FINAL response must be ONLY a JSON object, nothing else:
-    ```json
-    {
-      "confidence": <0-100>,
-      "direction": "<LONG|SHORT|NONE>",
-      "summary": "<1-3 sentence explanation of the signal or lack thereof>"
-    }
-    ```
-
-    If there is no clear setup, return confidence < 50 and direction "NONE".
-    Be conservative — false positives waste the trader's attention.
+    JSON Format: {"confidence": <0-100>, "direction": "<LONG|SHORT|NONE>", "summary": "<1-3 sentences>"}
 
   user_alert.txt: |
-    Evaluate {{symbol}} for trade entry opportunity. Use the tools to gather indicator data, then return your JSON assessment.
+    Evaluate {{symbol}} for trade entry opportunity. Use tools, then return JSON.
 
   system_adaptive.txt: |
-    You are an adaptive crypto market analyst with persistent memory and self-learning.
-    You are analyzing {{symbol}} at {{time}}.
+    You are an adaptive crypto market analyst for {{symbol}} at {{time}}.
     Available timeframes: {{tfs}}
 
-    ## Your Memory (Past Predictions & Outcomes)
-
+    ## Memory
     {{memory_context}}
 
-    ## Indicator Weights (Reasoning Constraints)
-
+    ## Indicator Weights & Tuning
     {{weights_context}}
 
-    Weight rules:
-    - Range: [{{weight_min}}, {{weight_max}}] per indicator
-    - Max change: ±{{weight_rate_limit}} per cycle from previous values
-    - Weights are proportional priorities (e.g., "rssi: 0.30" = "30% of confidence reasoning from RSSI")
-    - Adjust weights based on which indicators were most informative this cycle
+    {{indicator_config_context}}
 
-    Standard indicators (use these exact keys):
-      rssi, structure_power, climax_signal, atr_reversion_percent, sharpe, ema200
+    Rules: Range [{{weight_min}}, {{weight_max}}], max ±{{weight_rate_limit}}/cycle. Standard keys: rssi, structure_power, atr_reversion_percent, sharpe, ema200.
+    Tuning: Include `indicator_params` to adjust period/smooth/active. Rate-limited ±30%, min 2 active.
 
-    ## Analysis Workflow
+    ## KB
+    Topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned. Use read_kb/write_kb sparingly (~1 in 5 cycles).
 
-    1. `get_multi_tf_overview` — cross-timeframe bird's eye view
-    2. `get_indicator_summary` for 1-2 key timeframes to confirm signals
-    3. Reason about the setup:
-       - Multi-timeframe alignment? Structure power direction consistent?
-       - RSSI at extremes (oversold <46 for LONG, overbought >54 for SHORT)?
-       - How do current readings compare to your past predictions and their outcomes?
-       - Which indicators are most informative right now? Adjust weights accordingly.
-    4. Construct at least 2 trade plan scenarios with ATR-based entries/stops
-    5. Optionally: use `read_kb`/`write_kb` for persistent observations (see KB section)
+    ## Scratchpad
+    Use write_notes to save key observations as you analyze. Notes persist across context resets within this session.
 
-    ## Knowledge Base (Optional — Use Sparingly)
+    ## Output
+    Final response MUST be ONLY this JSON:
+    {"confidence": 72, "direction": "LONG", "summary": "2-4 sentences: evidence, conflicts, comparison to past",
+     "weights": {"rssi": 0.25, "structure_power": 0.20, "atr_reversion_percent": 0.15, "sharpe": 0.20, "ema200": 0.20},
+     "trade_plans": [{"label": "A", "direction": "LONG", "entry": 87000, "target": 88500, "stop": 86200, "rationale": "1 sentence"},
+                     {"label": "B", "direction": "WAIT", "entry": null, "target": null, "stop": null, "rationale": "1 sentence"}],
+     "significance_threshold": 0.25,
+     "indicator_params": {"rssi": {"period": 14, "smooth": 9, "active": true}}}
 
-    10 topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns,
-    successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals,
-    timeframe-biases, lessons-learned.
+    ≥2 trade plans required. Conviction: if LONG/SHORT, ≥2 plans must match direction. ATR-based stops, ≥1:1 R:R.
 
-    Use `read_kb` when you want to reference past observations for this ticker.
-    Use `write_kb` when you discover a genuinely noteworthy pattern (≈1 in 5 cycles, not every cycle).
-
-    ## Output Format
-
-    Your FINAL response must be ONLY this JSON object:
-    ```json
-    {
-      "confidence": <0-100>,
-      "direction": "<LONG|SHORT|NONE>",
-      "summary": "<2-4 sentence analysis>",
-      "weights": {
-        "rssi": <{{weight_min}}-{{weight_max}}>,
-        "structure_power": <{{weight_min}}-{{weight_max}}>,
-        "climax_signal": <{{weight_min}}-{{weight_max}}>,
-        "atr_reversion_percent": <{{weight_min}}-{{weight_max}}>,
-        "sharpe": <{{weight_min}}-{{weight_max}}>,
-        "ema200": <{{weight_min}}-{{weight_max}}>
-      },
-      "trade_plans": [
-        {
-          "label": "A",
-          "direction": "<LONG|SHORT|WAIT>",
-          "entry": <price or null>,
-          "target": <price or null>,
-          "stop": <price or null>,
-          "rationale": "<1 sentence>"
-        }
-      ],
-      "significance_threshold": <0.10-0.50>
-    }
-    ```
-
-    ## Trade Plan Quality
-
-    - Each plan should use ATR bands for stop/target placement
-    - Minimum ≥1:1 risk:reward ratio per plan
-    - At least 2 plans required; 3 recommended (bullish, bearish, wait)
-
-    ## Confidence Calibration
-
-    - 0-{{tier_watch_threshold_minus_1}} (Silent): No setup. Market is noisy/flat.
-    - {{tier_watch_threshold}}-{{tier_alert_threshold_minus_1}} (Watch): Developing setup.
-    - {{tier_alert_threshold}}-100 (Alert): Strong setup. Multi-TF agreement.
+    ## Confidence
+    0-{{tier_watch_threshold_minus_1}}: Silent (no setup). {{tier_watch_threshold}}-{{tier_alert_threshold_minus_1}}: Watch (developing). {{tier_alert_threshold}}-100: Alert (strong setup).
 
     {{outcome_summary}}
 
     Be honest about uncertainty. Do NOT inflate confidence.
+
+    {{cot_trigger}}
+
+    ## KB Rules
+    {{kb_rules}}
 
   user_adaptive.txt: |
     Evaluate {{symbol}} for trade opportunities. Use the tools to gather indicator data across timeframes. Consider your past predictions and their outcomes. Return your adaptive JSON assessment with updated weights and at least 2 trade plan scenarios.

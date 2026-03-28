@@ -1,0 +1,355 @@
+
+<!DOCTYPE html>
+<html class="sl-theme-dark" style="font-size: 22px">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ symbol }} — {{ tf }} (InNoobWeTrust™)</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            min-height: 100%;
+            box-sizing: border-box;
+        }
+        #container {
+            height: 100%;
+        }
+        #container.tint-bullish {
+            background: rgba(0,137,123,0.05);
+        }
+        #container.tint-bearish {
+            background: rgba(136,14,79,0.05);
+        }
+        #overlay {
+            position: absolute;
+            top: 2.5%;
+            left: 2%;
+            z-index: 9999;
+        }
+    </style>
+  </head>
+  <body>
+    <div id="container" class="tint-{{ rssi_tint }}" data-symbol="{{ symbol }}" data-tf="{{ tf }}"></div>
+    <div id="overlay">
+        <div id="badges">
+            <sl-badge variant="neutral" pill>{{ tf }}</sl-badge>
+            <sl-badge variant="danger" pill>SL: {{ sl_percent }}%</sl-badge>
+            <sl-badge variant="success" pill>Tol: {{ tol_percent }}%</sl-badge>
+            <sl-badge id="atr-percent" variant="warning" pill>ATR: -</sl-badge>
+            <sl-badge id="leverage" variant="primary" pill>Lvrg: -</sl-badge>
+        </div>
+    </div>
+    <script id="dataset" type="application/json">
+        {{ dataset }}
+    </script>
+    <script type="text/javascript">
+        const data = JSON.parse(document.getElementById('dataset').textContent)
+            .map(d => ({
+                ...d,
+                time: Math.floor(d.time / 1000),
+            }));
+        const container = document.getElementById('container');
+        const atr_badge = document.getElementById('atr-percent');
+        const lvrg_badge = document.getElementById('leverage');
+
+        const chart = LightweightCharts.createChart(container, {
+            autoSize: true,
+            layout: {
+                background: { color: '#22222240' },
+                textColor: '#DDD',
+            },
+            grid: {
+                vertLines: { color: '#44444440' },
+                horzLines: { color: '#44444440' },
+            },
+            timeScale: {
+                timeVisible: true,
+            },
+        });
+        const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
+            priceFormat: { type: 'volume' },
+            priceScaleId: '',
+        });
+        volumeSeries.priceScale().applyOptions({
+            scaleMargins: { top: 0.8, bottom: 0 },
+        });
+        const volumeSmaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
+            lineColor: '#00000000',
+            topColor: '#FDD8354C',
+            bottomColor: '#FDD8352F',
+            priceFormat: { type: 'volume' },
+            priceScaleId: '',
+        });
+        volumeSmaSeries.priceScale().applyOptions({
+            scaleMargins: { top: 0.8, bottom: 0 },
+        });
+        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, {});
+        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
+        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
+        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
+        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
+        const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
+        const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 0 },
+            topLineColor: 'rgba(76, 175, 80, 0.3)',
+            topFillColor1: 'rgba(76, 175, 80, 0.2)',
+            topFillColor2: 'rgba(76, 175, 80, 0.5)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.3)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.5)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
+        }, 1);
+        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        const rssiMaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 50 },
+            topLineColor: 'rgba(76, 175, 80, 0.1)',
+            topFillColor1: 'rgba(76, 175, 80, 0.2)',
+            topFillColor2: 'rgba(76, 175, 80, 0.3)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.3)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
+        }, 2);
+        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
+        const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
+        const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
+
+        // Load data directly — single timeframe, no toggle needed
+        candlestickSeries.setData(data);
+        volumeSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.volume,
+            color: d.close >= d.open ? 'rgba(76,175,80,0.3)' : 'rgba(242,54,69,0.3)',
+        })));
+        volumeSmaSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.volume_sma,
+        })));
+        ema200Series.setData(data.map(d => ({
+            time: d.time,
+            value: d.ema200,
+            color: 'rgba(156, 39, 176, 0.5)',
+        })));
+        biasRevSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.bias_reversion,
+            color: 'rgba(178, 181, 190, 0.2)',
+        })));
+        atrUpperBandSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.atr_upperband,
+            color: 'rgba(76, 175, 80, 0.2)',
+        })));
+        atrLowerBandSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.atr_lowerband,
+            color: 'rgba(242, 54, 69, 0.2)',
+        })));
+        neutralRevRsiSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.neutral_revrsi,
+            color: 'rgba(178,181,190,0.2)',
+        })));
+        bullishBandSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.bullish_revrsi,
+            color: 'rgba(33,150,243,0.2)',
+        })));
+        bearishBandSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.bearish_revrsi,
+            color: 'rgba(255,152,0,0.2)',
+        })));
+        structurePwrSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.structure_power,
+            color: d.structure_power >= 0 ? 'rgba(0,137,123,1)' : 'rgba(136,14,79,1)',
+        })));
+        structurePwrSmaSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.structure_power_sma,
+        })));
+        rssiSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.rssi,
+            color: d.rssi > 59 ? 'rgba(76,175,79,1)' : d.rssi < 41 ? 'rgba(242,54,70,1)' : 'rgba(191,54,207,0.7)',
+        })));
+        rssiMaSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.rssi_ma,
+        })));
+        atrRevSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.atr_reversion_percent,
+            color: d.atr_reversion_percent > 50 ? 'rgba(76,175,80,0.5)' : d.atr_reversion_percent < -50 ? 'rgba(242,54,69,0.5)' : 'rgba(41,98,255,0.2)',
+        })));
+        sharpeSeries.setData(data.map(d => ({
+            time: d.time,
+            value: d.sharpe,
+            color: d.sharpe > 0 ? 'rgba(76,175,79,0.5)' : 'rgba(242,54,70,0.5)',
+        })));
+
+        // ─── Markers ───────────────────────────────────────────────────
+        const markers = [];
+
+        // ATR Climax circles
+        data.forEach(d => {
+            if (d.close >= d.atr_upperband) {
+                markers.push({
+                    time: d.time,
+                    position: 'aboveBar',
+                    shape: 'circle',
+                    color: 'rgba(157,225,159,0.7)',
+                    size: 3,
+                });
+            }
+            if (d.close <= d.atr_lowerband) {
+                markers.push({
+                    time: d.time,
+                    position: 'belowBar',
+                    shape: 'circle',
+                    color: 'rgba(201,134,134,0.7)',
+                    size: 3,
+                });
+            }
+        });
+
+        // ATR Reversion arrows
+        data.forEach(d => {
+            if (d.atr_reversion_percent > 50 && d.rssi < 46) {
+                markers.push({
+                    time: d.time,
+                    position: 'belowBar',
+                    shape: 'arrowUp',
+                    color: 'rgba(150,225,150,0.5)',
+                });
+            }
+            if (d.atr_reversion_percent < -50 && d.rssi > 54) {
+                markers.push({
+                    time: d.time,
+                    position: 'aboveBar',
+                    shape: 'arrowDown',
+                    color: 'rgba(220,80,80,0.5)',
+                });
+            }
+        });
+
+        // Biased candle arrows (pre-computed in Rust as `biased_candle` column)
+        // Values: 1 = strictly rising, -1 = strictly falling, 0 = none
+        data.forEach(d => {
+            if (d.biased_candle > 0) {
+                markers.push({
+                    time: d.time,
+                    position: 'belowBar',
+                    shape: 'arrowUp',
+                    color: 'rgba(33,150,243,0.8)',
+                });
+            }
+            if (d.biased_candle < 0) {
+                markers.push({
+                    time: d.time,
+                    position: 'aboveBar',
+                    shape: 'arrowDown',
+                    color: 'rgba(233,30,99,0.8)',
+                });
+            }
+        });
+
+        // Sort by time (LightweightCharts requirement) and set
+        markers.sort((a, b) => a.time - b.time);
+        markersSeries.setMarkers(markers);
+
+        // ─── Gap Zone Bands (ISeriesPrimitive box) ──────────────────────
+        // Inline box primitive — renders filled rectangles for gap zones
+        class GapZoneBandRenderer {
+            constructor(zones) { this._zones = zones; this._series = null; this._chart = null; }
+            update(series, chart) { this._series = series; this._chart = chart; }
+            draw(target) {
+                const s = this._series; const c = this._chart;
+                if (!s || !c) return;
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const ts = c.timeScale();
+                    const firstTime = data[0]?.time;
+                    const lastTime = data[data.length - 1]?.time;
+                    if (!firstTime || !lastTime) return;
+                    const xLeft = ts.timeToCoordinate(firstTime);
+                    const xRight = ts.timeToCoordinate(lastTime);
+                    if (xLeft === null || xRight === null) return;
+                    const ratio = scope.horizontalPixelRatio;
+                    const vRatio = scope.verticalPixelRatio;
+                    this._zones.forEach(z => {
+                        const yTop = s.priceToCoordinate(z.top);
+                        const yBot = s.priceToCoordinate(z.bottom);
+                        if (yTop === null || yBot === null) return;
+                        const opacity = Math.min(0.25, 0.05 + z.trust * 0.2);
+                        const borderOpacity = Math.min(0.5, 0.1 + z.trust * 0.4);
+                        ctx.fillStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,${opacity})`
+                            : `rgba(255,152,0,${opacity})`;
+                        const x = Math.round(xLeft * ratio);
+                        const w = Math.round((xRight - xLeft + 40) * ratio);
+                        const y = Math.round(Math.min(yTop, yBot) * vRatio);
+                        const h = Math.round(Math.abs(yBot - yTop) * vRatio);
+                        ctx.fillRect(x, y, w, h);
+                        // Top/bottom border lines
+                        ctx.strokeStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,${borderOpacity})`
+                            : `rgba(255,152,0,${borderOpacity})`;
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4 * ratio, 4 * ratio]);
+                        ctx.beginPath();
+                        ctx.moveTo(x, y); ctx.lineTo(x + w, y);
+                        ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                    });
+                });
+            }
+        }
+        class GapZonePaneView {
+            constructor(renderer) { this._renderer = renderer; }
+            renderer() { return this._renderer; }
+        }
+        class GapZonePrimitive {
+            constructor(zones) {
+                this._renderer = new GapZoneBandRenderer(zones);
+                this._paneView = new GapZonePaneView(this._renderer);
+            }
+            attached({ series, chart }) { this._renderer.update(series, chart); }
+            detached() { this._renderer.update(null, null); }
+            paneViews() { return [this._paneView]; }
+            updateAllViews() {}
+        }
+
+        const gapZones = JSON.parse('{{ gap_zones }}');
+        if (gapZones.length > 0) {
+            candlestickSeries.attachPrimitive(new GapZonePrimitive(gapZones));
+        }
+
+        // Update badges with latest candle data
+        const lastCandle = data.slice(-1)[0];
+        if (lastCandle) {
+            const atr = +(lastCandle.atr_percent * 100).toFixed(2);
+            const lvrg = Math.floor(lastCandle["leverage"]);
+            atr_badge.innerHTML = `ATR: ${atr}%`;
+            lvrg_badge.innerHTML = `x${lvrg}`;
+        }
+
+        // Set visible range and pane heights
+        requestAnimationFrame(() => {
+            const len = candlestickSeries.data().length;
+            chart.timeScale().setVisibleLogicalRange({ from: len - 128, to: len + 5 });
+            const containerHeight = container.getClientRects()[0].height;
+            chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
+        });
+    </script>
+  </body>
+</html>

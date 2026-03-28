@@ -110,6 +110,35 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
     let is_atr_gap = ohlc.is_atr_gap(gap_zone_period).alias("is_atr_gap");
     let body_ratio = ohlc.body_ratio().alias("body_ratio");
 
+    // Biased candle detection (Pine polyglot_lib L530-549 equivalent)
+    // Detects strong reversal candles with wick confirmation + momentum context
+    let spread = col("high") - col("low");
+    let body_top = max_horizontal([col("open"), col("close")]).unwrap();
+    let body_bot = min_horizontal([col("open"), col("close")]).unwrap();
+    let top_wick = (col("high") - body_top) / spread.clone();
+    let bottom_wick = (body_bot - col("low")) / spread.clone();
+    let hlc3 = (col("high") + col("low") + col("close")) / lit(3.0);
+    let candle_bias = (hlc3.clone() - col("low")) / spread.clone();
+    let prev_hlc3_falling = hlc3.clone().shift(lit(1)).gt(hlc3.clone().shift(lit(2)));
+    let prev_hlc3_rising = hlc3.clone().shift(lit(1)).lt(hlc3.clone().shift(lit(2)));
+    let stronger = spread.clone().gt(spread.clone().shift(lit(1)) * lit(1.5));
+
+    let strictly_rising = bottom_wick
+        .gt_eq(lit(0.236))
+        .and(candle_bias.clone().gt_eq(lit(0.5)))
+        .and(prev_hlc3_falling)
+        .and(stronger.clone());
+    let strictly_falling = top_wick
+        .gt_eq(lit(0.236))
+        .and(candle_bias.lt(lit(0.5)))
+        .and(prev_hlc3_rising)
+        .and(stronger);
+
+    let biased_candle = when(strictly_rising)
+        .then(lit(1i32))
+        .otherwise(when(strictly_falling).then(lit(-1i32)).otherwise(lit(0i32)))
+        .alias("biased_candle");
+
     vec![
         time_to_date,
         vol_sma,
@@ -130,6 +159,7 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
         sharpe_ratio,
         is_atr_gap,
         body_ratio,
+        biased_candle,
     ]
 }
 

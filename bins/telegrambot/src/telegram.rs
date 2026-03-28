@@ -367,6 +367,7 @@ mod tests {
             notification_cooldown_secs: 3600,
             timeout_secs: 30,
             supports_reasoning: false,
+            llm_debug: false,
         }
     }
 

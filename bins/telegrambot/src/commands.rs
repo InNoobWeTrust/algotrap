@@ -372,8 +372,10 @@ async fn run_manual_analysis(
             Some(df) => df,
             None => continue,
         };
+        let last_rssi = crate::chart::last_rssi_from_df(df);
+        let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
         let chart_html =
-            match crate::chart::render_single_tf_chart_html(tf, df, ticker) {
+            match crate::chart::render_single_tf_chart_html(tf, df, ticker, "[]", rssi_tint) {
                 Ok(html) => html,
                 Err(e) => {
                     error!(tf = %tf_label, "Failed to render chart: {e:#}");
