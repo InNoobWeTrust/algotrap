@@ -79,7 +79,7 @@ Refactor the telegrambot indicator system to support LLM-tunable parameters, sch
 - **Given** `indicator_config.params.sharpe = {period: 200, active: true}`
 - **When** the LLM responds with `"sharpe": {"active": false}`
 - **Then** `sharpe` is marked inactive
-- **And** sharpe is excluded from next cycle's computation and not shown in indicator summaries
+- **And** sharpe is still computed (other indicators or post-collect logic may depend on it), but not shown in indicator summaries or multi-TF overview
 - **And** sharpe appears in the dormant roster in the system prompt
 
 ### Scenario 10: Toggle — dormant roster re-enablement
@@ -115,16 +115,20 @@ Refactor the telegrambot indicator system to support LLM-tunable parameters, sch
 - **When** the bot starts
 - **Then** `IndicatorConfig` is initialized with default params:
 
-| Indicator | Period | Smooth | Range | Active |
-|-----------|--------|--------|-------|--------|
-| rssi | 14 | — | [7, 28] | true |
-| atr | 42 | — | [14, 56] | true |
-| ema_trend | 200 | — | [50, 500] | true |
-| sharpe | 200 | — | [50, 500] | true |
-| structure_power | 9 | 16 | [5, 20] each | true |
-| bias_reversion | 9 | — | [5, 20] | true |
+| Indicator | Period | Smooth | Period Range | Smooth Range | Active |
+|-----------|--------|--------|-------------|-------------|--------|
+| rssi | 14 | 9 | [5, 50] | [3, 30] | true |
+| structure_power | — | 9 | — | [3, 30] | true |
+| atr | 42 | — | [10, 100] | — | true |
+| ema200 | 200 | — | [50, 500] | — | true |
+| sharpe | 200 | — | [50, 500] | — | true |
+| bias_reversion | — | 9 | — | [3, 30] | true |
+| revrsi | 14 | — | [5, 50] | — | true |
+| gap_zones | 42 (atr_period) | 50 (max_zones) | [14, 56] | [10, 100] | true |
 
+- **And** `gap_zones` additionally has `min_trust: 0.3` (range [0.0, 0.9], exempt from rate limiting)
 - **And** all indicators default to `active = true`
+- **And** `active_count()` returns 8
 
 ### Scenario 15: LLM omits indicator_params entirely
 
@@ -139,6 +143,7 @@ Refactor the telegrambot indicator system to support LLM-tunable parameters, sch
 - Rate limit: max ±30% change from previous value per cycle
 - Minimum 2 active derived indicators at all times
 - OHLC is base-tier data, never disableable
+- **Compute-all, show-selectively**: All indicators are always computed regardless of active/inactive status. The toggle only controls whether the indicator appears in the LLM's context (indicator summaries, multi-TF overview). This ensures downstream consumers (e.g., gap zone trust scoring reads `rssi` column) are never broken by toggling.
 - **Schema reset triggers on indicator key set changes ONLY** (indicator added/removed from the pipeline). Param tuning and active/inactive toggling do NOT trigger resets.
 - **Stateful vs stateless indicators**: Stateless indicators (rssi, atr, ema, sharpe) are recomputed from OHLC each cycle — param changes apply naturally. Stateful indicators (e.g., ATR Gap Zones) accumulate state over time — param changes require recomputation of their accumulated state from the full OHLC series, but do NOT trigger a prediction/weight reset.
 - KB data is never cleared by schema reset (it's ticker-personality, not schema-dependent)
@@ -160,30 +165,30 @@ Refactor the telegrambot indicator system to support LLM-tunable parameters, sch
 
 | # | Scenario | Impl Status | Impl Artifact | Test Status | Test Artifact | Notes |
 |---|----------|-------------|---------------|-------------|---------------|-------|
-| 1 | Keys match — retain | ⬚ | — | ⬚ | — | |
-| 2 | Key added — reset | ⬚ | — | ⬚ | — | |
-| 3 | Key removed — reset | ⬚ | — | ⬚ | — | |
-| 4 | Param tune — no reset | ⬚ | — | ⬚ | — | |
-| 5 | Climax removal | ⬚ | — | ⬚ | — | |
-| 6 | Tunable params happy | ⬚ | — | ⬚ | — | |
-| 7 | Params out of range | ⬚ | — | ⬚ | — | |
-| 8 | Params rate limited | ⬚ | — | ⬚ | — | |
-| 9 | Toggle deactivate | ⬚ | — | ⬚ | — | |
-| 10 | Toggle re-enable | ⬚ | — | ⬚ | — | |
-| 11 | Min active guardrail | ⬚ | — | ⬚ | — | |
-| 12 | OHLC always present | ⬚ | — | ⬚ | — | |
-| 13 | Regime change suggest | ⬚ | — | ⬚ | — | |
-| 14 | Default config init | ⬚ | — | ⬚ | — | |
-| 15 | LLM omits params | ⬚ | — | ⬚ | — | |
+| 1 | Keys match — retain | ✓ | `memory.rs:check_schema_compatibility` | ✓ | `test_schema_compat_keys_match` | |
+| 2 | Key added — reset | ✓ | `memory.rs:check_schema_compatibility` | ✓ | `test_schema_compat_key_added` | |
+| 3 | Key removed — reset | ✓ | `memory.rs:check_schema_compatibility` | ✓ | `test_schema_compat_key_removed` | |
+| 4 | Param tune — no reset | ✓ | `memory.rs:apply_proposed` | ◐ | logic verified via schema compat tests | No direct test: param change + verify predictions retained |
+| 5 | Climax removal | ✓ | `data.rs` pipeline | ◐ | verified via grep: no climax in data pipeline | Residual `climax` refs in weight/scoring tests |
+| 6 | Tunable params happy | ✓ | `memory.rs:apply_proposed` | ✓ | `test_indicator_config_rate_limited_tuning` | |
+| 7 | Params out of range | ✓ | `memory.rs:apply_proposed` via ParamSpec clamp | ◐ | covered by rate limit test | No dedicated out-of-range-only test |
+| 8 | Params rate limited | ✓ | `memory.rs:apply_proposed` | ✓ | `test_indicator_config_rate_limited_tuning` | |
+| 9 | Toggle deactivate | ✓ | `memory.rs:apply_proposed` | ✓ | `test_indicator_config_tick_dormant` | |
+| 10 | Toggle re-enable | ✓ | `memory.rs:apply_proposed` | ◐ | covered by min-active test (active toggle logic) | |
+| 11 | Min active guardrail | ✓ | `memory.rs:apply_proposed` | ✓ | `test_indicator_config_min_active_guardrail` | |
+| 12 | OHLC always present | ✓ | `data.rs:indicators()` always includes OHLC | ⊘ | — | By construction: OHLC is base data, not in IndicatorConfig |
+| 13 | Regime change suggest | ⬚ | — | ⬚ | — | Not yet implemented |
+| 14 | Default config init | ✓ | `memory.rs:IndicatorConfig::default()` | ✓ | `test_indicator_config_defaults` | |
+| 15 | LLM omits params | ✓ | `llm/mod.rs:parse_analysis_result` | ◐ | covered by parse tests | No dedicated omission test |
 
 **Status legend**: ⬚ pending · ◐ partial · ✓ complete · ⊘ N/A
 
 ### Gap Summary
 
 - **Scenarios total**: 15
-- **Implemented**: 0 / 15
-- **Tested**: 0 / 15
-- **Blocking gaps**: All scenarios pending
+- **Implemented**: 14 / 15
+- **Tested**: 7 full + 5 partial / 15
+- **Blocking gaps**: Scenario 13 (regime change suggestion) not yet implemented. Residual `climax` references in test fixtures (scoring.rs, memory.rs weight tests).
 
 ---
 

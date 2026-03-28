@@ -122,11 +122,11 @@ A price-structure indicator for `algotrap` that detects abnormal candles closing
 
 Gap zone detection has 3 LLM-tunable params, managed through the `IndicatorConfig` system (see `indicator-architecture-v2.md`):
 
-| Param | Default | Range | Rationale |
-|-------|---------|-------|-----------|
-| `atr_period` | 42 | [14, 56] | ATR lookback for "normal" range. Shorter = more sensitive to recent vol (more gaps detected). Longer = catches only extreme moves. |
-| `max_zones` | 50 | [10, 100] | Queue depth for historical gaps. More zones = longer memory of S/R levels. |
-| `min_trust` | 0.3 | [0.0, 0.9] | Minimum body/wick ratio to record a gap. Higher = stricter quality filter. |
+| Param        | Default | Range      | Rationale                                                                                                                          |
+| ------------ | ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `atr_period` | 42      | [14, 56]   | ATR lookback for "normal" range. Shorter = more sensitive to recent vol (more gaps detected). Longer = catches only extreme moves. |
+| `max_zones`  | 50      | [10, 100]  | Queue depth for historical gaps. More zones = longer memory of S/R levels.                                                         |
+| `min_trust`  | 0.3     | [0.0, 0.9] | Minimum body/wick ratio to record a gap. Higher = stricter quality filter.                                                         |
 
 All params follow the same guardrails as other indicators: range clamping, no-op guard. `atr_period` and `max_zones` use ±30% rate limiting. `min_trust` is exempt from rate limiting — it's a quality filter threshold, not a computational parameter, so the LLM should be able to adjust it freely within range.
 
@@ -154,21 +154,21 @@ All params follow the same guardrails as other indicators: range clamping, no-op
 
 ## Traceability Matrix
 
-| # | Scenario | Impl Status | Impl Artifact | Test Status | Test Artifact | Notes |
-|---|----------|-------------|---------------|-------------|---------------|-------|
-| 1 | Bullish gap detection | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_bullish_gap` | |
-| 2 | Bearish gap detection | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_bearish_gap` | |
-| 3 | Normal candle no gap | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_normal_candle_no_gap` | |
-| 4 | Doji within band | ✓ | `src/ta/gap_zones.rs` | ⊘ | — | Covered by logic: close must be outside band |
-| 5 | Doji outside band low trust | ✓ | `src/ta/gap_zones.rs` | ◐ | `test_min_trust_filter` | Trust calc tested via scenario 13 |
-| 6 | Sized queue eviction | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_queue_limit` | |
-| 7 | Overlap density multi | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_overlap_density` | |
-| 8 | Overlap density none | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_no_overlap` | |
-| 9 | LLM context output | ✓ | `llm/tools.rs` | ✓ | `test_gap_zone_summary` | |
-| 10 | Empty history | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_empty_history` | |
-| 11 | Gap aging | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_bullish_gap` (age=0) | age_bars embedded in detection |
-| 12 | LLM tunes params | ✓ | `memory.rs` | ✓ | `test_indicator_config_rate_limited_tuning` | Via IndicatorConfig system |
-| 13 | Gap rejected by min_trust | ✓ | `src/ta/gap_zones.rs` | ✓ | `test_min_trust_filter` | |
+| #   | Scenario                    | Impl Status | Impl Artifact         | Test Status | Test Artifact                               | Notes                                        |
+| --- | --------------------------- | ----------- | --------------------- | ----------- | ------------------------------------------- | -------------------------------------------- |
+| 1   | Bullish gap detection       | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_bullish_gap`                          |                                              |
+| 2   | Bearish gap detection       | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_bearish_gap`                          |                                              |
+| 3   | Normal candle no gap        | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_normal_candle_no_gap`                 |                                              |
+| 4   | Doji within band            | ✓           | `src/ta/gap_zones.rs` | ⊘           | —                                           | Covered by logic: close must be outside band |
+| 5   | Doji outside band low trust | ✓           | `src/ta/gap_zones.rs` | ◐           | `test_min_trust_filter`                     | Trust calc tested via scenario 13            |
+| 6   | Sized queue eviction        | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_queue_limit`                          |                                              |
+| 7   | Overlap density multi       | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_overlap_density`                      |                                              |
+| 8   | Overlap density none        | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_no_overlap`                           |                                              |
+| 9   | LLM context output          | ✓           | `llm/tools.rs`        | ✓           | `test_gap_zone_summary`                     |                                              |
+| 10  | Empty history               | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_empty_history`                        |                                              |
+| 11  | Gap aging                   | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_bullish_gap` (age=0)                  | age_bars embedded in detection               |
+| 12  | LLM tunes params            | ✓           | `memory.rs`           | ✓           | `test_indicator_config_rate_limited_tuning` | Via IndicatorConfig system                   |
+| 13  | Gap rejected by min_trust   | ✓           | `src/ta/gap_zones.rs` | ✓           | `test_min_trust_filter`                     |                                              |
 
 **Status legend**: ⬚ pending · ◐ partial · ✓ complete · ⊘ N/A
 
@@ -189,12 +189,12 @@ All params follow the same guardrails as other indicators: range clamping, no-op
 
 ### Debate Record
 
-| # | Vector | Challenge | Response | Verdict |
-|---|--------|-----------|----------|---------|
-| 1 | assumptions | ATR compression after vol squeeze causes many false positives — normal candles look "abnormal" | Two layers of defense: (1) trust score + min_trust filter removes low-quality gaps; (2) `atr_period` is LLM-tunable — if squeeze causes noise, LLM can increase the period to widen the band. | challenger-won |
-| 2 | edge cases | Close exactly at band edge (`close == open + ATR`) — abnormal or not? | Strict inequality `>` means band-touch is NOT abnormal. Gap thesis requires breaking through, not touching. | challenger-won |
-| 3 | edge cases | min_trust filter has no scenario — gaps can be detected but never filtered | Added Scenario 13: gap rejected when trust < min_trust | challenger-won |
-| 4 | alternatives | ±30% rate limit on min_trust float is awkward (0.3 ±30% = [0.21, 0.39]) | min_trust is a quality filter threshold, not a computational param — exempt from rate limiting. LLM can adjust freely within range. | challenger-won |
+| #   | Vector       | Challenge                                                                                      | Response                                                                                                                                                                                      | Verdict        |
+| --- | ------------ | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| 1   | assumptions  | ATR compression after vol squeeze causes many false positives — normal candles look "abnormal" | Two layers of defense: (1) trust score + min_trust filter removes low-quality gaps; (2) `atr_period` is LLM-tunable — if squeeze causes noise, LLM can increase the period to widen the band. | challenger-won |
+| 2   | edge cases   | Close exactly at band edge (`close == open + ATR`) — abnormal or not?                          | Strict inequality `>` means band-touch is NOT abnormal. Gap thesis requires breaking through, not touching.                                                                                   | challenger-won |
+| 3   | edge cases   | min_trust filter has no scenario — gaps can be detected but never filtered                     | Added Scenario 13: gap rejected when trust < min_trust                                                                                                                                        | challenger-won |
+| 4   | alternatives | ±30% rate limit on min_trust float is awkward (0.3 ±30% = [0.21, 0.39])                        | min_trust is a quality filter threshold, not a computational param — exempt from rate limiting. LLM can adjust freely within range.                                                           | challenger-won |
 
 ### Challenge Summary
 
@@ -214,5 +214,6 @@ All params follow the same guardrails as other indicators: range clamping, no-op
 
 - This indicator is **stateful** — gap zones accumulate over candle history. Unlike stateless indicators (rssi, atr) where param changes apply naturally on the next cycle, changing gap zone params (e.g., `atr_period`) invalidates all previously accumulated gaps.
 - **Design choice: recompute from full OHLC series each cycle.** The bot already fetches complete candle history, so gap zones are recalculated fresh each cycle with current params. This means param changes apply naturally without requiring a separate state invalidation mechanism.
-- The `detect_gap_zones` function belongs in `algotrap::ta::experimental` following the `OhlcExperimental` pattern
+- Gap zone detection lives in `algotrap::ta::gap_zones` as free functions (`is_atr_gap`, `body_ratio`) returning lazy `Expr`, plus pure-Rust structs/functions for post-collect aggregation (`GapZone`, `overlap_density`, `gap_zone_summary`).
 - Trust score acts as a quality filter — the LLM should weight high-trust gap clusters more heavily
+
