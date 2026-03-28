@@ -88,6 +88,9 @@ pub struct IndicatorParams {
     /// Optional smoothing parameter (e.g., EMA smooth window).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<ParamSpec>,
+    /// Quality-filter threshold (e.g., min_trust for gap zones). Exempt from rate limiting.
+    #[serde(default)]
+    pub min_trust: Option<ParamSpec>,
     /// Whether this indicator is currently active.
     #[serde(default = "default_true")]
     pub active: bool,
@@ -116,30 +119,35 @@ impl Default for IndicatorConfig {
         indicators.insert("rssi".into(), IndicatorParams {
             period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
             smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+            min_trust: None,
             active: true,
             inactive_cycles: 0,
         });
         indicators.insert("structure_power".into(), IndicatorParams {
             period: None,
             smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+            min_trust: None,
             active: true,
             inactive_cycles: 0,
         });
         indicators.insert("atr".into(), IndicatorParams {
             period: Some(ParamSpec::new(42.0, 10.0, 100.0)),
             smooth: None,
+            min_trust: None,
             active: true,
             inactive_cycles: 0,
         });
         indicators.insert("ema200".into(), IndicatorParams {
             period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
             smooth: None,
+            min_trust: None,
             active: true,
             inactive_cycles: 0,
         });
         indicators.insert("sharpe".into(), IndicatorParams {
             period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
             smooth: None,
+            min_trust: None,
             active: true,
             inactive_cycles: 0,
         });
@@ -147,6 +155,7 @@ impl Default for IndicatorConfig {
         indicators.insert("bias_reversion".into(), IndicatorParams {
             period: None,
             smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+            min_trust: None,
             active: true,
             inactive_cycles: 0,
         });
@@ -154,6 +163,16 @@ impl Default for IndicatorConfig {
         indicators.insert("revrsi".into(), IndicatorParams {
             period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
             smooth: None,
+            min_trust: None,
+            active: true,
+            inactive_cycles: 0,
+        });
+        // ATR Gap Zones — stateful indicator
+        // period = atr_period, smooth = max_zones, min_trust = quality filter
+        indicators.insert("gap_zones".into(), IndicatorParams {
+            period: Some(ParamSpec::new(42.0, 14.0, 56.0)),
+            smooth: Some(ParamSpec::new(50.0, 10.0, 100.0)), // max_zones
+            min_trust: Some(ParamSpec::new(0.3, 0.0, 0.9)),
             active: true,
             inactive_cycles: 0,
         });
@@ -201,6 +220,30 @@ impl IndicatorConfig {
             .filter(|(_, p)| !p.active)
             .map(|(name, p)| (name.as_str(), p.inactive_cycles))
             .collect()
+    }
+
+    /// Construct GapZoneParams from the gap_zones indicator config.
+    pub fn gap_zone_params(&self) -> algotrap::ta::gap_zones::GapZoneParams {
+        let defaults = algotrap::ta::gap_zones::GapZoneParams::default();
+        algotrap::ta::gap_zones::GapZoneParams {
+            atr_period: self.period("gap_zones", defaults.atr_period),
+            max_zones: self.smooth("gap_zones", defaults.max_zones), // max_zones stored in smooth
+            min_trust: self
+                .indicators
+                .get("gap_zones")
+                .and_then(|p| p.min_trust.as_ref())
+                .map(|s| s.clamped())
+                .unwrap_or(defaults.min_trust),
+        }
+    }
+
+    /// Get a tunable min_trust value for an indicator, falling back to default.
+    pub fn min_trust(&self, name: &str, default: f64) -> f64 {
+        self.indicators
+            .get(name)
+            .and_then(|p| p.min_trust.as_ref())
+            .map(|s| s.clamped())
+            .unwrap_or(default)
     }
 
     /// Increment inactive_cycles for all dormant indicators.
@@ -266,6 +309,13 @@ impl IndicatorConfig {
                     let max_change = old * RATE_LIMIT;
                     let delta = (new_val - old).clamp(-max_change, max_change);
                     spec.value = (old + delta).clamp(spec.min, spec.max);
+                }
+            }
+
+            // Handle min_trust tuning (EXEMPT from rate limiting — quality filter)
+            if let Some(new_val) = value.get("min_trust").and_then(|v| v.as_f64()) {
+                if let Some(ref mut spec) = params.min_trust {
+                    spec.value = new_val.clamp(spec.min, spec.max);
                 }
             }
         }
@@ -602,7 +652,7 @@ mod tests {
         assert_eq!(ic.period("atr", 999), 42);
         assert_eq!(ic.smooth("rssi", 999), 9);
         assert!(ic.is_active("rssi"));
-        assert_eq!(ic.active_count(), 7);
+        assert_eq!(ic.active_count(), 8);
         assert!(ic.dormant_roster().is_empty());
     }
 
