@@ -60,6 +60,218 @@ impl Default for Weights {
     }
 }
 
+/// A single tunable parameter with bounds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamSpec {
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl ParamSpec {
+    pub fn new(value: f64, min: f64, max: f64) -> Self {
+        Self { value, min, max }
+    }
+
+    /// Clamp to bounds.
+    pub fn clamped(&self) -> f64 {
+        self.value.clamp(self.min, self.max)
+    }
+}
+
+/// Tunable parameters for a single indicator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorParams {
+    /// Optional period parameter (e.g., RSI period, ATR period).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period: Option<ParamSpec>,
+    /// Optional smoothing parameter (e.g., EMA smooth window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<ParamSpec>,
+    /// Whether this indicator is currently active.
+    #[serde(default = "default_true")]
+    pub active: bool,
+    /// Cycles since this indicator was deactivated (0 if active).
+    #[serde(default)]
+    pub inactive_cycles: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Per-ticker indicator configuration, persisted and LLM-tunable.
+///
+/// Keys are indicator group names (e.g., "rssi", "atr", "structure_power").
+/// OHLC is always-on and not part of this config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorConfig {
+    pub indicators: HashMap<String, IndicatorParams>,
+}
+
+impl Default for IndicatorConfig {
+    fn default() -> Self {
+        let mut indicators = HashMap::new();
+
+        indicators.insert("rssi".into(), IndicatorParams {
+            period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
+            smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+            active: true,
+            inactive_cycles: 0,
+        });
+        indicators.insert("structure_power".into(), IndicatorParams {
+            period: None,
+            smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+            active: true,
+            inactive_cycles: 0,
+        });
+        indicators.insert("atr".into(), IndicatorParams {
+            period: Some(ParamSpec::new(42.0, 10.0, 100.0)),
+            smooth: None,
+            active: true,
+            inactive_cycles: 0,
+        });
+        indicators.insert("ema200".into(), IndicatorParams {
+            period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
+            smooth: None,
+            active: true,
+            inactive_cycles: 0,
+        });
+        indicators.insert("sharpe".into(), IndicatorParams {
+            period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
+            smooth: None,
+            active: true,
+            inactive_cycles: 0,
+        });
+        // bias_reversion is a dependency of atr_reversion_percent, always active
+        indicators.insert("bias_reversion".into(), IndicatorParams {
+            period: None,
+            smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+            active: true,
+            inactive_cycles: 0,
+        });
+        // revrsi group inherits period from rssi config
+        indicators.insert("revrsi".into(), IndicatorParams {
+            period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
+            smooth: None,
+            active: true,
+            inactive_cycles: 0,
+        });
+
+        Self { indicators }
+    }
+}
+
+impl IndicatorConfig {
+    /// Get a tunable period value for an indicator, falling back to default.
+    pub fn period(&self, name: &str, default: usize) -> usize {
+        self.indicators
+            .get(name)
+            .and_then(|p| p.period.as_ref())
+            .map(|s| s.clamped() as usize)
+            .unwrap_or(default)
+    }
+
+    /// Get a tunable smooth value for an indicator, falling back to default.
+    pub fn smooth(&self, name: &str, default: usize) -> usize {
+        self.indicators
+            .get(name)
+            .and_then(|p| p.smooth.as_ref())
+            .map(|s| s.clamped() as usize)
+            .unwrap_or(default)
+    }
+
+    /// Check if an indicator is active.
+    pub fn is_active(&self, name: &str) -> bool {
+        self.indicators
+            .get(name)
+            .map(|p| p.active)
+            .unwrap_or(true) // Unknown indicators default to active
+    }
+
+    /// Count active derived indicators (excludes OHLC base tier).
+    pub fn active_count(&self) -> usize {
+        self.indicators.values().filter(|p| p.active).count()
+    }
+
+    /// Get the dormant roster: inactive indicators with their cycle counts.
+    pub fn dormant_roster(&self) -> Vec<(&str, u32)> {
+        self.indicators
+            .iter()
+            .filter(|(_, p)| !p.active)
+            .map(|(name, p)| (name.as_str(), p.inactive_cycles))
+            .collect()
+    }
+
+    /// Increment inactive_cycles for all dormant indicators.
+    pub fn tick_dormant(&mut self) {
+        for params in self.indicators.values_mut() {
+            if !params.active {
+                params.inactive_cycles += 1;
+            }
+        }
+    }
+
+    /// Apply LLM-proposed param changes with guardrails.
+    ///
+    /// - Range clamping: values clamped to [min, max]
+    /// - Rate limiting: ±30% change per cycle (except exempt fields)
+    /// - Min-2-active: cannot deactivate below 2 active derived indicators
+    pub fn apply_proposed(
+        &mut self,
+        proposed: &HashMap<String, serde_json::Value>,
+    ) {
+        const RATE_LIMIT: f64 = 0.30;
+        const MIN_ACTIVE: usize = 2;
+
+        // Pre-compute active count to avoid borrow conflicts
+        let mut active_count = self.indicators.values().filter(|p| p.active).count();
+
+        for (name, value) in proposed {
+            let Some(params) = self.indicators.get_mut(name) else {
+                continue; // Unknown indicator, skip
+            };
+
+            // Handle active toggle
+            if let Some(active) = value.get("active").and_then(|v| v.as_bool()) {
+                if !active && params.active {
+                    // Trying to deactivate — check min-2-active guardrail
+                    if active_count > MIN_ACTIVE {
+                        params.active = false;
+                        params.inactive_cycles = 0;
+                        active_count -= 1;
+                    }
+                    // else: silently reject (can't go below MIN_ACTIVE)
+                } else if active && !params.active {
+                    params.active = true;
+                    params.inactive_cycles = 0;
+                    active_count += 1;
+                }
+            }
+
+            // Handle period tuning
+            if let Some(new_val) = value.get("period").and_then(|v| v.as_f64()) {
+                if let Some(ref mut spec) = params.period {
+                    let old = spec.value;
+                    let max_change = old * RATE_LIMIT;
+                    let delta = (new_val - old).clamp(-max_change, max_change);
+                    spec.value = (old + delta).clamp(spec.min, spec.max);
+                }
+            }
+
+            // Handle smooth tuning
+            if let Some(new_val) = value.get("smooth").and_then(|v| v.as_f64()) {
+                if let Some(ref mut spec) = params.smooth {
+                    let old = spec.value;
+                    let max_change = old * RATE_LIMIT;
+                    let delta = (new_val - old).clamp(-max_change, max_change);
+                    spec.value = (old + delta).clamp(spec.min, spec.max);
+                }
+            }
+        }
+    }
+}
+
 /// Snapshot of indicator values from the last notification (for delta detection).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NotifiedSnapshot {
@@ -75,6 +287,9 @@ pub struct TickerMemory {
     pub predictions: Vec<Prediction>,
     pub weights: Weights,
     pub last_notified: NotifiedSnapshot,
+    /// Per-indicator tunable parameters — LLM-adjustable each cycle.
+    #[serde(default)]
+    pub indicator_config: IndicatorConfig,
 }
 
 impl TickerMemory {
@@ -85,6 +300,7 @@ impl TickerMemory {
             predictions: Vec::new(),
             weights: Weights::default(),
             last_notified: NotifiedSnapshot::default(),
+            indicator_config: IndicatorConfig::default(),
         }
     }
 }
@@ -377,5 +593,57 @@ mod tests {
         let mut mem = TickerMemory::new("TEST");
         let reset = check_schema_compatibility(&mut mem, &["rssi", "close"]);
         assert!(!reset); // No predictions = nothing to compare, skip
+    }
+
+    #[test]
+    fn test_indicator_config_defaults() {
+        let ic = IndicatorConfig::default();
+        assert_eq!(ic.period("rssi", 999), 14);
+        assert_eq!(ic.period("atr", 999), 42);
+        assert_eq!(ic.smooth("rssi", 999), 9);
+        assert!(ic.is_active("rssi"));
+        assert_eq!(ic.active_count(), 7);
+        assert!(ic.dormant_roster().is_empty());
+    }
+
+    #[test]
+    fn test_indicator_config_rate_limited_tuning() {
+        let mut ic = IndicatorConfig::default();
+        // RSSI period is 14.0. Requesting 100 should be rate-limited to +30% = 14 * 1.3 = 18.2
+        let proposed = HashMap::from([
+            ("rssi".to_string(), serde_json::json!({"period": 100})),
+        ]);
+        ic.apply_proposed(&proposed);
+        let new_period = ic.period("rssi", 999);
+        assert!(new_period <= 19, "Rate limit should cap at ~18, got {new_period}");
+        assert!(new_period >= 17, "Should increase, got {new_period}");
+    }
+
+    #[test]
+    fn test_indicator_config_min_active_guardrail() {
+        let mut ic = IndicatorConfig::default();
+        // Try to deactivate all 7 indicators — should stop at 2 active
+        let mut proposed = HashMap::new();
+        for name in ["rssi", "structure_power", "atr", "ema200", "sharpe", "bias_reversion", "revrsi"] {
+            proposed.insert(name.to_string(), serde_json::json!({"active": false}));
+        }
+        ic.apply_proposed(&proposed);
+        assert!(ic.active_count() >= 2, "Min-2-active guardrail failed: {}", ic.active_count());
+    }
+
+    #[test]
+    fn test_indicator_config_tick_dormant() {
+        let mut ic = IndicatorConfig::default();
+        // Deactivate one
+        let proposed = HashMap::from([
+            ("sharpe".to_string(), serde_json::json!({"active": false})),
+        ]);
+        ic.apply_proposed(&proposed);
+        assert!(!ic.is_active("sharpe"));
+        ic.tick_dormant();
+        ic.tick_dormant();
+        let dormant = ic.dormant_roster();
+        let sharpe_entry = dormant.iter().find(|(n, _)| *n == "sharpe");
+        assert_eq!(sharpe_entry.unwrap().1, 2);
     }
 }

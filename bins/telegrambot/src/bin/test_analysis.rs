@@ -43,7 +43,8 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
         // 1. Fetch data
         println!("\n📡 Fetching market data for {}...", ticker.symbol);
-        let all_dfs = data::fetch_all_data(&bingx, ticker).await?;
+        let ic = telegrambot::memory::IndicatorConfig::default();
+        let all_dfs = data::fetch_all_data(&bingx, ticker, &ic).await?;
         println!("✅ Fetched {} timeframes", all_dfs.len());
 
         for (tf, df) in &all_dfs {

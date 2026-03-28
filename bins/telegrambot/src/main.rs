@@ -144,7 +144,7 @@ async fn scan_ticker(
     telegrambot::memory::check_schema_compatibility(&mut mem, INDICATOR_KEYS);
 
     // 2. Fetch market data
-    let all_dfs = data::fetch_all_data(bingx, ticker).await?;
+    let all_dfs = data::fetch_all_data(bingx, ticker, &mem.indicator_config).await?;
     info!(
         symbol = %ticker.symbol,
         timeframes = all_dfs.len(),
@@ -258,6 +258,13 @@ async fn scan_ticker(
     if let Some(threshold) = result.significance_threshold {
         mem.weights.significance_threshold = threshold.clamp(0.0, 1.0);
     }
+
+    // 10.5. Apply indicator parameter tuning (if LLM proposed any)
+    if let Some(ref proposed_params) = result.proposed_indicator_params {
+        mem.indicator_config.apply_proposed(proposed_params);
+    }
+    // Tick dormant indicator cycle counters
+    mem.indicator_config.tick_dormant();
 
     // 11. Store prediction in memory (always, even if Silent)
     let prediction = telegrambot::memory::Prediction {

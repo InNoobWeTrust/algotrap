@@ -49,6 +49,8 @@ pub struct AnalysisResult {
     /// True if trade plan directions align with the declared direction.
     /// NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
     pub conviction_aligned: bool,
+    /// LLM-proposed indicator parameter tuning (optional, absent = no-op).
+    pub proposed_indicator_params: Option<HashMap<String, serde_json::Value>>,
 }
 
 // ─── Agent Entry Point ───────────────────────────────────────────────────────
@@ -171,6 +173,7 @@ pub async fn run_agent(
         proposed_weights: None,
         significance_threshold: None,
         conviction_aligned: true, // NONE is always aligned
+        proposed_indicator_params: None,
     })
 }
 
@@ -191,6 +194,7 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
             proposed_weights: None,
             significance_threshold: None,
             conviction_aligned: true, // Full analysis has no direction constraint
+            proposed_indicator_params: None,
         },
         AnalysisMode::AlertScan => parse_alert_json(&text),
     }
@@ -276,6 +280,13 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                     warn!("LLM response missing 'significance_threshold' — retaining previous value");
                 }
 
+                // Parse indicator params (if present — absent = no-op)
+                let proposed_indicator_params = v["indicator_params"].as_object().map(|obj| {
+                    obj.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<HashMap<String, serde_json::Value>>()
+                });
+
                 // Conviction check: do trade plans align with declared direction?
                 let conviction_aligned = check_conviction(&direction, &trade_plans);
                 if !conviction_aligned {
@@ -298,6 +309,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                     proposed_weights,
                     significance_threshold,
                     conviction_aligned,
+                    proposed_indicator_params,
                 };
             }
         }
@@ -313,6 +325,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
         proposed_weights: None,
         significance_threshold: None,
         conviction_aligned: true, // NONE is always aligned
+        proposed_indicator_params: None,
     }
 }
 

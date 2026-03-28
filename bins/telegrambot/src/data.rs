@@ -16,6 +16,7 @@ use crate::config::TickerConf;
 pub async fn fetch_all_data(
     client: &ext::bingx::BingXClient,
     ticker: &TickerConf,
+    ic: &crate::memory::IndicatorConfig,
 ) -> Result<HashMap<Timeframe, DataFrame>, Box<dyn core::error::Error + Send + Sync>> {
     let all_dfs = join_all(
         ticker
@@ -38,7 +39,7 @@ pub async fn fetch_all_data(
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
             let df =
-                process_data(klines.as_slice(), ticker).expect("Failed to process data");
+                process_data(klines.as_slice(), ticker, ic).expect("Failed to process data");
             Some((tf, df))
         }
         Err(err) => {
@@ -53,7 +54,7 @@ pub async fn fetch_all_data(
 
 // ─── Indicators ──────────────────────────────────────────────────────────────
 
-pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
+pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> Vec<Expr> {
     let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
 
     let time_to_date = col("time")
@@ -65,26 +66,34 @@ pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
 
     let vol_sma = col("volume").ema(20).alias("volume_sma");
 
-    let bias_rev = ohlc.bias_reversion_smoothed(9).alias("bias_reversion");
-    let ema200 = col("close").ema(200).alias("ema200");
+    let bias_smooth = ic.smooth("bias_reversion", 9);
+    let bias_rev = ohlc.bias_reversion_smoothed(bias_smooth).alias("bias_reversion");
 
+    let ema_period = ic.period("ema200", 200);
+    let ema200 = col("close").ema(ema_period).alias("ema200");
+
+    let revrsi_period = ic.period("revrsi", 14);
     let neutral_revrsi = (col("open") + ohlc.bar_bias())
-        .rev_rsi(14, 50.)
+        .rev_rsi(revrsi_period, 50.)
         .alias("neutral_revrsi");
-    let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("bullish_revrsi");
-    let bearish_revrsi = col("low").rev_rsi(14, 30.).alias("bearish_revrsi");
+    let bullish_revrsi = col("high").rev_rsi(revrsi_period, 70.).alias("bullish_revrsi");
+    let bearish_revrsi = col("low").rev_rsi(revrsi_period, 30.).alias("bearish_revrsi");
 
-    let atr = ohlc.atr(42).alias("ATR");
+    let atr_period = ic.period("atr", 42);
+    let atr = ohlc.atr(atr_period).alias("ATR");
     let atr_osc = (atr.clone() * lit(1.618)).alias("atr_oscillation");
     let atr_upperband = (col("open") + atr_osc.clone()).alias("atr_upperband");
     let atr_lowerband = (col("open") - atr_osc.clone()).alias("atr_lowerband");
     let atr_percent = (atr.clone() / col("open")).alias("atr_percent");
 
-    let structure_pwr = ohlc.bar_bias().rma(9).alias("structure_power");
+    let sp_smooth = ic.smooth("structure_power", 9);
+    let structure_pwr = ohlc.bar_bias().rma(sp_smooth).alias("structure_power");
     let structure_pwr_sma = structure_pwr.clone().sma(16).alias("structure_power_sma");
 
-    let rssi = ohlc.rssi(14).alias("rssi");
-    let rssi_ma = rssi.clone().ema(9).alias("rssi_ma");
+    let rssi_period = ic.period("rssi", 14);
+    let rssi_smooth = ic.smooth("rssi", 9);
+    let rssi = ohlc.rssi(rssi_period).alias("rssi");
+    let rssi_ma = rssi.clone().ema(rssi_smooth).alias("rssi_ma");
 
     let atr_rev_percent = ohlc
         .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
@@ -92,7 +101,9 @@ pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
 
     let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
-    let sharpe_ratio = col("close").sharpe(200).alias("sharpe");
+
+    let sharpe_period = ic.period("sharpe", 200);
+    let sharpe_ratio = col("close").sharpe(sharpe_period).alias("sharpe");
 
     vec![
         time_to_date,
@@ -118,8 +129,9 @@ pub fn indicators(ticker: &TickerConf) -> Vec<Expr> {
 pub fn process_data(
     klines: &[Kline],
     ticker: &TickerConf,
+    ic: &crate::memory::IndicatorConfig,
 ) -> Result<DataFrame, Box<dyn core::error::Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df.lazy().with_columns(indicators(ticker)).collect().unwrap();
+    let df_with_indicators = df.lazy().with_columns(indicators(ticker, ic)).collect().unwrap();
     Ok(df_with_indicators)
 }

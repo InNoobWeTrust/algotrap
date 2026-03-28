@@ -360,8 +360,9 @@ async fn run_manual_analysis(
     (llm::AnalysisResult, Vec<(String, Vec<u8>)>),
     Box<dyn core::error::Error + Send + Sync>,
 > {
-    // 1. Fetch market data
-    let all_dfs = data::fetch_all_data(&state.bingx, ticker).await?;
+    // 1. Fetch market data (manual mode uses default indicator config)
+    let ic = crate::memory::IndicatorConfig::default();
+    let all_dfs = data::fetch_all_data(&state.bingx, ticker, &ic).await?;
 
     // 2. Capture chart screenshots for all TFs
     let mut tf_charts: Vec<(String, Vec<u8>)> = Vec::new();
