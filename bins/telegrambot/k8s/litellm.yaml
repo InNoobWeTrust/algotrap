@@ -18,6 +18,7 @@ data:
           model: github_copilot/gpt-5-mini
           reasoning_effort: high
           max_completion_tokens: 4096
+          include_reasoning: true
       - model_name: gpt-4.1
         litellm_params:
           model: github_copilot/gpt-4.1

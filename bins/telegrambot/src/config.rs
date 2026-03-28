@@ -46,6 +46,8 @@ pub struct EnvConf {
     pub llm_api_base: String,
     pub llm_api_key: String,
     pub llm_model: String,
+    #[serde(default)]
+    pub llm_debug: bool,
 
     // Browserless
     pub browserless_url: String,

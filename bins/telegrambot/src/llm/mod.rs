@@ -144,6 +144,25 @@ pub async fn run_agent(
         let choice = response.choices.first().ok_or("No response from LLM")?;
         let assistant_msg = &choice.message;
 
+        // Debug output for internal reasoning and usage
+        if conf.llm_debug {
+            println!("\n--- [LLM Turn {}] ---", turn);
+            let response_json = serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
+            
+            if let Some(usage) = response_json.get("usage") {
+                println!("📊 [Usage]: {}", serde_json::to_string(usage).unwrap_or_default());
+            }
+
+            let msg_json = serde_json::to_value(assistant_msg).unwrap_or(serde_json::Value::Null);
+            if let Some(reasoning) = msg_json.get("reasoning_content").and_then(|v| v.as_str()) {
+                println!("🧠 [Reasoning]:\n{}", reasoning);
+            }
+            if let Some(ref content) = assistant_msg.content {
+                println!("💬 [Content]:\n{}", content);
+            }
+            println!("-----------------------\n");
+        }
+
         // Check if the LLM wants to call tools
         match &assistant_msg.tool_calls {
             Some(tool_calls) if !tool_calls.is_empty() => {
@@ -259,6 +278,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
             .count();
         matching >= 2 // At least 2 of 3 plans should match
     }
+
     // Try to find a JSON block in the text
     if let Some(start) = text.find('{') {
         if let Some(end) = text.rfind('}') {
