@@ -19,6 +19,15 @@ Weight rules:
 Standard indicators (use these exact keys):
   rssi, structure_power, atr_reversion_percent, sharpe, ema200
 
+## Indicator Tuning (Optional)
+
+{{indicator_config_context}}
+
+You MAY include an `indicator_params` object in your response to tune indicator parameters.
+Each indicator can have: `period` (int), `smooth` (int), `active` (bool).
+Changes are rate-limited to ±30% per cycle and clamped to valid ranges.
+At least 2 indicators must remain active at all times.
+
 ## Analysis Workflow
 
 1. `get_multi_tf_overview` — cross-timeframe bird's eye view
@@ -73,7 +82,10 @@ Your FINAL response must be ONLY this JSON object:
       "rationale": "<1 sentence>"
     }
   ],
-  "significance_threshold": <0.10-0.50, how much indicator change triggers re-notification; 0.25 = 25% change>
+  "significance_threshold": <0.10-0.50, how much indicator change triggers re-notification; 0.25 = 25% change>,
+  "indicator_params": {
+    "<indicator_name>": {"period": <int>, "smooth": <int>, "active": <bool>}
+  }
 }
 ```
 

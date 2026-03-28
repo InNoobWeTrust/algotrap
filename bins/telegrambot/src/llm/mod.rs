@@ -392,7 +392,8 @@ fn render_prompt(
                 .replace("{{memory_context}}", &format_memory_context(mem))
                 .replace("{{weights_context}}", &format_weights_context(mem))
                 .replace("{{outcome_summary}}", &format_outcome_summary(mem))
-                .replace("{{kb_rules}}", &format_kb_rules(mem));
+                .replace("{{kb_rules}}", &format_kb_rules(mem))
+                .replace("{{indicator_config_context}}", &format_indicator_config_context(mem));
         }
         None => {
             rendered = rendered
@@ -411,6 +412,10 @@ fn render_prompt(
                 .replace(
                     "{{kb_rules}}",
                     "No accuracy data yet — KB rules will activate after 3+ scored predictions.",
+                )
+                .replace(
+                    "{{indicator_config_context}}",
+                    "Default indicator settings. All indicators active with standard periods.",
                 );
         }
     }
@@ -566,8 +571,43 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
     }
 }
 
+/// Format indicator config into a readable block for prompt injection.
+fn format_indicator_config_context(mem: &TickerMemory) -> String {
+    let ic = &mem.indicator_config;
+    let mut lines = vec!["Current indicator settings:".to_string()];
+
+    // Sort indicator names for stable output
+    let mut names: Vec<&String> = ic.indicators.keys().collect();
+    names.sort();
+
+    for name in names {
+        let params = &ic.indicators[name];
+        let status = if params.active { "✅" } else { "❌" };
+        let mut parts = vec![format!("  {status} {name}")];
+
+        if let Some(ref spec) = params.period {
+            parts.push(format!("period={:.0} [{:.0}-{:.0}]", spec.value, spec.min, spec.max));
+        }
+        if let Some(ref spec) = params.smooth {
+            parts.push(format!("smooth={:.0} [{:.0}-{:.0}]", spec.value, spec.min, spec.max));
+        }
+        lines.push(parts.join(" "));
+    }
+
+    let dormant = ic.dormant_roster();
+    if !dormant.is_empty() {
+        lines.push("\nDormant indicators (consider reactivating):".to_string());
+        for (name, cycles) in dormant {
+            lines.push(format!("  {name}: inactive for {cycles} cycles"));
+        }
+    }
+
+    lines.join("\n")
+}
+
 
 // ─── Chat History Compression ────────────────────────────────────────────────
+
 
 /// Compress older messages via a separate LLM call for semantic summarization.
 ///
