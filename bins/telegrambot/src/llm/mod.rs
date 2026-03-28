@@ -89,14 +89,48 @@ pub async fn run_agent(
             .into(),
     ];
 
+    // Session-scoped scratchpad for LLM working memory (Scenario 10: empty at start)
+    let mut session_scratchpad: HashMap<String, String> = HashMap::new();
+    let mut handoff_attempts: u8 = 0;
+
     const MAX_TURNS: usize = 10;
 
     for turn in 0..MAX_TURNS {
         info!(turn, "LLM agent turn");
 
-        // Compress chat history when it exceeds the configured limit.
-        if messages.len() > conf.keep_recent_messages + 1 {
-            compress_history(llm_client, conf, &mut messages).await?;
+        // Handoff check: when messages exceed threshold, manage context
+        let handoff_threshold = conf.keep_recent_messages * 2 + 1; // +1 for system msg
+        if messages.len() > handoff_threshold {
+            if !session_scratchpad.is_empty() {
+                // Scenario 4: Scratchpad has entries → instant context reset
+                context_reset(&mut messages, &session_scratchpad)?;
+                handoff_attempts = 0;
+            } else if handoff_attempts == 0 {
+                // Scenario 5: First forced handoff directive
+                messages.push(
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content("⚠️ Context limit approaching. Call write_notes with key 'handoff' to save your current analysis state before history is cleared.")
+                        .build()?
+                        .into(),
+                );
+                handoff_attempts = 1;
+                continue; // Give the LLM a turn to respond
+            } else if handoff_attempts == 1 {
+                // Scenario 6: Second forced handoff directive (stronger)
+                messages.push(
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content("⚠️ You MUST call write_notes('handoff', '<your observations>') NOW. No other actions.")
+                        .build()?
+                        .into(),
+                );
+                handoff_attempts = 2;
+                continue; // Give the LLM one more turn
+            } else {
+                // Scenario 7: LLM ignored both directives → fallback to compress_history
+                warn!("LLM refused handoff; falling back to compress_history");
+                compress_history(llm_client, conf, &mut messages).await?;
+                handoff_attempts = 0;
+            }
         }
 
         let mut req_builder = CreateChatCompletionRequestArgs::default();
@@ -137,7 +171,7 @@ pub async fn run_agent(
                     let ic = memory
                         .map(|m| &m.indicator_config)
                         .unwrap_or(&default_ic);
-                    let result = execute_tool_call(tool_call, all_dfs, conf, ticker, ic).await?;
+                    let result = execute_tool_call(tool_call, all_dfs, conf, ticker, ic, &mut session_scratchpad).await?;
 
                     debug!(
                         tool = %tool_call.function.name,
@@ -387,7 +421,8 @@ fn render_prompt(
         .replace(
             "{{tier_alert_threshold_minus_1}}",
             &format!("{:.0}", conf.tier_alert_threshold - 1.0),
-        );
+        )
+        .replace("{{cot_trigger}}", &cot_trigger_text(conf));
 
     // Memory-dependent context
     match memory {
@@ -397,7 +432,10 @@ fn render_prompt(
                 .replace("{{weights_context}}", &format_weights_context(mem))
                 .replace("{{outcome_summary}}", &format_outcome_summary(mem))
                 .replace("{{kb_rules}}", &format_kb_rules(mem))
-                .replace("{{indicator_config_context}}", &format_indicator_config_context(mem));
+                .replace("{{indicator_config_context}}", &format_indicator_config_context(
+                    mem,
+                    crate::scoring::is_low_accuracy_streak(&mem.predictions, 5, 0.4),
+                ));
         }
         None => {
             rendered = rendered
@@ -575,8 +613,28 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
     }
 }
 
+/// Generate CoT trigger text based on model capability.
+///
+/// When `supports_reasoning` is true (model has native reasoning like reasoning_effort),
+/// returns empty string — CoT would cause double-reasoning waste.
+/// When false, returns a 3-line chain-of-thought trigger to improve analysis quality.
+fn cot_trigger_text(conf: &EnvConf) -> String {
+    if conf.supports_reasoning {
+        String::new()
+    } else {
+        "Before producing your final JSON, think step by step:\n\
+         1. What do the indicators across timeframes tell me?\n\
+         2. Does this align with or contradict my past predictions?\n\
+         3. What is my honest confidence level given all evidence?"
+            .to_string()
+    }
+}
+
 /// Format indicator config into a readable block for prompt injection.
-fn format_indicator_config_context(mem: &TickerMemory) -> String {
+///
+/// When `low_accuracy_streak` is true and there are dormant indicators, appends
+/// a regime-change nudge (Scenario 13).
+fn format_indicator_config_context(mem: &TickerMemory, low_accuracy_streak: bool) -> String {
     let ic = &mem.indicator_config;
     let mut lines = vec!["Current indicator settings:".to_string()];
 
@@ -601,8 +659,13 @@ fn format_indicator_config_context(mem: &TickerMemory) -> String {
     let dormant = ic.dormant_roster();
     if !dormant.is_empty() {
         lines.push("\nDormant indicators (consider reactivating):".to_string());
-        for (name, cycles) in dormant {
+        for (name, cycles) in &dormant {
             lines.push(format!("  {name}: inactive for {cycles} cycles"));
+        }
+
+        // Scenario 13: regime change nudge when accuracy is critically low
+        if low_accuracy_streak {
+            lines.push("Your accuracy has dropped. Consider re-enabling dormant indicators to see if they carry signal in the current regime.".to_string());
         }
     }
 
@@ -611,6 +674,45 @@ fn format_indicator_config_context(mem: &TickerMemory) -> String {
 
 
 // ─── Chat History Compression ────────────────────────────────────────────────
+
+/// Reset context by dropping all messages except system prompt and injecting
+/// scratchpad notes as a user message.
+///
+/// This is the zero-cost alternative to `compress_history` — no extra LLM call needed.
+fn context_reset(
+    messages: &mut Vec<ChatCompletionRequestMessage>,
+    scratchpad: &HashMap<String, String>,
+) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    // Format scratchpad entries in deterministic order (Scenario 9)
+    let mut keys: Vec<&String> = scratchpad.keys().collect();
+    keys.sort();
+    let notes: Vec<String> = keys
+        .iter()
+        .map(|k| format!("[{}]: {}", k, scratchpad[k.as_str()]))
+        .collect();
+    let notes_text = notes.join("\n");
+
+    // Keep only system message
+    let system_msg = messages[0].clone();
+    messages.clear();
+    messages.push(system_msg);
+
+    // Inject scratchpad as user message
+    messages.push(
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(format!("[Your analysis notes from earlier turns]:\n{notes_text}"))
+            .build()?
+            .into(),
+    );
+
+    info!(
+        keys = ?keys,
+        notes_len = notes_text.len(),
+        "Context reset: injected scratchpad notes"
+    );
+
+    Ok(())
+}
 
 
 /// Compress older messages via a separate LLM call for semantic summarization.
@@ -793,6 +895,91 @@ That's all."#;
         let text = r#"{"confidence": 80, "direction": "long", "summary": "Go long"}"#;
         let result = parse_alert_json(text);
         assert_eq!(result.direction, "LONG");
+    }
+
+    #[test]
+    fn test_context_reset_injects_notes() {
+        // Scenario 4 + 9: context reset with sorted keys
+        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content("system prompt")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("old user msg")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("another old msg")
+                .build()
+                .unwrap()
+                .into(),
+        ];
+
+        let mut scratchpad = HashMap::new();
+        scratchpad.insert("observations".to_string(), "RSSI at 72".to_string());
+        scratchpad.insert("conflicts".to_string(), "TF disagreement".to_string());
+
+        context_reset(&mut messages, &scratchpad).unwrap();
+
+        // Should have system + notes injection = 2 messages
+        assert_eq!(messages.len(), 2);
+        // Notes should be in alphabetical order (conflicts before observations)
+        if let ChatCompletionRequestMessage::User(msg) = &messages[1] {
+            let content = format!("{:?}", msg.content);
+            assert!(content.contains("[conflicts]"));
+            assert!(content.contains("[observations]"));
+            // Verify alphabetical order
+            let conflicts_pos = content.find("[conflicts]").unwrap();
+            let observations_pos = content.find("[observations]").unwrap();
+            assert!(conflicts_pos < observations_pos, "Keys should be alphabetically sorted");
+        } else {
+            panic!("Expected user message with notes");
+        }
+    }
+
+    #[test]
+    fn test_cot_trigger_when_no_reasoning() {
+        use crate::config::EnvConf;
+
+        // Build a minimal EnvConf with supports_reasoning = false
+        let env: HashMap<String, String> = [
+            ("TICKERS", r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"4h","default_tf":"4h"}]"#),
+            ("TELEGRAM_BOT_TOKEN", "test"),
+            ("TELEGRAM_CHAT_ID", "-100"),
+            ("LLM_API_BASE", "http://localhost:4000/v1"),
+            ("LLM_API_KEY", "sk-test"),
+            ("LLM_MODEL", "test-model"),
+            ("BROWSERLESS_URL", "http://localhost:3000"),
+        ].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        assert!(!conf.supports_reasoning);
+        let trigger = cot_trigger_text(&conf);
+        assert!(trigger.contains("step by step"));
+    }
+
+    #[test]
+    fn test_cot_trigger_suppressed_when_reasoning() {
+        use crate::config::EnvConf;
+
+        let env: HashMap<String, String> = [
+            ("TICKERS", r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"4h","default_tf":"4h"}]"#),
+            ("TELEGRAM_BOT_TOKEN", "test"),
+            ("TELEGRAM_CHAT_ID", "-100"),
+            ("LLM_API_BASE", "http://localhost:4000/v1"),
+            ("LLM_API_KEY", "sk-test"),
+            ("LLM_MODEL", "test-model"),
+            ("BROWSERLESS_URL", "http://localhost:3000"),
+            ("SUPPORTS_REASONING", "true"),
+        ].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        assert!(conf.supports_reasoning);
+        let trigger = cot_trigger_text(&conf);
+        assert!(trigger.is_empty());
     }
 }
 

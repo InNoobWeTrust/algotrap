@@ -22,7 +22,11 @@ where
 {
     let s = String::deserialize(deserializer)?;
     s.split(',')
-        .map(|tf| tf.trim().parse::<Timeframe>().map_err(serde::de::Error::custom))
+        .map(|tf| {
+            tf.trim()
+                .parse::<Timeframe>()
+                .map_err(serde::de::Error::custom)
+        })
         .collect()
 }
 
@@ -87,6 +91,12 @@ pub struct EnvConf {
     // HTTP request timeout
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+
+    /// Whether the LLM model supports native reasoning (e.g., reasoning_effort param).
+    /// When true, CoT prompting is suppressed (prevents double-reasoning waste).
+    /// When false (default), a chain-of-thought trigger is appended to the system prompt.
+    #[serde(default)]
+    pub supports_reasoning: bool,
 }
 
 /// Deserialize `TICKERS` env var: a JSON array of TickerConf objects.
@@ -221,10 +231,7 @@ mod tests {
         assert_eq!(conf.memory_dir, "/data/memory");
         assert_eq!(conf.timeout_secs, 30);
         assert_eq!(conf.prompts_dir, "config/prompts");
-        assert_eq!(
-            conf.change_detection_indicators,
-            "rssi,structure_power"
-        );
+        assert_eq!(conf.change_detection_indicators, "rssi,structure_power");
     }
 
     #[test]
@@ -264,5 +271,20 @@ mod tests {
         env.insert("TICKERS".into(), "[]".into());
         let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
         assert!(conf.tickers.is_empty());
+    }
+
+    #[test]
+    fn test_supports_reasoning_default() {
+        let env = base_env();
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        assert!(!conf.supports_reasoning); // defaults to false
+    }
+
+    #[test]
+    fn test_supports_reasoning_enabled() {
+        let mut env = base_env();
+        env.insert("SUPPORTS_REASONING".into(), "true".into());
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        assert!(conf.supports_reasoning);
     }
 }

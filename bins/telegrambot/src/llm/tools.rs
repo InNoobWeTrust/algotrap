@@ -67,6 +67,7 @@ pub async fn execute_tool_call(
     conf: &EnvConf,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
+    scratchpad: &mut HashMap<String, String>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
 
@@ -163,6 +164,42 @@ pub async fn execute_tool_call(
             match crate::kb::write_topic(&conf.memory_dir, topic, content) {
                 Ok(msg) => Ok(msg),
                 Err(e) => Ok(format!("Failed to write KB: {e}")),
+            }
+        }
+        "write_notes" => {
+            let key = args["key"]
+                .as_str()
+                .unwrap_or("default")
+                .to_string();
+            let content = args["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            scratchpad.insert(key, content);
+            Ok("Noted.".to_string())
+        }
+        "read_notes" => {
+            let key = args.get("key").and_then(|v| v.as_str());
+            match key {
+                Some(k) => {
+                    match scratchpad.get(k) {
+                        Some(content) => Ok(content.clone()),
+                        None => Ok(format!("No notes found for key '{k}'.")),
+                    }
+                }
+                None => {
+                    if scratchpad.is_empty() {
+                        Ok("No notes saved yet.".to_string())
+                    } else {
+                        let mut keys: Vec<&String> = scratchpad.keys().collect();
+                        keys.sort(); // Deterministic order
+                        let entries: Vec<String> = keys
+                            .iter()
+                            .map(|k| format!("[{}]: {}", k, scratchpad[k.as_str()]))
+                            .collect();
+                        Ok(entries.join("\n"))
+                    }
+                }
             }
         }
         _ => Ok(format!("Unknown tool: {}", tool_call.function.name)),
@@ -282,36 +319,41 @@ fn compute_gap_zone_context(
     df: &DataFrame,
     ic: &crate::memory::IndicatorConfig,
 ) -> Option<String> {
-    use algotrap::ta::gap_zones;
+    use algotrap::ta::gap_zones::{self, is_atr_gap, body_ratio};
 
-    let opens = df.column("open").ok()?.f64().ok()?;
-    let highs = df.column("high").ok()?.f64().ok()?;
-    let lows = df.column("low").ok()?.f64().ok()?;
-    let closes = df.column("close").ok()?.f64().ok()?;
-
-    // Collect into Vec<f64>, skipping nulls (shouldn't happen for OHLC)
-    let o: Vec<f64> = opens.into_no_null_iter().collect();
-    let h: Vec<f64> = highs.into_no_null_iter().collect();
-    let l: Vec<f64> = lows.into_no_null_iter().collect();
-    let c: Vec<f64> = closes.into_no_null_iter().collect();
-
-    if o.is_empty() {
+    if df.height() == 0 {
         return None;
     }
 
     let params = ic.gap_zone_params();
-    let zones = gap_zones::detect_gap_zones(&o, &h, &l, &c, &params);
+
+    // Use pre-computed columns if available, fallback to on-the-fly
+    let working_df = if df.column("is_atr_gap").is_ok() && df.column("body_ratio").is_ok() {
+        df.clone()
+    } else {
+        let ohlc: algotrap::ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
+        df.clone()
+            .lazy()
+            .with_columns([
+                is_atr_gap(&ohlc, params.atr_period).alias("is_atr_gap"),
+                body_ratio(&ohlc).alias("body_ratio"),
+            ])
+            .collect()
+            .ok()?
+    };
+
+    let zones = gap_zones::extract_gap_zones(&working_df, &params);
 
     if zones.is_empty() {
         return Some("Gap zones: none detected".to_string());
     }
 
-    let current_price = *c.last()?;
+    let closes = df.column("close").ok()?.f64().ok()?;
+    let current_price = closes.get(closes.len() - 1)?;
     let summary = gap_zones::gap_zone_summary(&zones, current_price);
 
     let nearest_str = match summary.nearest_gap {
-        Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})")
-            ,
+        Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})"),
         None => String::new(),
     };
 

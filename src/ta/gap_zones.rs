@@ -4,7 +4,10 @@
 //! closes outside its ATR band. Overlapping gap zones at a given price identify
 //! high-conviction support/resistance levels.
 
+use polars::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use super::prelude::*;
 
 /// A single detected gap zone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,79 +52,98 @@ impl Default for GapZoneParams {
     }
 }
 
-/// Detect gap zones from OHLC data.
+/// Lazy expression: is this candle an ATR gap?
+/// Returns a boolean expression: `close > open + atr` OR `close < open - atr`.
+/// Composes from the existing `atr()` in `ta/volatility.rs`.
+pub fn is_atr_gap(ohlc: &Ohlc, atr_period: usize) -> Expr {
+    let current_atr = atr(ohlc, atr_period);
+    let upper = ohlc[0].clone() + current_atr.clone();
+    let lower = ohlc[0].clone() - current_atr;
+    ohlc[3].clone().gt(upper).or(ohlc[3].clone().lt(lower))
+}
+
+/// Lazy expression: body-to-wick ratio.
+/// Returns `abs(close - open) / (high - low)`, 0 if zero-range candle.
+pub fn body_ratio(ohlc: &Ohlc) -> Expr {
+    let body = (ohlc[3].clone() - ohlc[0].clone()).abs();
+    let wick = ohlc[1].clone() - ohlc[2].clone();
+    when(wick.clone().gt(lit(0.0)))
+        .then(body / wick)
+        .otherwise(lit(0.0))
+}
+
+/// Trait for gap zone lazy expressions on OHLC arrays.
+pub trait OhlcGapZones {
+    fn is_atr_gap(&self, atr_period: usize) -> Expr;
+    fn body_ratio(&self) -> Expr;
+}
+
+impl OhlcGapZones for Ohlc {
+    fn is_atr_gap(&self, atr_period: usize) -> Expr {
+        is_atr_gap(self, atr_period)
+    }
+    fn body_ratio(&self) -> Expr {
+        body_ratio(self)
+    }
+}
+
+/// Extract gap zones from a materialized DataFrame.
 ///
-/// This is a stateful computation — each call recomputes from the full series.
-/// ATR is computed using a simple rolling average of true range (matching the
-/// algotrap ATR implementation behavior).
-///
-/// Returns a Vec of GapZones sorted by age (most recent first).
-pub fn detect_gap_zones(
-    opens: &[f64],
-    highs: &[f64],
-    lows: &[f64],
-    closes: &[f64],
-    params: &GapZoneParams,
-) -> Vec<GapZone> {
-    let n = opens.len();
-    if n < params.atr_period + 1 {
+/// Reads pre-computed `is_atr_gap` and `body_ratio` columns, plus `rssi` for
+/// composite trust scoring. This runs on filtered output (~10-50 rows).
+pub fn extract_gap_zones(df: &DataFrame, params: &GapZoneParams) -> Vec<GapZone> {
+    let n = df.height();
+    if n == 0 {
         return vec![];
     }
 
-    // Compute true range series
-    let mut tr = vec![0.0; n];
-    tr[0] = highs[0] - lows[0]; // First bar: just HL range
-    for i in 1..n {
-        let hl = highs[i] - lows[i];
-        let hc = (highs[i] - closes[i - 1]).abs();
-        let lc = (lows[i] - closes[i - 1]).abs();
-        tr[i] = hl.max(hc).max(lc);
-    }
+    let is_gap = match df.column("is_atr_gap").ok().and_then(|c| c.bool().ok()) {
+        Some(col) => col.clone(),
+        None => return vec![],
+    };
+    let br = match df.column("body_ratio").ok().and_then(|c| c.f64().ok()) {
+        Some(col) => col.clone(),
+        None => return vec![],
+    };
+    let opens = match df.column("open").ok().and_then(|c| c.f64().ok()) {
+        Some(col) => col.clone(),
+        None => return vec![],
+    };
+    let closes = match df.column("close").ok().and_then(|c| c.f64().ok()) {
+        Some(col) => col.clone(),
+        None => return vec![],
+    };
+    // RSSI for composite trust — optional (degrades gracefully)
+    let rssi_col = df.column("rssi").ok().and_then(|c| c.f64().ok()).cloned();
 
-    // Compute ATR using RMA (recursive moving average)
-    let mut atr = vec![0.0; n];
-    // Seed: simple average of first `atr_period` true ranges
-    let seed: f64 = tr[..params.atr_period].iter().sum::<f64>() / params.atr_period as f64;
-    atr[params.atr_period - 1] = seed;
-    let alpha = 1.0 / params.atr_period as f64;
-    for i in params.atr_period..n {
-        atr[i] = alpha * tr[i] + (1.0 - alpha) * atr[i - 1];
-    }
-
-    // Scan for abnormal candles starting from where ATR is valid
     let mut zones: Vec<GapZone> = Vec::new();
-    for i in params.atr_period..n {
-        let open = opens[i];
-        let high = highs[i];
-        let low = lows[i];
-        let close = closes[i];
-        let current_atr = atr[i];
 
-        // Abnormal: close outside ATR band around open
-        let upper = open + current_atr;
-        let lower = open - current_atr;
-        let is_abnormal = close > upper || close < lower;
-
-        if !is_abnormal {
+    for i in 0..n {
+        let gap = is_gap.get(i).unwrap_or(false);
+        if !gap {
             continue;
         }
 
-        // Trust score: body / wick ratio
-        let wick = high - low;
-        let trust = if wick > 0.0 {
-            ((close - open).abs() / wick).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-
-        // Filter by min_trust
-        if trust < params.min_trust {
+        let ratio = br.get(i).unwrap_or(0.0);
+        if ratio < params.min_trust {
             continue;
         }
 
+        let open = opens.get(i).unwrap_or(0.0);
+        let close = closes.get(i).unwrap_or(0.0);
         let bottom = open.min(close);
         let top = open.max(close);
-        let age_bars = n - 1 - i; // Distance from last bar
+        let age_bars = n - 1 - i;
+
+        // Composite trust: body_ratio * (0.5 + 0.5 * rssi_strength)
+        let trust = match &rssi_col {
+            Some(rssi) => {
+                let rssi_val = rssi.get(i).unwrap_or(50.0);
+                let rssi_strength = (rssi_val - 50.0).abs() / 50.0;
+                ratio * (0.5 + 0.5 * rssi_strength)
+            }
+            None => ratio, // No RSSI available — fall back to body_ratio alone
+        };
 
         zones.push(GapZone {
             bottom,
@@ -131,7 +153,7 @@ pub fn detect_gap_zones(
         });
     }
 
-    // Enforce max_zones — keep most recent (tail of the list)
+    // Enforce max_zones — keep most recent (tail)
     if zones.len() > params.max_zones {
         zones = zones.split_off(zones.len() - params.max_zones);
     }
@@ -217,52 +239,106 @@ mod tests {
     use super::*;
 
     fn make_params(atr_period: usize, max_zones: usize, min_trust: f64) -> GapZoneParams {
-        GapZoneParams { atr_period, max_zones, min_trust }
+        GapZoneParams {
+            atr_period,
+            max_zones,
+            min_trust,
+        }
+    }
+
+    /// Helper: build a DataFrame with OHLC columns and computed indicators.
+    fn build_df(
+        opens: &[f64],
+        highs: &[f64],
+        lows: &[f64],
+        closes: &[f64],
+        atr_period: usize,
+    ) -> DataFrame {
+        let df = DataFrame::new(vec![
+            Column::new("open".into(), opens),
+            Column::new("high".into(), highs),
+            Column::new("low".into(), lows),
+            Column::new("close".into(), closes),
+        ])
+        .unwrap();
+
+        let ohlc: Ohlc = [col("open"), col("high"), col("low"), col("close")];
+        df.lazy()
+            .with_columns([
+                is_atr_gap(&ohlc, atr_period).alias("is_atr_gap"),
+                body_ratio(&ohlc).alias("body_ratio"),
+            ])
+            .collect()
+            .unwrap()
+    }
+
+    /// Helper: build a DataFrame with OHLC + rssi columns for composite trust tests.
+    fn build_df_with_rssi(
+        opens: &[f64],
+        highs: &[f64],
+        lows: &[f64],
+        closes: &[f64],
+        rssi: &[f64],
+        atr_period: usize,
+    ) -> DataFrame {
+        let df = DataFrame::new(vec![
+            Column::new("open".into(), opens),
+            Column::new("high".into(), highs),
+            Column::new("low".into(), lows),
+            Column::new("close".into(), closes),
+            Column::new("rssi".into(), rssi),
+        ])
+        .unwrap();
+
+        let ohlc: Ohlc = [col("open"), col("high"), col("low"), col("close")];
+        df.lazy()
+            .with_columns([
+                is_atr_gap(&ohlc, atr_period).alias("is_atr_gap"),
+                body_ratio(&ohlc).alias("body_ratio"),
+            ])
+            .collect()
+            .unwrap()
     }
 
     #[test]
     fn test_bullish_gap() {
-        // Scenario 1: Bullish gap — close above upper band
         let n = 50;
         let mut opens = vec![86000.0; n];
         let mut highs = vec![86200.0; n];
         let mut lows = vec![85800.0; n];
         let mut closes = vec![86100.0; n];
-        // Last candle: strong bullish gap
         opens[n - 1] = 86000.0;
         highs[n - 1] = 87200.0;
         lows[n - 1] = 85900.0;
         closes[n - 1] = 87100.0;
 
+        let df = build_df(&opens, &highs, &lows, &closes, 10);
         let params = make_params(10, 50, 0.0);
-        let zones = detect_gap_zones(&opens, &highs, &lows, &closes, &params);
+        let zones = extract_gap_zones(&df, &params);
 
         assert!(!zones.is_empty(), "Should detect at least one gap");
-        let last = &zones[0]; // Most recent
+        let last = &zones[0];
         assert_eq!(last.age_bars, 0);
         assert!(last.bottom < last.top);
         assert_eq!(last.bottom, 86000.0);
         assert_eq!(last.top, 87100.0);
-        let expected_trust = (87100.0 - 86000.0) / (87200.0 - 85900.0);
-        assert!((last.trust - expected_trust).abs() < 0.01);
     }
 
     #[test]
     fn test_bearish_gap() {
-        // Scenario 2: Bearish gap — close below lower band
         let n = 50;
         let mut opens = vec![87000.0; n];
         let mut highs = vec![87200.0; n];
         let mut lows = vec![86800.0; n];
         let mut closes = vec![87000.0; n];
-        // Last candle: strong bearish gap
         opens[n - 1] = 87000.0;
         highs[n - 1] = 87100.0;
         lows[n - 1] = 85800.0;
         closes[n - 1] = 85900.0;
 
+        let df = build_df(&opens, &highs, &lows, &closes, 10);
         let params = make_params(10, 50, 0.0);
-        let zones = detect_gap_zones(&opens, &highs, &lows, &closes, &params);
+        let zones = extract_gap_zones(&df, &params);
 
         assert!(!zones.is_empty());
         let last = &zones[0];
@@ -272,116 +348,210 @@ mod tests {
 
     #[test]
     fn test_normal_candle_no_gap() {
-        // Scenario 3: Normal candle — no gap
         let n = 50;
         let opens = vec![87000.0; n];
         let highs = vec![87200.0; n];
         let lows = vec![86800.0; n];
         let closes = vec![87050.0; n];
 
+        let df = build_df(&opens, &highs, &lows, &closes, 10);
         let params = make_params(10, 50, 0.0);
-        let zones = detect_gap_zones(&opens, &highs, &lows, &closes, &params);
-        // All normal candles (ATR ≈ 400, body = 50) — no gaps
+        let zones = extract_gap_zones(&df, &params);
         assert!(zones.is_empty());
     }
 
     #[test]
     fn test_queue_limit() {
-        // Scenario 6: Queue size limit
         let n = 200;
         let opens = vec![86000.0; n];
         let mut highs = vec![86200.0; n];
         let lows = vec![85800.0; n];
         let mut closes = vec![86100.0; n];
-        // Create many abnormal candles
         for i in 15..n {
-            closes[i] = 88000.0; // Way above ATR band
+            closes[i] = 88000.0;
             highs[i] = 88100.0;
         }
 
+        let df = build_df(&opens, &highs, &lows, &closes, 10);
         let params = make_params(10, 50, 0.0);
-        let zones = detect_gap_zones(&opens, &highs, &lows, &closes, &params);
+        let zones = extract_gap_zones(&df, &params);
         assert!(zones.len() <= 50, "Queue should be limited to 50");
     }
 
     #[test]
     fn test_overlap_density() {
-        // Scenario 7: Overlap density
         let zones = vec![
-            GapZone { bottom: 86000.0, top: 86500.0, trust: 0.9, age_bars: 10 },
-            GapZone { bottom: 86200.0, top: 86800.0, trust: 0.7, age_bars: 5 },
-            GapZone { bottom: 87000.0, top: 87500.0, trust: 0.8, age_bars: 2 },
+            GapZone {
+                bottom: 86000.0,
+                top: 86500.0,
+                trust: 0.9,
+                age_bars: 10,
+            },
+            GapZone {
+                bottom: 86200.0,
+                top: 86800.0,
+                trust: 0.7,
+                age_bars: 5,
+            },
+            GapZone {
+                bottom: 87000.0,
+                top: 87500.0,
+                trust: 0.8,
+                age_bars: 2,
+            },
         ];
-
         let density = overlap_density(&zones, 86300.0);
-        assert_eq!(density.count, 2); // Gaps A and B
+        assert_eq!(density.count, 2);
         assert!((density.weighted_trust - 1.6).abs() < 0.01);
     }
 
     #[test]
     fn test_no_overlap() {
-        // Scenario 8: No gaps at price
         let zones = vec![
-            GapZone { bottom: 86000.0, top: 86500.0, trust: 0.9, age_bars: 10 },
-            GapZone { bottom: 87000.0, top: 87500.0, trust: 0.8, age_bars: 2 },
+            GapZone {
+                bottom: 86000.0,
+                top: 86500.0,
+                trust: 0.9,
+                age_bars: 10,
+            },
+            GapZone {
+                bottom: 87000.0,
+                top: 87500.0,
+                trust: 0.8,
+                age_bars: 2,
+            },
         ];
-
         let density = overlap_density(&zones, 86700.0);
         assert_eq!(density.count, 0);
     }
 
     #[test]
     fn test_empty_history() {
-        // Scenario 10: Not enough bars for ATR
         let opens = vec![87000.0; 5];
         let highs = vec![87200.0; 5];
         let lows = vec![86800.0; 5];
         let closes = vec![87050.0; 5];
 
+        let df = build_df(&opens, &highs, &lows, &closes, 42);
         let params = make_params(42, 50, 0.3);
-        let zones = detect_gap_zones(&opens, &highs, &lows, &closes, &params);
+        let zones = extract_gap_zones(&df, &params);
         assert!(zones.is_empty());
     }
 
     #[test]
     fn test_min_trust_filter() {
-        // Scenario 13: Gap rejected by min_trust filter
         let n = 50;
         let mut opens = vec![86500.0; n];
         let mut highs = vec![86700.0; n];
         let mut lows = vec![86300.0; n];
         let mut closes = vec![86600.0; n];
-        // Doji with abnormal close but low trust
         opens[n - 1] = 86500.0;
         highs[n - 1] = 87500.0;
         lows[n - 1] = 85500.0;
         closes[n - 1] = 87200.0;
-        // Trust = |87200 - 86500| / (87500 - 85500) = 700 / 2000 = 0.35
 
-        let params = make_params(10, 50, 0.5); // min_trust = 0.5
-        let zones = detect_gap_zones(&opens, &highs, &lows, &closes, &params);
-        // The doji gap should be filtered out (trust 0.35 < 0.5)
+        let df = build_df(&opens, &highs, &lows, &closes, 10);
+        let params = make_params(10, 50, 0.5);
+        let zones = extract_gap_zones(&df, &params);
         let recent = zones.iter().find(|z| z.age_bars == 0);
         assert!(recent.is_none(), "Low trust gap should be filtered");
     }
 
     #[test]
     fn test_gap_zone_summary() {
-        // Scenario 9: Summary formatting
         let zones = vec![
-            GapZone { bottom: 86200.0, top: 86500.0, trust: 0.85, age_bars: 3 },
-            GapZone { bottom: 86800.0, top: 87100.0, trust: 0.9, age_bars: 5 },
-            GapZone { bottom: 87200.0, top: 87600.0, trust: 0.7, age_bars: 8 },
-            GapZone { bottom: 85500.0, top: 85800.0, trust: 0.8, age_bars: 12 },
+            GapZone {
+                bottom: 86200.0,
+                top: 86500.0,
+                trust: 0.85,
+                age_bars: 3,
+            },
+            GapZone {
+                bottom: 86800.0,
+                top: 87100.0,
+                trust: 0.9,
+                age_bars: 5,
+            },
+            GapZone {
+                bottom: 87200.0,
+                top: 87600.0,
+                trust: 0.7,
+                age_bars: 8,
+            },
+            GapZone {
+                bottom: 85500.0,
+                top: 85800.0,
+                trust: 0.8,
+                age_bars: 12,
+            },
         ];
-
         let summary = gap_zone_summary(&zones, 86600.0);
-        assert_eq!(summary.zones_above, 2); // 86800-87100, 87200-87600
-        assert_eq!(summary.zones_below, 2); // 86200-86500, 85500-85800
+        assert_eq!(summary.zones_above, 2);
+        assert_eq!(summary.zones_below, 2);
         assert!(summary.nearest_gap.is_some());
         let (b, t, _) = summary.nearest_gap.unwrap();
-        // Nearest should be 86200-86500 (100 away) or 86800-87100 (200 away)
         assert_eq!(b, 86200.0);
         assert_eq!(t, 86500.0);
+    }
+
+    #[test]
+    fn test_composite_trust_extreme_rssi() {
+        // Gap with RSSI at 80 (extreme) should have higher trust than neutral RSSI
+        let n = 50;
+        let mut opens = vec![86000.0; n];
+        let mut highs = vec![86200.0; n];
+        let mut lows = vec![85800.0; n];
+        let mut closes = vec![86100.0; n];
+        let mut rssi = vec![50.0; n]; // neutral
+        opens[n - 1] = 86000.0;
+        highs[n - 1] = 87200.0;
+        lows[n - 1] = 85900.0;
+        closes[n - 1] = 87100.0;
+        rssi[n - 1] = 80.0; // extreme
+
+        let df = build_df_with_rssi(&opens, &highs, &lows, &closes, &rssi, 10);
+        let params = make_params(10, 50, 0.0);
+        let zones = extract_gap_zones(&df, &params);
+
+        assert!(!zones.is_empty());
+        let gap = &zones[0];
+        // rssi_strength = |80-50|/50 = 0.6
+        // trust = body_ratio * (0.5 + 0.5 * 0.6) = body_ratio * 0.8
+        let expected_body_ratio = (87100.0 - 86000.0) / (87200.0 - 85900.0);
+        let expected_trust = expected_body_ratio * 0.8;
+        assert!(
+            (gap.trust - expected_trust).abs() < 0.02,
+            "Expected trust ~{expected_trust:.4}, got {:.4}",
+            gap.trust
+        );
+    }
+
+    #[test]
+    fn test_composite_trust_neutral_rssi() {
+        let n = 50;
+        let mut opens = vec![86000.0; n];
+        let mut highs = vec![86200.0; n];
+        let mut lows = vec![85800.0; n];
+        let mut closes = vec![86100.0; n];
+        let rssi = vec![50.0; n]; // neutral everywhere
+        opens[n - 1] = 86000.0;
+        highs[n - 1] = 87200.0;
+        lows[n - 1] = 85900.0;
+        closes[n - 1] = 87100.0;
+
+        let df = build_df_with_rssi(&opens, &highs, &lows, &closes, &rssi, 10);
+        let params = make_params(10, 50, 0.0);
+        let zones = extract_gap_zones(&df, &params);
+
+        assert!(!zones.is_empty());
+        let gap = &zones[0];
+        // rssi_strength = 0, trust = body_ratio * 0.5
+        let expected_body_ratio = (87100.0 - 86000.0) / (87200.0 - 85900.0);
+        let expected_trust = expected_body_ratio * 0.5;
+        assert!(
+            (gap.trust - expected_trust).abs() < 0.02,
+            "Expected trust ~{expected_trust:.4}, got {:.4}",
+            gap.trust
+        );
     }
 }

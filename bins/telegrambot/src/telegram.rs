@@ -366,6 +366,7 @@ mod tests {
             change_detection_indicators: "rssi,structure_power".into(),
             notification_cooldown_secs: 3600,
             timeout_secs: 30,
+            supports_reasoning: false,
         }
     }
 

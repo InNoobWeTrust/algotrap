@@ -1,4 +1,3 @@
-use polars::lazy::dsl::max_horizontal;
 use polars::prelude::*;
 
 use super::prelude::*;

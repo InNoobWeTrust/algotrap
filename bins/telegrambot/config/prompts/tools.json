@@ -1,7 +1,7 @@
 [
     {
         "name": "get_indicator_summary",
-        "description": "Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, climax signals.",
+        "description": "Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, gap zones.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -54,7 +54,7 @@
     },
     {
         "name": "get_multi_tf_overview",
-        "description": "Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, climax signal, and trend direction for each timeframe. Useful for getting a bird's eye view of the market.",
+        "description": "Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -91,6 +91,38 @@
                 }
             },
             "required": ["topic", "content"]
+        }
+    },
+    {
+        "name": "write_notes",
+        "description": "Save analysis notes to your in-session scratchpad. Use this to record key observations, conflicts, or intermediate conclusions as you analyze. Notes persist across context resets within this session but are discarded at scan end. Overwrites existing content for the same key.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "A short label for this note (e.g., 'observations', 'conflicts', 'handoff')"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The note content to save"
+                }
+            },
+            "required": ["key", "content"]
+        }
+    },
+    {
+        "name": "read_notes",
+        "description": "Read your analysis notes from the in-session scratchpad. Call with a specific key to read one note, or omit the key to read all notes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Optional: specific note key to read. Omit to read all notes."
+                }
+            },
+            "required": []
         }
     }
 ]

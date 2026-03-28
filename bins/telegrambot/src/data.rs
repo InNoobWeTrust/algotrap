@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
+use algotrap::ta::gap_zones::OhlcGapZones;
 use algotrap::ta::prelude::*;
 use futures::future::join_all;
 use polars::prelude::*;
@@ -105,6 +106,10 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
     let sharpe_period = ic.period("sharpe", 200);
     let sharpe_ratio = col("close").sharpe(sharpe_period).alias("sharpe");
 
+    let gap_zone_period = ic.period("gap_zones", 42);
+    let is_atr_gap = ohlc.is_atr_gap(gap_zone_period).alias("is_atr_gap");
+    let body_ratio = ohlc.body_ratio().alias("body_ratio");
+
     vec![
         time_to_date,
         vol_sma,
@@ -123,6 +128,8 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
         atr_rev_percent,
         lvrg,
         sharpe_ratio,
+        is_atr_gap,
+        body_ratio,
     ]
 }
 

@@ -16,8 +16,8 @@ use tracing::{info, warn};
 /// A single trade plan option (A, B, or C).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradePlan {
-    pub label: String,          // "A", "B", "C"
-    pub direction: String,      // "LONG" | "SHORT" | "WAIT"
+    pub label: String,     // "A", "B", "C"
+    pub direction: String, // "LONG" | "SHORT" | "WAIT"
     pub entry: Option<f64>,
     pub target: Option<f64>,
     pub stop: Option<f64>,
@@ -116,66 +116,90 @@ impl Default for IndicatorConfig {
     fn default() -> Self {
         let mut indicators = HashMap::new();
 
-        indicators.insert("rssi".into(), IndicatorParams {
-            period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
-            smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
-        indicators.insert("structure_power".into(), IndicatorParams {
-            period: None,
-            smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
-        indicators.insert("atr".into(), IndicatorParams {
-            period: Some(ParamSpec::new(42.0, 10.0, 100.0)),
-            smooth: None,
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
-        indicators.insert("ema200".into(), IndicatorParams {
-            period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
-            smooth: None,
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
-        indicators.insert("sharpe".into(), IndicatorParams {
-            period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
-            smooth: None,
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
+        indicators.insert(
+            "rssi".into(),
+            IndicatorParams {
+                period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
+                smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
+        indicators.insert(
+            "structure_power".into(),
+            IndicatorParams {
+                period: None,
+                smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
+        indicators.insert(
+            "atr".into(),
+            IndicatorParams {
+                period: Some(ParamSpec::new(42.0, 10.0, 100.0)),
+                smooth: None,
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
+        indicators.insert(
+            "ema200".into(),
+            IndicatorParams {
+                period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
+                smooth: None,
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
+        indicators.insert(
+            "sharpe".into(),
+            IndicatorParams {
+                period: Some(ParamSpec::new(200.0, 50.0, 500.0)),
+                smooth: None,
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
         // bias_reversion is a dependency of atr_reversion_percent, always active
-        indicators.insert("bias_reversion".into(), IndicatorParams {
-            period: None,
-            smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
+        indicators.insert(
+            "bias_reversion".into(),
+            IndicatorParams {
+                period: None,
+                smooth: Some(ParamSpec::new(9.0, 3.0, 30.0)),
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
         // revrsi group inherits period from rssi config
-        indicators.insert("revrsi".into(), IndicatorParams {
-            period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
-            smooth: None,
-            min_trust: None,
-            active: true,
-            inactive_cycles: 0,
-        });
+        indicators.insert(
+            "revrsi".into(),
+            IndicatorParams {
+                period: Some(ParamSpec::new(14.0, 5.0, 50.0)),
+                smooth: None,
+                min_trust: None,
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
         // ATR Gap Zones — stateful indicator
         // period = atr_period, smooth = max_zones, min_trust = quality filter
-        indicators.insert("gap_zones".into(), IndicatorParams {
-            period: Some(ParamSpec::new(42.0, 14.0, 56.0)),
-            smooth: Some(ParamSpec::new(50.0, 10.0, 100.0)), // max_zones
-            min_trust: Some(ParamSpec::new(0.3, 0.0, 0.9)),
-            active: true,
-            inactive_cycles: 0,
-        });
+        indicators.insert(
+            "gap_zones".into(),
+            IndicatorParams {
+                period: Some(ParamSpec::new(42.0, 14.0, 56.0)),
+                smooth: Some(ParamSpec::new(50.0, 10.0, 100.0)), // max_zones
+                min_trust: Some(ParamSpec::new(0.3, 0.0, 0.9)),
+                active: true,
+                inactive_cycles: 0,
+            },
+        );
 
         Self { indicators }
     }
@@ -202,10 +226,7 @@ impl IndicatorConfig {
 
     /// Check if an indicator is active.
     pub fn is_active(&self, name: &str) -> bool {
-        self.indicators
-            .get(name)
-            .map(|p| p.active)
-            .unwrap_or(true) // Unknown indicators default to active
+        self.indicators.get(name).map(|p| p.active).unwrap_or(true) // Unknown indicators default to active
     }
 
     /// Count active derived indicators (excludes OHLC base tier).
@@ -260,10 +281,7 @@ impl IndicatorConfig {
     /// - Range clamping: values clamped to [min, max]
     /// - Rate limiting: ±30% change per cycle (except exempt fields)
     /// - Min-2-active: cannot deactivate below 2 active derived indicators
-    pub fn apply_proposed(
-        &mut self,
-        proposed: &HashMap<String, serde_json::Value>,
-    ) {
+    pub fn apply_proposed(&mut self, proposed: &HashMap<String, serde_json::Value>) {
         const RATE_LIMIT: f64 = 0.30;
         const MIN_ACTIVE: usize = 2;
 
@@ -412,10 +430,7 @@ pub fn save_memory(
 /// schema-dependent).
 ///
 /// Returns `true` if a reset was performed, `false` if compatible or empty.
-pub fn check_schema_compatibility(
-    mem: &mut TickerMemory,
-    current_keys: &[&str],
-) -> bool {
+pub fn check_schema_compatibility(mem: &mut TickerMemory, current_keys: &[&str]) -> bool {
     // No predictions → nothing to compare against, skip
     let stored_keys = match mem.predictions.last() {
         Some(pred) => {
@@ -509,18 +524,18 @@ mod tests {
 
     #[test]
     fn test_weight_guardrails() {
-        let current = HashMap::from([("rssi".into(), 0.30), ("climax".into(), 0.20)]);
+        let current = HashMap::from([("rssi".into(), 0.30), ("structure_power".into(), 0.20)]);
         let proposed = HashMap::from([
-            ("rssi".into(), 0.50),   // wants +0.20, should be limited
-            ("climax".into(), 0.10), // wants -0.10, should be limited
+            ("rssi".into(), 0.50),            // wants +0.20, should be limited
+            ("structure_power".into(), 0.10), // wants -0.10, should be limited
         ]);
 
         let result = apply_weight_guardrails(&current, &proposed, 0.05, 0.50, 0.05);
 
         // rssi: 0.30 + 0.05 = 0.35 (rate limited)
         assert!((result["rssi"] - 0.35).abs() < f64::EPSILON);
-        // climax: 0.20 - 0.05 = 0.15 (rate limited)
-        assert!((result["climax"] - 0.15).abs() < f64::EPSILON);
+        // structure_power: 0.20 - 0.05 = 0.15 (rate limited)
+        assert!((result["structure_power"] - 0.15).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -577,10 +592,7 @@ mod tests {
                 direction: "LONG".into(),
                 summary: "t".into(),
                 trade_plans: vec![],
-                indicators: HashMap::from([
-                    ("rssi".into(), 50.0),
-                    ("close".into(), 100.0),
-                ]),
+                indicators: HashMap::from([("rssi".into(), 50.0), ("close".into(), 100.0)]),
                 outcome_score: None,
             },
             8,
@@ -626,13 +638,13 @@ mod tests {
                 trade_plans: vec![],
                 indicators: HashMap::from([
                     ("rssi".into(), 50.0),
-                    ("climax_signal".into(), 1.0),
+                    ("deprecated_indicator".into(), 1.0),
                 ]),
                 outcome_score: None,
             },
             8,
         );
-        // climax_signal removed from pipeline
+        // deprecated_indicator removed from pipeline
         let reset = check_schema_compatibility(&mut mem, &["rssi"]);
         assert!(reset);
         assert!(mem.predictions.is_empty());
@@ -660,12 +672,13 @@ mod tests {
     fn test_indicator_config_rate_limited_tuning() {
         let mut ic = IndicatorConfig::default();
         // RSSI period is 14.0. Requesting 100 should be rate-limited to +30% = 14 * 1.3 = 18.2
-        let proposed = HashMap::from([
-            ("rssi".to_string(), serde_json::json!({"period": 100})),
-        ]);
+        let proposed = HashMap::from([("rssi".to_string(), serde_json::json!({"period": 100}))]);
         ic.apply_proposed(&proposed);
         let new_period = ic.period("rssi", 999);
-        assert!(new_period <= 19, "Rate limit should cap at ~18, got {new_period}");
+        assert!(
+            new_period <= 19,
+            "Rate limit should cap at ~18, got {new_period}"
+        );
         assert!(new_period >= 17, "Should increase, got {new_period}");
     }
 
@@ -674,20 +687,31 @@ mod tests {
         let mut ic = IndicatorConfig::default();
         // Try to deactivate all 7 indicators — should stop at 2 active
         let mut proposed = HashMap::new();
-        for name in ["rssi", "structure_power", "atr", "ema200", "sharpe", "bias_reversion", "revrsi"] {
+        for name in [
+            "rssi",
+            "structure_power",
+            "atr",
+            "ema200",
+            "sharpe",
+            "bias_reversion",
+            "revrsi",
+        ] {
             proposed.insert(name.to_string(), serde_json::json!({"active": false}));
         }
         ic.apply_proposed(&proposed);
-        assert!(ic.active_count() >= 2, "Min-2-active guardrail failed: {}", ic.active_count());
+        assert!(
+            ic.active_count() >= 2,
+            "Min-2-active guardrail failed: {}",
+            ic.active_count()
+        );
     }
 
     #[test]
     fn test_indicator_config_tick_dormant() {
         let mut ic = IndicatorConfig::default();
         // Deactivate one
-        let proposed = HashMap::from([
-            ("sharpe".to_string(), serde_json::json!({"active": false})),
-        ]);
+        let proposed =
+            HashMap::from([("sharpe".to_string(), serde_json::json!({"active": false}))]);
         ic.apply_proposed(&proposed);
         assert!(!ic.is_active("sharpe"));
         ic.tick_dormant();
