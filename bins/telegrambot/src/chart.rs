@@ -100,7 +100,7 @@ pub fn gap_zones_to_chart_json(
         .filter(|z| z.trust >= min_trust)
         .take(10) // hardcoded cap for visual clarity
         .map(|z| {
-            let direction = if z.top > z.bottom { "bullish" } else { "bearish" };
+            let direction = if z.bullish { "bullish" } else { "bearish" };
             serde_json::json!({
                 "top": z.top,
                 "bottom": z.bottom,

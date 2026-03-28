@@ -2,7 +2,7 @@
 branch: dev
 topic: chart rendering v2 — compile-time safety + visual parity
 status: implementation-complete
-updated: 2026-03-29T00:20:00+07:00
+updated: 2026-03-29T03:42:00+07:00
 agent: antigravity
 ---
 
@@ -35,7 +35,8 @@ Solution: `CHART_COLUMNS` const + `#[test] chart_template_references_only_known_
 ### 3. Data pipeline changes
 
 - `biased_candle` column computed in Rust (`data.rs:indicators()`) as `i32`: `1` rising, `-1` falling, `0` none
-- `gap_zones_to_chart_json()` produces `{top, bottom, direction, trust}` for box rendering
+- `gap_zones_to_chart_json()` produces `{top, bottom, direction, trust}` for box rendering (direction from `z.bullish`)
+- Gap zones extracted at all 3 callsites independently of LLM indicator active/inactive toggle
 - `last_rssi_from_df()` + `rssi_tint_class()` helpers in `chart.rs`
 - `render_single_tf_chart_html()` signature: new `gap_zones_json` + `rssi_tint` params
 
@@ -55,9 +56,11 @@ Inline `ISeriesPrimitive` implementation in the template (no external dependency
 | `data.rs` | +30 lines: biased_candle lazy Polars expression |
 | `Cargo.toml` | +regex dev-dependency |
 | `lib.rs` | +allow(ambiguous_glob_imports) for Polars 0.51 |
-| `main.rs` | Updated render callsite with rssi_tint + gap_zones |
-| `commands.rs` | Updated render callsite |
-| `llm/tools.rs` | Updated render callsite |
+| `main.rs` | Updated render callsite with gap zone extraction + rssi_tint |
+| `commands.rs` | Updated render callsite with gap zone extraction |
+| `llm/tools.rs` | Updated render callsite with gap zone extraction |
+| `browserless.rs` | Changed viewport from 1920×1080 to 1080×1080 (square for Telegram mobile) |
+| `gap_zones.rs` | Added `bullish` field to GapZone struct |
 | `telegram.rs` | Fixed pre-existing missing `llm_debug` in test fixture |
 | `test_chart_render.rs` | [NEW] Test binary for visual chart verification |
 
@@ -68,13 +71,11 @@ Inline `ISeriesPrimitive` implementation in the template (no external dependency
 3. **Gap zones as box primitive** (not price lines) — matches TradingView's visual style using `ISeriesPrimitive` canvas API.
 4. **Circle markers use `size: 3`** — best approximation of TradingView's hollow rings without a full canvas plugin.
 5. **`chart_template.html` force-tracked** (`git add -f`) — `.gitignore:*.html` was excluding it silently.
-6. **Callsites pass `"[]"` for gap zones in production** — test binary extracts real zones. Wiring production callsites requires `IndicatorConfig` access (separate concern).
-
-## Not done (future work)
+6. **Gap zones render independently of LLM** — extracted from DataFrame at chart callsites, not gated by `is_active`.
+7. **Bullish vs bearish gap colors** — `z.bullish` (close > open) determines direction; cyan for bullish, orange for bearish (matching TradingView's inverse gradient).
+8. **Square viewport** — 1080×1080 for optimal Telegram mobile display (same on portrait/landscape).
 
 - **Hollow ring circles**: Requires full canvas `ISeriesPrimitive` for custom circle drawing (deferred to "hack canvas plugin later")
-- **Gap zone wiring at production callsites**: `main.rs`/`commands.rs` pass `"[]"` — need `IndicatorConfig` + `extract_gap_zones()` at those callsites
-- **RSSI tint at production callsites**: Wired and working, but visual effect is subtle (5% opacity)
 
 ## Verification
 

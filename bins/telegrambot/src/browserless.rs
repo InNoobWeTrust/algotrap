@@ -18,7 +18,7 @@ pub async fn capture_chart_screenshot(
             "type": "png"
         },
         "viewport": {
-            "width": 1920,
+            "width": 1080,
             "height": 1080
         },
         "waitForTimeout": 2000

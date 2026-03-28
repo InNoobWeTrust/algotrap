@@ -20,6 +20,8 @@ pub struct GapZone {
     pub trust: f64,
     /// Number of bars since this gap was detected (0 = current bar).
     pub age_bars: usize,
+    /// True if close > open (bullish gap candle), false if bearish.
+    pub bullish: bool,
 }
 
 /// Overlap density at a specific price point.
@@ -150,6 +152,7 @@ pub fn extract_gap_zones(df: &DataFrame, params: &GapZoneParams) -> Vec<GapZone>
             top,
             trust,
             age_bars,
+            bullish: close > open,
         });
     }
 
@@ -386,18 +389,21 @@ mod tests {
                 top: 86500.0,
                 trust: 0.9,
                 age_bars: 10,
+                bullish: true,
             },
             GapZone {
                 bottom: 86200.0,
                 top: 86800.0,
                 trust: 0.7,
                 age_bars: 5,
+                bullish: true,
             },
             GapZone {
                 bottom: 87000.0,
                 top: 87500.0,
                 trust: 0.8,
                 age_bars: 2,
+                bullish: true,
             },
         ];
         let density = overlap_density(&zones, 86300.0);
@@ -413,12 +419,14 @@ mod tests {
                 top: 86500.0,
                 trust: 0.9,
                 age_bars: 10,
+                bullish: true,
             },
             GapZone {
                 bottom: 87000.0,
                 top: 87500.0,
                 trust: 0.8,
                 age_bars: 2,
+                bullish: true,
             },
         ];
         let density = overlap_density(&zones, 86700.0);
@@ -465,24 +473,28 @@ mod tests {
                 top: 86500.0,
                 trust: 0.85,
                 age_bars: 3,
+                bullish: true,
             },
             GapZone {
                 bottom: 86800.0,
                 top: 87100.0,
                 trust: 0.9,
                 age_bars: 5,
+                bullish: true,
             },
             GapZone {
                 bottom: 87200.0,
                 top: 87600.0,
                 trust: 0.7,
                 age_bars: 8,
+                bullish: true,
             },
             GapZone {
                 bottom: 85500.0,
                 top: 85800.0,
                 trust: 0.8,
                 age_bars: 12,
+                bullish: false,
             },
         ];
         let summary = gap_zone_summary(&zones, 86600.0);
