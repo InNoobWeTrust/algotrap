@@ -66,6 +66,7 @@ pub async fn execute_tool_call(
     all_dfs: &HashMap<Timeframe, DataFrame>,
     conf: &EnvConf,
     ticker: &TickerConf,
+    ic: &crate::memory::IndicatorConfig,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
 
@@ -78,7 +79,14 @@ pub async fn execute_tool_call(
             match all_dfs.get(&tf) {
                 Some(df) => {
                     let last_rows = df.slice(-3, 3);
-                    let summary = extract_indicator_summary(&last_rows, &tf)?;
+                    let mut summary = extract_indicator_summary(&last_rows, &tf)?;
+                    // Append gap zone context if active
+                    if ic.is_active("gap_zones") {
+                        if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
+                            summary.push_str("\n");
+                            summary.push_str(&gap_ctx);
+                        }
+                    }
                     Ok(summary)
                 }
                 None => Ok(format!(
@@ -137,7 +145,7 @@ pub async fn execute_tool_call(
             }
         }
         "get_multi_tf_overview" => {
-            let overview = build_multi_tf_overview(all_dfs, ticker)?;
+            let overview = build_multi_tf_overview(all_dfs, ticker, ic)?;
             Ok(overview)
         }
         "read_kb" => {
@@ -226,6 +234,7 @@ fn extract_price_action(
 fn build_multi_tf_overview(
     all_dfs: &HashMap<Timeframe, DataFrame>,
     ticker: &TickerConf,
+    ic: &crate::memory::IndicatorConfig,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec![format!(
         "=== {} Multi-Timeframe Overview ===",
@@ -255,8 +264,64 @@ fn build_multi_tf_overview(
                 sharpe = get_val("sharpe"),
                 close = get_val("close"),
             ));
+
+            // Append gap zone summary per timeframe if active
+            if ic.is_active("gap_zones") {
+                if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
+                    lines.push(format!("    {gap_ctx}"));
+                }
+            }
         }
     }
 
     Ok(lines.join("\n"))
+}
+
+/// Extract OHLC columns from a DataFrame and compute gap zone summary.
+fn compute_gap_zone_context(
+    df: &DataFrame,
+    ic: &crate::memory::IndicatorConfig,
+) -> Option<String> {
+    use algotrap::ta::gap_zones;
+
+    let opens = df.column("open").ok()?.f64().ok()?;
+    let highs = df.column("high").ok()?.f64().ok()?;
+    let lows = df.column("low").ok()?.f64().ok()?;
+    let closes = df.column("close").ok()?.f64().ok()?;
+
+    // Collect into Vec<f64>, skipping nulls (shouldn't happen for OHLC)
+    let o: Vec<f64> = opens.into_no_null_iter().collect();
+    let h: Vec<f64> = highs.into_no_null_iter().collect();
+    let l: Vec<f64> = lows.into_no_null_iter().collect();
+    let c: Vec<f64> = closes.into_no_null_iter().collect();
+
+    if o.is_empty() {
+        return None;
+    }
+
+    let params = ic.gap_zone_params();
+    let zones = gap_zones::detect_gap_zones(&o, &h, &l, &c, &params);
+
+    if zones.is_empty() {
+        return Some("Gap zones: none detected".to_string());
+    }
+
+    let current_price = *c.last()?;
+    let summary = gap_zones::gap_zone_summary(&zones, current_price);
+
+    let nearest_str = match summary.nearest_gap {
+        Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})")
+            ,
+        None => String::new(),
+    };
+
+    Some(format!(
+        "Gap zones: {} total ({} above, {} below), overlap@price: count={} weighted_trust={:.2}{}",
+        zones.len(),
+        summary.zones_above,
+        summary.zones_below,
+        summary.overlap_at_price.count,
+        summary.overlap_at_price.weighted_trust,
+        nearest_str
+    ))
 }

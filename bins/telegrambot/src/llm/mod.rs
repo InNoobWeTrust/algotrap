@@ -16,7 +16,7 @@ use polars::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::config::{EnvConf, TickerConf};
-use crate::memory::TickerMemory;
+use crate::memory::{IndicatorConfig, TickerMemory};
 
 pub use tools::{build_tools, execute_tool_call};
 
@@ -133,7 +133,11 @@ pub async fn run_agent(
                         "Executing tool call"
                     );
 
-                    let result = execute_tool_call(tool_call, all_dfs, conf, ticker).await?;
+                    let default_ic = IndicatorConfig::default();
+                    let ic = memory
+                        .map(|m| &m.indicator_config)
+                        .unwrap_or(&default_ic);
+                    let result = execute_tool_call(tool_call, all_dfs, conf, ticker, ic).await?;
 
                     debug!(
                         tool = %tool_call.function.name,
