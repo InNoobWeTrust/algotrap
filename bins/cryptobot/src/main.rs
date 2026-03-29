@@ -334,29 +334,7 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
     let sharpe_ratio_color = when(sharpe_ratio.clone().gt(lit(0)))
         .then(lit("rgba(76, 175, 79, 0.5)"))
         .otherwise(lit("rgba(242, 54, 70, 0.5)"))
-        .alias("sharpe_color");
-
-    // Biased candle (strictly rising/falling)
-    let biased_candle = when(
-        col("open")
-            .gt(col("open").shift(lit(1)))
-            .and(col("close").gt(col("close").shift(lit(1))))
-            .and(col("high").gt(col("high").shift(lit(1))))
-            .and(col("low").gt(col("low").shift(lit(1)))),
-    )
-    .then(lit(1i32))
-    .otherwise(
-        when(
-            col("open")
-                .lt(col("open").shift(lit(1)))
-                .and(col("close").lt(col("close").shift(lit(1))))
-                .and(col("high").lt(col("high").shift(lit(1))))
-                .and(col("low").lt(col("low").shift(lit(1)))),
-        )
-        .then(lit(-1i32))
-        .otherwise(lit(0i32)),
-    )
-    .alias("biased_candle");
+         .alias("sharpe_color");
 
     // Gap zone detection columns
     let is_atr_gap_col = ohlc.is_atr_gap(42).alias("is_atr_gap");
@@ -399,7 +377,6 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         climax_signal_shape,
         sharpe_ratio,
         sharpe_ratio_color,
-        biased_candle,
         is_atr_gap_col,
         body_ratio_col,
     ]
