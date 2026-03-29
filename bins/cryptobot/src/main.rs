@@ -1139,25 +1139,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                     });
                 }
             });
-            // ATR Reversion arrows
-            data.forEach(d => {
-                if (d.atr_reversion_percent > 50 && d.rssi < 46) {
-                    markers.push({
-                        time: d.time,
-                        position: 'belowBar',
-                        shape: 'arrowUp',
-                        color: 'rgba(150,225,150,0.5)',
-                    });
-                }
-                if (d.atr_reversion_percent < -50 && d.rssi > 54) {
-                    markers.push({
-                        time: d.time,
-                        position: 'aboveBar',
-                        shape: 'arrowDown',
-                        color: 'rgba(220,80,80,0.5)',
-                    });
-                }
-            });
             markers.sort((a, b) => a.time - b.time);
             markersSeries.setMarkers(markers);
 
