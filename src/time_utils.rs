@@ -1,5 +1,5 @@
 use crate::model::Timeframe;
-use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc, Weekday};
 use core::time::Duration;
 
 /// Check if the time now is multiple of period, with optional tolerance
@@ -139,6 +139,92 @@ pub fn is_closing_timeframe(
             }
         }
     }
+}
+
+/// Calculate seconds from `now` until the next candle close for the given timeframe.
+///
+/// Candle close = the start of the next period (e.g. for 4h: 00:00, 04:00, 08:00 UTC...).
+/// Returns 0 if exactly on a boundary.
+pub fn seconds_until_next_close(tf: &Timeframe, now: DateTime<Utc>) -> u64 {
+    let ts = now.timestamp() as u64;
+
+    match tf {
+        // Fixed-period TFs: close at multiples of period_secs from epoch
+        Timeframe::M1 | Timeframe::M5 | Timeframe::M15 | Timeframe::M30 | Timeframe::H1
+        | Timeframe::H2 | Timeframe::H4 | Timeframe::H6 | Timeframe::H8 | Timeframe::H12
+        | Timeframe::D1 | Timeframe::D3 => {
+            let period_secs = match tf {
+                Timeframe::M1 => 60,
+                Timeframe::M5 => 300,
+                Timeframe::M15 => 900,
+                Timeframe::M30 => 1_800,
+                Timeframe::H1 => 3_600,
+                Timeframe::H2 => 7_200,
+                Timeframe::H4 => 14_400,
+                Timeframe::H6 => 21_600,
+                Timeframe::H8 => 28_800,
+                Timeframe::H12 => 43_200,
+                Timeframe::D1 => 86_400,
+                Timeframe::D3 => 259_200,
+                _ => unreachable!(),
+            };
+            let remainder = ts % period_secs;
+            if remainder == 0 {
+                0
+            } else {
+                period_secs - remainder
+            }
+        }
+        // Weekly: closes at Monday 00:00:00 UTC
+        Timeframe::W1 => {
+            let weekday = now.weekday().num_days_from_monday(); // Mon=0, Sun=6
+            let secs_from_midnight = now.num_seconds_from_midnight() as u64;
+            let days_until_monday = if weekday == 0 && secs_from_midnight == 0 {
+                0 // already at boundary
+            } else {
+                (7 - weekday as u64) % 7
+            };
+            if days_until_monday == 0 && secs_from_midnight == 0 {
+                0
+            } else if weekday == 0 && secs_from_midnight > 0 {
+                // Monday but past midnight — next Monday
+                7 * 86_400 - secs_from_midnight
+            } else {
+                days_until_monday * 86_400 - secs_from_midnight
+            }
+        }
+        // Monthly: closes at 1st of next month 00:00:00 UTC
+        Timeframe::MOS1 => {
+            let year = now.year();
+            let month = now.month();
+            let (next_year, next_month) = if month == 12 {
+                (year + 1, 1)
+            } else {
+                (year, month + 1)
+            };
+            let next_month_start = Utc
+                .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
+                .unwrap();
+            let diff = next_month_start.signed_duration_since(now);
+            if diff.num_seconds() <= 0 {
+                0
+            } else {
+                diff.num_seconds() as u64
+            }
+        }
+    }
+}
+
+/// Find the minimum seconds until next candle close across a set of timeframes.
+/// Returns (secs_until_close, which_tf).
+pub fn next_close_across_tfs(
+    tfs: &[Timeframe],
+    now: DateTime<Utc>,
+) -> Option<(u64, Timeframe)> {
+    tfs.iter()
+        .map(|tf| (seconds_until_next_close(tf, now), *tf))
+        .filter(|(secs, _)| *secs > 0) // skip TFs at exact boundary
+        .min_by_key(|(secs, _)| *secs)
 }
 
 #[cfg(test)]

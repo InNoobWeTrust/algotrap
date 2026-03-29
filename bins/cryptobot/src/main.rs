@@ -17,7 +17,7 @@ use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
 use algotrap::ta::gap_zones::OhlcGapZones;
 use algotrap::ta::prelude::*;
-use algotrap::time_utils::is_closing_timeframe;
+use algotrap::time_utils::{is_closing_timeframe, next_close_across_tfs};
 
 // ─── Per-Ticker Config ───────────────────────────────────────────────────────
 
@@ -109,10 +109,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     dotenv().ok();
     let conf: EnvConf = envy::from_env()?;
 
+    // Collect all signal TFs across tickers for scheduling
+    let all_signal_tfs: Vec<Timeframe> = conf
+        .tickers
+        .iter()
+        .flat_map(|tc| tc.tfs.iter().copied())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
     eprintln!(
-        "Starting cryptobot — {} tickers, chart_tfs={:?}, scan_interval={}s",
+        "Starting cryptobot — {} tickers, chart_tfs={:?}, signal_tfs={:?}, max_interval={}s",
         conf.tickers.len(),
         conf.chart_tfs,
+        all_signal_tfs,
         conf.scan_interval_secs,
     );
     for tc in &conf.tickers {
@@ -122,8 +132,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
     }
 
+    // Lead time: run this many seconds BEFORE candle close so data is fresh
+    const LEAD_SECS: u64 = 5;
+
     loop {
-        let cycle_start = tokio::time::Instant::now();
         eprintln!("─── Scan cycle start ───");
 
         match run_cycle(&conf).await {
@@ -131,19 +143,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
         }
 
-        let elapsed = cycle_start.elapsed();
-        let interval = Duration::from_secs(conf.scan_interval_secs);
-        if elapsed < interval {
-            let sleep = interval - elapsed;
-            eprintln!("Sleeping {:.0}s until next cycle", sleep.as_secs_f64());
-            tokio::time::sleep(sleep).await;
-        } else {
-            eprintln!(
-                "Cycle took {:.0}s (>{:.0}s interval) — starting next immediately",
-                elapsed.as_secs_f64(),
-                interval.as_secs_f64(),
-            );
-        }
+        // Calculate sleep: align to next candle close across all signal TFs
+        let now = chrono::Utc::now();
+        let max_interval = Duration::from_secs(conf.scan_interval_secs);
+        let sleep_dur = match next_close_across_tfs(&all_signal_tfs, now) {
+            Some((secs_until, tf)) => {
+                let target = secs_until.saturating_sub(LEAD_SECS);
+                let capped = target.min(max_interval.as_secs());
+                let dur = Duration::from_secs(capped.max(10)); // floor: 10s minimum
+                eprintln!(
+                    "Next close: {} in {}s — sleeping {:.0}s (lead={}s)",
+                    tf, secs_until, dur.as_secs_f64(), LEAD_SECS,
+                );
+                dur
+            }
+            None => {
+                eprintln!("No upcoming close found — sleeping {}s", max_interval.as_secs());
+                max_interval
+            }
+        };
+        tokio::time::sleep(sleep_dur).await;
     }
 }
 
@@ -387,9 +406,10 @@ fn deploy_to_cloudflare(
     output_dir: &std::path::Path,
     project_name: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    eprintln!("Deploying to Cloudflare Pages ({project_name})...");
+    const DEPLOY_TIMEOUT: Duration = Duration::from_secs(30);
+    eprintln!("Deploying to Cloudflare Pages ({project_name})... (timeout: {}s)", DEPLOY_TIMEOUT.as_secs());
 
-    let status = std::process::Command::new("wrangler")
+    let mut child = match std::process::Command::new("wrangler")
         .args([
             "pages",
             "deploy",
@@ -399,22 +419,39 @@ fn deploy_to_cloudflare(
             "--project-name",
             project_name,
         ])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("Deployment successful!");
-            Ok(())
-        }
-        Ok(s) => {
-            let msg = format!("wrangler exited with status: {s}");
-            eprintln!("{msg}");
-            Err(msg.into())
-        }
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to run wrangler: {e}");
             eprintln!("  Is wrangler installed? (npm install -g wrangler)");
-            Err(e.into())
+            return Err(e.into());
+        }
+    };
+
+    // Poll with timeout
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                eprintln!("Deployment successful!");
+                return Ok(());
+            }
+            Ok(Some(status)) => {
+                let msg = format!("wrangler exited with status: {status}");
+                eprintln!("{msg}");
+                return Err(msg.into());
+            }
+            Ok(None) => {
+                if start.elapsed() > DEPLOY_TIMEOUT {
+                    eprintln!("Deploy timed out after {}s — killing wrangler", DEPLOY_TIMEOUT.as_secs());
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap zombie
+                    return Err("wrangler deploy timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 }
