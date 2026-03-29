@@ -902,25 +902,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                     });
                 }
             });
-            // Biased candle arrows
-            data.forEach(d => {
-                if (d.biased_candle > 0) {
-                    markers.push({
-                        time: d.time,
-                        position: 'belowBar',
-                        shape: 'arrowUp',
-                        color: 'rgba(33,150,243,0.8)',
-                    });
-                }
-                if (d.biased_candle < 0) {
-                    markers.push({
-                        time: d.time,
-                        position: 'aboveBar',
-                        shape: 'arrowDown',
-                        color: 'rgba(233,30,99,0.8)',
-                    });
-                }
-            });
             markers.sort((a, b) => a.time - b.time);
             markersSeries.setMarkers(markers);
 
