@@ -1,0 +1,46 @@
+# ─── Cryptobot K8s Deployment ─────────────────────────────────────────────────
+# Long-lived service: fetches multi-ticker data, generates charts, and deploys
+# to Cloudflare Pages on a candle-close-aligned schedule.
+#
+# Prerequisites:
+#   1. Build the image:
+#      docker build -f bins/cryptobot/deployment/Dockerfile -t algotrap-cryptobot:latest .
+#   2. Create the config secret (strips shell quotes for Docker/K8s compatibility):
+#      sed "s/^TICKERS='\(.*\)'$/TICKERS=\1/" bins/cryptobot/.env | \
+#        kubectl create secret generic cryptobot-env --from-env-file=/dev/stdin --dry-run=client -o yaml | \
+#        kubectl apply -f -
+#   3. Deploy:
+#      kubectl apply -f bins/cryptobot/k8s/cryptobot.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cryptobot
+  labels:
+    app: cryptobot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # Only one instance should run at a time
+  selector:
+    matchLabels:
+      app: cryptobot
+  template:
+    metadata:
+      labels:
+        app: cryptobot
+    spec:
+      containers:
+        - name: cryptobot
+          image: algotrap-cryptobot:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: cryptobot-env
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      restartPolicy: Always
