@@ -406,7 +406,7 @@ fn deploy_to_cloudflare(
     output_dir: &std::path::Path,
     project_name: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    const DEPLOY_TIMEOUT: Duration = Duration::from_secs(30);
+    const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
     eprintln!("Deploying to Cloudflare Pages ({project_name})... (timeout: {}s)", DEPLOY_TIMEOUT.as_secs());
 
     let mut child = match std::process::Command::new("wrangler")
