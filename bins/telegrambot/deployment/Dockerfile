@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM lukemathwalker/cargo-chef:latest-rust-bookworm AS chef
 # ─── Planner: generate dependency recipe ──────────────────────────────────────
 FROM chef AS planner
@@ -18,7 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p telegrambot
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/cargo-target \
+    CARGO_TARGET_DIR=/cargo-target cargo chef cook --release --recipe-path recipe.json -p telegrambot
 
 # ─── Build: compile the application (fast — deps already built) ──────────────
 FROM cook AS builder
@@ -27,8 +31,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY bins/ bins/
 
-RUN cargo build --release -p telegrambot --bin telegrambot && \
-    strip /build/target/release/telegrambot
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/cargo-target \
+    CARGO_TARGET_DIR=/cargo-target cargo build --release -p telegrambot --bin telegrambot && \
+    cp /cargo-target/release/telegrambot /build/telegrambot && \
+    strip /build/telegrambot
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -39,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=builder /build/target/release/telegrambot .
+COPY --from=builder /build/telegrambot .
 # Default prompt config (overridden by ConfigMap mount in K8s)
 COPY bins/telegrambot/config/prompts/ config/prompts/
 ENV PROMPTS_DIR=config/prompts

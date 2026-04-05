@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
+use teloxide::RequestError;
+use teloxide::errors::ApiError;
 use teloxide::prelude::*;
+use teloxide::update_listeners;
 use teloxide::utils::command::BotCommands;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::EnvConf;
 use crate::{data, llm, memory, telegram};
@@ -85,11 +88,27 @@ pub async fn run_command_dispatcher(bot: Bot, state: HandlerState) {
                 ),
         );
 
-    Dispatcher::builder(bot, handler)
+    let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
         .default_handler(|_| async {})
         .enable_ctrlc_handler()
-        .build()
-        .dispatch()
+        .build();
+
+    let listener = update_listeners::polling_default(bot).await;
+    let listener_error_handler = Arc::new(|err| async move {
+        if matches!(
+            err,
+            RequestError::Api(ApiError::TerminatedByOtherGetUpdates)
+        ) {
+            warn!(
+                "Telegram long polling was terminated by another getUpdates request; teloxide will retry"
+            );
+        } else {
+            error!("An error from the update listener: {err:?}");
+        }
+    });
+
+    dispatcher
+        .dispatch_with_listener(listener, listener_error_handler)
         .await;
 }
 

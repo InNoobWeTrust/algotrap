@@ -58,7 +58,7 @@ To build the Docker images from your local codebase, navigate to the project roo
     ```
 2.  **Build the cryptobot image**: This image contains the `cryptobot` application.
     ```bash
-    docker build -t algotrap-cryptobot:latest -f bins/cryptobot/deployment/Dockerfile bins/cryptobot
+    docker build --build-context repo=. -t algotrap-cryptobot:latest -f bins/cryptobot/deployment/Dockerfile bins/cryptobot
     ```
 
 These commands build images tagged `algotrap-bins:latest` and `algotrap-cryptobot:latest` respectively.

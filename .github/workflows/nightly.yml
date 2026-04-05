@@ -181,8 +181,19 @@ jobs:
           file: bins/cryptobot/deployment/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-latest
+          build-contexts: |
+            repo=.
           tags: |
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:nightly-${{ github.run_id }}
+
+      - name: Build and push Docker image (telegrambot)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: bins/telegrambot/deployment/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-telegrambot:latest
+            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-telegrambot:nightly-${{ github.run_id }}
