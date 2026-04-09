@@ -143,7 +143,7 @@ fn default_tier_alert_threshold() -> f64 {
 }
 
 fn default_tier_watch_threshold() -> f64 {
-    40.0
+    55.0
 }
 
 fn default_change_detection_indicators() -> String {
@@ -224,7 +224,7 @@ mod tests {
 
         assert_eq!(conf.scan_interval_secs, 900);
         assert!((conf.tier_alert_threshold - 70.0).abs() < f64::EPSILON);
-        assert!((conf.tier_watch_threshold - 40.0).abs() < f64::EPSILON);
+        assert!((conf.tier_watch_threshold - 55.0).abs() < f64::EPSILON);
         assert!((conf.weight_rate_limit - 0.05).abs() < f64::EPSILON);
         assert!((conf.weight_min - 0.01).abs() < f64::EPSILON);
         assert!((conf.weight_max - 0.50).abs() < f64::EPSILON);

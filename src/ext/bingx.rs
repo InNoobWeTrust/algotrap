@@ -6,10 +6,12 @@ use hmac::{Hmac, Mac};
 use reqwest::Url;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
+use core::time::Duration;
 use tap::Pipe;
 
 type HmacSha256 = Hmac<Sha256>;
 pub const MAX_LIMIT: u32 = 1440;
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const BINGX_API_KLINES: &str = "https://open-api.bingx.com/openApi/swap/v3/quote/klines";
 
 #[derive(Clone)]
@@ -22,12 +24,7 @@ pub struct BingXClient {
 
 impl Default for BingXClient {
     fn default() -> Self {
-        Self {
-            api_key: "".to_string(),
-            secret_key: "".to_string(),
-            anonymous: true,
-            client: reqwest::Client::new(),
-        }
+        Self::with_timeout(DEFAULT_TIMEOUT_SECS)
     }
 }
 
@@ -37,7 +34,22 @@ impl BingXClient {
             api_key: api_key.to_string(),
             secret_key: secret_key.to_string(),
             anonymous: false,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+                .build()
+                .expect("Failed to build reqwest client with timeout"),
+        }
+    }
+
+    pub fn with_timeout(timeout_secs: u64) -> Self {
+        Self {
+            api_key: "".to_string(),
+            secret_key: "".to_string(),
+            anonymous: true,
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()
+                .expect("Failed to build reqwest client with timeout"),
         }
     }
 

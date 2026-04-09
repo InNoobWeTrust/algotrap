@@ -38,8 +38,8 @@ pub struct AnalysisResult {
     pub text: String,
     /// 0.0–100.0. Meaningful in alert mode; 100.0 in full mode.
     pub confidence: f64,
-    /// "LONG" | "SHORT" | "NONE".
-    pub direction: String,
+    /// Direction of the trade prediction.
+    pub direction: algotrap::prelude::Direction,
     /// Trade plan options (A, B, C) from the LLM.
     pub trade_plans: Vec<crate::memory::TradePlan>,
     /// Per-indicator weights proposed by the LLM (before guardrails).
@@ -225,7 +225,7 @@ pub async fn run_agent(
     Ok(AnalysisResult {
         text: "⚠️ Analysis was truncated after reaching maximum reasoning steps.".to_string(),
         confidence: 0.0,
-        direction: "NONE".to_string(),
+        direction: algotrap::prelude::Direction::None,
         trade_plans: vec![],
         proposed_weights: None,
         significance_threshold: None,
@@ -246,7 +246,7 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
         AnalysisMode::FullAnalysis => AnalysisResult {
             text,
             confidence: 100.0,
-            direction: "NONE".to_string(),
+            direction: algotrap::prelude::Direction::None,
             trade_plans: vec![],
             proposed_weights: None,
             significance_threshold: None,
@@ -264,9 +264,8 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
 fn parse_alert_json(text: &str) -> AnalysisResult {
     // Inline helper: check if trade plans are aligned with declared direction.
     // NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
-    fn check_conviction(direction: &str, plans: &[crate::memory::TradePlan]) -> bool {
-        let dir = direction.to_uppercase();
-        if dir == "NONE" {
+    fn check_conviction(direction: algotrap::prelude::Direction, plans: &[crate::memory::TradePlan]) -> bool {
+        if direction.is_none() {
             return true; // NONE is inherently neutral
         }
         if plans.is_empty() {
@@ -274,9 +273,19 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
         }
         let matching = plans
             .iter()
-            .filter(|p| p.direction.to_uppercase() == dir)
+            .filter(|p| {
+                p.direction.parse::<algotrap::prelude::Direction>()
+                    .map(|d| d == direction)
+                    .unwrap_or(false)
+            })
             .count();
         matching >= 2 // At least 2 of 3 plans should match
+    }
+
+    // Inline helper: parse direction string, treating WAIT as NONE.
+    fn parse_direction(s: &str) -> algotrap::prelude::Direction {
+        s.parse::<algotrap::prelude::Direction>()
+            .unwrap_or_default()
     }
 
     // Try to find a JSON block in the text
@@ -288,10 +297,9 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                     .as_f64()
                     .unwrap_or(0.0)
                     .clamp(0.0, 100.0);
-                let direction = v["direction"]
-                    .as_str()
-                    .unwrap_or("NONE")
-                    .to_uppercase();
+                let direction = parse_direction(
+                    v["direction"].as_str().unwrap_or("NONE")
+                );
                 let summary = v["summary"]
                     .as_str()
                     .unwrap_or(text)
@@ -346,7 +354,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                 });
 
                 // Conviction check: do trade plans align with declared direction?
-                let conviction_aligned = check_conviction(&direction, &trade_plans);
+                let conviction_aligned = check_conviction(direction, &trade_plans);
                 if !conviction_aligned {
                     let plan_dirs: Vec<&str> = trade_plans
                         .iter()
@@ -378,7 +386,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
     AnalysisResult {
         text: text.to_string(),
         confidence: 0.0,
-        direction: "NONE".to_string(),
+        direction: algotrap::prelude::Direction::None,
         trade_plans: vec![],
         proposed_weights: None,
         significance_threshold: None,
@@ -449,8 +457,10 @@ fn render_prompt(
         Some(mem) => {
             rendered = rendered
                 .replace("{{memory_context}}", &format_memory_context(mem))
+                .replace("{{memory_patterns}}", &format_memory_patterns(mem))
                 .replace("{{weights_context}}", &format_weights_context(mem))
                 .replace("{{outcome_summary}}", &format_outcome_summary(mem))
+                .replace("{{kb_context}}", &format_kb_context(&conf.memory_dir, &ticker.symbol, &mem.predictions))
                 .replace("{{kb_rules}}", &format_kb_rules(mem))
                 .replace("{{indicator_config_context}}", &format_indicator_config_context(
                     mem,
@@ -464,12 +474,20 @@ fn render_prompt(
                     "No previous predictions. This is a cold start.",
                 )
                 .replace(
+                    "{{memory_patterns}}",
+                    "No patterns yet — this is a cold start.",
+                )
+                .replace(
                     "{{weights_context}}",
                     "No previous weights. Use equal attention across all indicators.",
                 )
                 .replace(
                     "{{outcome_summary}}",
                     "No past predictions to evaluate yet.",
+                )
+                .replace(
+                    "{{kb_context}}",
+                    "No curated KB insights yet. Use read_kb to explore topics when needed.",
                 )
                 .replace(
                     "{{kb_rules}}",
@@ -512,9 +530,9 @@ fn format_memory_context(mem: &TickerMemory) -> String {
     }
 
     let result = lines.join("\n");
-    // Budget: ≤1600 characters
+    // Budget: ≤1600 chars, char-safe truncation
     if result.len() > 1600 {
-        result[..1600].to_string()
+        result.chars().take(1600).collect()
     } else {
         result
     }
@@ -609,10 +627,11 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
         .take(5)
         .collect();
     if recent_scored.len() >= 3 {
-        let mut dir_fails: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut dir_fails: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for pred in &recent_scored {
             if pred.outcome_score.unwrap_or(1.0) < 0.5 {
-                *dir_fails.entry(&pred.direction).or_insert(0) += 1;
+                let key = pred.direction.to_string();
+                *dir_fails.entry(key).or_insert(0) += 1;
             }
         }
         for (dir, count) in &dir_fails {
@@ -631,6 +650,167 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
     } else {
         rules.join("\n")
     }
+}
+
+/// Format distilled KB insights for the current cycle (≤1500 chars).
+///
+/// Reads selected KB topics, filters by ticker relevance and accuracy regime,
+/// and returns a compact evidence block. This is separate from `format_kb_rules()`
+/// which handles behavioral instructions about when to write KB.
+fn format_kb_context(
+    memory_dir: &str,
+    symbol: &str,
+    predictions: &[crate::memory::Prediction],
+) -> String {
+    const BUDGET: usize = 1500;
+
+    let (_, scored_count, accuracy) = crate::scoring::compute_direction_accuracy(predictions);
+
+    // Determine which topics to prioritize based on accuracy regime
+    let primary_topics: &[&str] = if scored_count >= 3 && accuracy < 0.5 {
+        &["false-signal-patterns", "lessons-learned"]
+    } else if scored_count >= 3 && accuracy > 0.7 {
+        &["successful-setups", "lessons-learned"]
+    } else {
+        &["lessons-learned", "false-signal-patterns", "successful-setups"]
+    };
+
+    // Extract ticker base symbol for filtering (e.g. "BTC" from "BTC-USDT")
+    let ticker_base = symbol.split('-').next().unwrap_or(symbol);
+
+    let mut sections: Vec<String> = Vec::new();
+
+    for topic in primary_topics {
+        let content = crate::kb::read_topic(memory_dir, topic);
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        // Split into lines and score relevance
+        let lines: Vec<&str> = content.lines().collect();
+        let mut relevant: Vec<&str> = Vec::new();
+
+        for line in &lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // Prefer ticker-matching lines
+            let ticker_match = trimmed.contains(ticker_base);
+            if ticker_match {
+                relevant.push(line);
+            }
+        }
+
+        // If no ticker-specific lines, include a few generic high-signal lines
+        if relevant.is_empty() {
+            let generic: Vec<&&str> = lines
+                .iter()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.starts_with('#') && !t.starts_with("---")
+                })
+                .take(5)
+                .collect();
+            if !generic.is_empty() {
+                sections.push(format!(
+                    "[{topic}] (generic — verify against current {symbol} conditions)\n{}",
+                    generic.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n")
+                ));
+            }
+        } else {
+            let ticker_lines: Vec<&str> = relevant.iter().take(8).copied().collect();
+            sections.push(format!(
+                "[{topic}]\n{}",
+                ticker_lines.join("\n")
+            ));
+        }
+    }
+
+    if sections.is_empty() {
+        return format!("No curated KB insights yet for {symbol}. Use read_kb to explore topics when needed.");
+    }
+
+    let result = sections.join("\n\n");
+
+    // Char-safe truncation at budget boundary
+    if result.len() > BUDGET {
+        let truncated: String = result.chars().take(BUDGET).collect();
+        format!("{truncated}\n...[truncated]")
+    } else {
+        result
+    }
+}
+
+/// Format a compact derived summary of recurring patterns from TickerMemory.
+///
+/// Extracts: recent accuracy trend, failing directions, streak status.
+/// This complements the raw chronological `memory_context` with actionable abstractions.
+fn format_memory_patterns(mem: &TickerMemory) -> String {
+    let total = mem.predictions.len();
+    if total == 0 {
+        return "No patterns yet — this is a cold start.".to_string();
+    }
+
+    let (correct, scored_count, accuracy) =
+        crate::scoring::compute_direction_accuracy(&mem.predictions);
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if scored_count > 0 {
+        parts.push(format!(
+            "Validated accuracy: {correct}/{scored_count} ({accuracy:.0}%)."
+        ));
+
+        // Check for low accuracy streak
+        let low_streak = crate::scoring::is_low_accuracy_streak(&mem.predictions, 5, 0.4);
+        if low_streak {
+            parts.push("⚠️ Low accuracy streak detected (≤40% over last 5 scored).".to_string());
+        }
+
+        // Direction-specific failure analysis
+        let recent_scored: Vec<_> = mem
+            .predictions
+            .iter()
+            .rev()
+            .filter(|p| p.outcome_score.is_some())
+            .take(10)
+            .collect();
+
+        if recent_scored.len() >= 3 {
+            let mut dir_stats: std::collections::HashMap<String, (usize, usize)> =
+                std::collections::HashMap::new();
+            for pred in &recent_scored {
+                let score = pred.outcome_score.unwrap_or(0.0);
+                let entry = dir_stats
+                    .entry(pred.direction.to_string())
+                    .or_insert((0, 0));
+                entry.1 += 1;
+                if score >= 0.5 {
+                    entry.0 += 1;
+                }
+            }
+
+            let failing_dirs: Vec<String> = dir_stats
+                .iter()
+                .filter(|(_, (correct, total))| *total >= 2 && *correct == 0)
+                .map(|(dir, _)| dir.clone())
+                .collect();
+
+            if !failing_dirs.is_empty() {
+                parts.push(format!(
+                    "Failing directions (last 10 scored): {}. Avoid relying on signals that produce these calls.",
+                    failing_dirs.join(", ")
+                ));
+            }
+        }
+    } else {
+        parts.push(format!(
+            "{total} predictions recorded but none validated yet."
+        ));
+    }
+
+    parts.join(" ")
 }
 
 /// Generate CoT trigger text based on model capability.
@@ -846,7 +1026,7 @@ mod tests {
         let text = r#"{"confidence": 85.5, "direction": "LONG", "summary": "Strong bullish setup"}"#;
         let result = parse_alert_json(text);
         assert!((result.confidence - 85.5).abs() < f64::EPSILON);
-        assert_eq!(result.direction, "LONG");
+        assert_eq!(result.direction, algotrap::prelude::Direction::Long);
         assert_eq!(result.text, "Strong bullish setup");
     }
 
@@ -857,7 +1037,7 @@ mod tests {
 That's all."#;
         let result = parse_alert_json(text);
         assert!((result.confidence - 42.0).abs() < f64::EPSILON);
-        assert_eq!(result.direction, "NONE");
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
         assert_eq!(result.text, "No clear setup at this time.");
     }
 
@@ -866,7 +1046,7 @@ That's all."#;
         let text = r#"{"confidence": 75}"#;
         let result = parse_alert_json(text);
         assert!((result.confidence - 75.0).abs() < f64::EPSILON);
-        assert_eq!(result.direction, "NONE"); // default
+        assert_eq!(result.direction, algotrap::prelude::Direction::None); // default
     }
 
     #[test]
@@ -874,7 +1054,7 @@ That's all."#;
         let text = "This is not JSON at all";
         let result = parse_alert_json(text);
         assert!((result.confidence - 0.0).abs() < f64::EPSILON);
-        assert_eq!(result.direction, "NONE");
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
         assert_eq!(result.text, text);
     }
 
@@ -898,7 +1078,7 @@ That's all."#;
         let result = parse_analysis_result(text.clone(), AnalysisMode::FullAnalysis);
         assert_eq!(result.text, text);
         assert!((result.confidence - 100.0).abs() < f64::EPSILON);
-        assert_eq!(result.direction, "NONE");
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
     }
 
     #[test]
@@ -906,7 +1086,7 @@ That's all."#;
         let text = r#"{"confidence": 90, "direction": "SHORT", "summary": "Bearish reversal"}"#.to_string();
         let result = parse_analysis_result(text, AnalysisMode::AlertScan);
         assert!((result.confidence - 90.0).abs() < f64::EPSILON);
-        assert_eq!(result.direction, "SHORT");
+        assert_eq!(result.direction, algotrap::prelude::Direction::Short);
         assert_eq!(result.text, "Bearish reversal");
     }
 
@@ -914,7 +1094,7 @@ That's all."#;
     fn test_parse_alert_json_direction_case_insensitive() {
         let text = r#"{"confidence": 80, "direction": "long", "summary": "Go long"}"#;
         let result = parse_alert_json(text);
-        assert_eq!(result.direction, "LONG");
+        assert_eq!(result.direction, algotrap::prelude::Direction::Long);
     }
 
     #[test]
@@ -1000,6 +1180,199 @@ That's all."#;
         assert!(conf.supports_reasoning);
         let trigger = cot_trigger_text(&conf);
         assert!(trigger.is_empty());
+    }
+
+    #[test]
+    fn test_format_memory_patterns_cold_start() {
+        let mem = TickerMemory::new("BTC-USDT");
+        let result = format_memory_patterns(&mem);
+        assert!(result.contains("cold start"));
+    }
+
+    #[test]
+    fn test_format_memory_patterns_unscored() {
+        use chrono::Utc;
+        let mut mem = TickerMemory::new("ETH-USDT");
+        mem.predictions.push(crate::memory::Prediction {
+            timestamp: Utc::now(),
+            confidence: 60.0,
+            direction: algotrap::prelude::Direction::Long,
+            summary: "test".into(),
+            trade_plans: vec![],
+            indicators: HashMap::new(),
+            outcome_score: None,
+        });
+        let result = format_memory_patterns(&mem);
+        assert!(result.contains("none validated"));
+    }
+
+    #[test]
+    fn test_format_memory_patterns_low_accuracy_streak() {
+        use chrono::Utc;
+        let mut mem = TickerMemory::new("SOL-USDT");
+        for _ in 0..5 {
+            mem.predictions.push(crate::memory::Prediction {
+                timestamp: Utc::now(),
+                confidence: 55.0,
+                direction: algotrap::prelude::Direction::Long,
+                summary: "test".into(),
+                trade_plans: vec![],
+                indicators: HashMap::new(),
+                outcome_score: Some(0.0),
+            });
+        }
+        let result = format_memory_patterns(&mem);
+        assert!(result.contains("Low accuracy streak"));
+    }
+
+    #[test]
+    fn test_format_memory_patterns_failing_direction() {
+        use chrono::Utc;
+        let mut mem = TickerMemory::new("BTC-USDT");
+        // 4 wrong SHORT calls in recent history
+        for _ in 0..4 {
+            mem.predictions.push(crate::memory::Prediction {
+                timestamp: Utc::now(),
+                confidence: 70.0,
+                direction: algotrap::prelude::Direction::Short,
+                summary: "test".into(),
+                trade_plans: vec![],
+                indicators: HashMap::new(),
+                outcome_score: Some(0.0),
+            });
+        }
+        // 2 correct LONG calls
+        for _ in 0..2 {
+            mem.predictions.push(crate::memory::Prediction {
+                timestamp: Utc::now(),
+                confidence: 65.0,
+                direction: algotrap::prelude::Direction::Long,
+                summary: "test".into(),
+                trade_plans: vec![],
+                indicators: HashMap::new(),
+                outcome_score: Some(0.9),
+            });
+        }
+        let result = format_memory_patterns(&mem);
+        assert!(result.contains("Failing directions"));
+        assert!(result.contains("SHORT"));
+    }
+
+    #[test]
+    fn test_format_kb_context_empty_kb() {
+        let dir = std::env::temp_dir().join("telegrambot_test_kb_context");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_str = dir.to_str().unwrap();
+        crate::kb::seed_kb(dir_str).unwrap();
+
+        let result = format_kb_context(dir_str, "BTC-USDT", &[]);
+        assert!(result.contains("No curated KB insights"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_kb_context_ticker_filtering() {
+        let dir = std::env::temp_dir().join("telegrambot_test_kb_filter");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_str = dir.to_str().unwrap();
+        crate::kb::seed_kb(dir_str).unwrap();
+
+        // Write ticker-specific content on separate lines
+        crate::kb::write_topic(
+            dir_str,
+            "lessons-learned",
+            "BTC tends to gap fill on Monday opens.\nETH is more range-bound.\nBTC RSI divergence works well on 4h.",
+        )
+        .unwrap();
+
+        let result = format_kb_context(dir_str, "BTC-USDT", &[]);
+        assert!(result.contains("BTC"));
+        // ETH-only line should not appear in BTC context
+        assert!(!result.contains("ETH is more range-bound"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_kb_context_truncation() {
+        let dir = std::env::temp_dir().join("telegrambot_test_kb_trunc");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_str = dir.to_str().unwrap();
+        crate::kb::seed_kb(dir_str).unwrap();
+
+        // Write a very long line
+        let long_content = "BTC ".repeat(500); // 2000 chars
+        crate::kb::write_topic(dir_str, "lessons-learned", &long_content).unwrap();
+
+        let result = format_kb_context(dir_str, "BTC-USDT", &[]);
+        assert!(result.len() <= 1520); // budget + "...[truncated]"
+        assert!(result.contains("truncated") || result.len() <= 1500);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_kb_context_poor_accuracy_routing() {
+        use chrono::Utc;
+        let dir = std::env::temp_dir().join("telegrambot_test_kb_routing");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_str = dir.to_str().unwrap();
+        crate::kb::seed_kb(dir_str).unwrap();
+
+        crate::kb::write_topic(
+            dir_str,
+            "false-signal-patterns",
+            "BTC fake breakouts occur on low volume 4h candles.",
+        )
+        .unwrap();
+        crate::kb::write_topic(
+            dir_str,
+            "lessons-learned",
+            "BTC RSI divergence is unreliable in choppy markets.",
+        )
+        .unwrap();
+
+        // Simulate poor accuracy predictions
+        let predictions: Vec<crate::memory::Prediction> = (0..5)
+            .map(|_| crate::memory::Prediction {
+                timestamp: Utc::now(),
+                confidence: 60.0,
+                direction: algotrap::prelude::Direction::Long,
+                summary: "test".into(),
+                trade_plans: vec![],
+                indicators: HashMap::new(),
+                outcome_score: Some(0.0),
+            })
+            .collect();
+
+        let result = format_kb_context(dir_str, "BTC-USDT", &predictions);
+        // Should include false-signal-patterns and lessons-learned (poor accuracy routing)
+        assert!(result.contains("false-signal-patterns") || result.contains("lessons-learned"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_memory_context_char_safe_truncation() {
+        use chrono::Utc;
+        let mut mem = TickerMemory::new("BTC-USDT");
+        // Add many predictions to exceed budget
+        for i in 0..100 {
+            mem.predictions.push(crate::memory::Prediction {
+                timestamp: Utc::now(),
+                confidence: 50.0 + (i as f64 % 50.0),
+                direction: algotrap::prelude::Direction::Long,
+                summary: format!("prediction {i}"),
+                trade_plans: vec![],
+                indicators: HashMap::new(),
+                outcome_score: Some(0.7),
+            });
+        }
+        let result = format_memory_context(&mem);
+        // Truncation is by char count; byte length may exceed 1600 due to Unicode markers
+        assert!(result.chars().count() <= 1600);
+        assert!(!result.is_empty());
     }
 }
 

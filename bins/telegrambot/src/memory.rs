@@ -29,7 +29,7 @@ pub struct TradePlan {
 pub struct Prediction {
     pub timestamp: DateTime<Utc>,
     pub confidence: f64,
-    pub direction: String,
+    pub direction: algotrap::prelude::Direction,
     pub summary: String,
     pub trade_plans: Vec<TradePlan>,
     /// Indicator snapshot at time of prediction (for change detection).
@@ -509,7 +509,7 @@ mod tests {
             let pred = Prediction {
                 timestamp: Utc::now(),
                 confidence: i as f64 * 10.0,
-                direction: "LONG".into(),
+                direction: algotrap::prelude::Direction::Long,
                 summary: format!("pred {i}"),
                 trade_plans: vec![],
                 indicators: HashMap::new(),
@@ -563,7 +563,7 @@ mod tests {
             Prediction {
                 timestamp: Utc::now(),
                 confidence: 65.0,
-                direction: "LONG".into(),
+                direction: algotrap::prelude::Direction::Long,
                 summary: "test".into(),
                 trade_plans: vec![],
                 indicators: HashMap::from([("rssi".into(), 55.0)]),
@@ -589,7 +589,7 @@ mod tests {
             Prediction {
                 timestamp: Utc::now(),
                 confidence: 50.0,
-                direction: "LONG".into(),
+                direction: algotrap::prelude::Direction::Long,
                 summary: "t".into(),
                 trade_plans: vec![],
                 indicators: HashMap::from([("rssi".into(), 50.0), ("close".into(), 100.0)]),
@@ -611,7 +611,7 @@ mod tests {
             Prediction {
                 timestamp: Utc::now(),
                 confidence: 50.0,
-                direction: "LONG".into(),
+                direction: algotrap::prelude::Direction::Long,
                 summary: "t".into(),
                 trade_plans: vec![],
                 indicators: HashMap::from([("rssi".into(), 50.0)]),
@@ -633,7 +633,7 @@ mod tests {
             Prediction {
                 timestamp: Utc::now(),
                 confidence: 50.0,
-                direction: "LONG".into(),
+                direction: algotrap::prelude::Direction::Long,
                 summary: "t".into(),
                 trade_plans: vec![],
                 indicators: HashMap::from([

@@ -60,7 +60,7 @@ pub async fn send_alert(
     bot: &Bot,
     chat_id: ChatId,
     symbol: &str,
-    direction: &str,
+    direction: algotrap::prelude::Direction,
     confidence: f64,
     summary: &str,
     tf_charts: &[(String, Vec<u8>)],
@@ -91,10 +91,10 @@ pub async fn send_alert(
     }
 
     // Format alert text
-    let direction_emoji = match direction.to_uppercase().as_str() {
-        "LONG" => "🟢 LONG",
-        "SHORT" => "🔴 SHORT",
-        _ => "⚪ NONE",
+    let direction_emoji = match direction {
+        algotrap::prelude::Direction::Long => "🟢 LONG",
+        algotrap::prelude::Direction::Short => "🔴 SHORT",
+        algotrap::prelude::Direction::None => "⚪ NONE",
     };
 
     let bold_symbol = to_bold_sans(symbol);
@@ -124,7 +124,7 @@ pub async fn send_watch_notification(
     bot: &Bot,
     chat_id: ChatId,
     symbol: &str,
-    direction: &str,
+    direction: algotrap::prelude::Direction,
     confidence: f64,
     summary: &str,
     trade_plans: &[crate::memory::TradePlan],
@@ -155,10 +155,10 @@ pub async fn send_watch_notification(
         }
     }
 
-    let direction_emoji = match direction.to_uppercase().as_str() {
-        "LONG" => "🟢 LONG",
-        "SHORT" => "🔴 SHORT",
-        _ => "⚪ NONE",
+    let direction_emoji = match direction {
+        algotrap::prelude::Direction::Long => "🟢 LONG",
+        algotrap::prelude::Direction::Short => "🔴 SHORT",
+        algotrap::prelude::Direction::None => "⚪ NONE",
     };
 
     let bold_symbol = to_bold_sans(symbol);

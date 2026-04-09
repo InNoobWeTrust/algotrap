@@ -5,6 +5,7 @@ use async_openai::config::OpenAIConfig;
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
+use reqwest;
 use teloxide::prelude::*;
 use tracing::{error, info, warn};
 
@@ -37,12 +38,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
     }
 
-    let bot = Bot::new(&conf.telegram_bot_token);
+    // Two independent Bot instances — same token, separate HTTP clients.
+    // This prevents the scan loop's outbound messages from sharing a connection
+    // with the command dispatcher's long-polling.
+    let scan_bot = Bot::new(&conf.telegram_bot_token);
+    let cmd_bot = Bot::new(&conf.telegram_bot_token);
     let bingx = Arc::new(algotrap::ext::bingx::BingXClient::default());
     let openai_config = OpenAIConfig::new()
         .with_api_base(&conf.llm_api_base)
         .with_api_key(&conf.llm_api_key);
-    let llm_client = Arc::new(OpenAIClient::with_config(openai_config));
+    let llm_http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("Failed to build reqwest client for LLM");
+    let llm_client = Arc::new(OpenAIClient::build(llm_http_client, openai_config, Default::default()));
     let conf = Arc::new(conf);
 
     // Shared state for command handlers
@@ -56,7 +65,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Task 1: Alert scan loop
     let scan_conf = Arc::clone(&conf);
-    let scan_bot = bot.clone();
     let scan_bingx = Arc::clone(&bingx);
     let scan_llm = Arc::clone(&llm_client);
     let scan_handle = tokio::spawn(async move {
@@ -64,7 +72,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     });
 
     // Task 2: Telegram command dispatcher
-    let cmd_bot = bot.clone();
     let cmd_handle = tokio::spawn(async move {
         commands::run_command_dispatcher(cmd_bot, state).await;
     });
@@ -91,12 +98,10 @@ async fn run_alert_scan_loop(
         info!("Starting alert scan cycle for {} tickers", conf.tickers.len());
 
         for ticker in &conf.tickers {
-            match scan_ticker(conf, bot, bingx, llm_client, ticker).await {
-                Ok(()) => {}
-                Err(e) => {
-                    error!(symbol = %ticker.symbol, "Scan failed: {e:#}");
-                    // Continue to next ticker — don't block the cycle
-                }
+            match tokio::time::timeout(Duration::from_secs(600), scan_ticker(conf, bot, bingx, llm_client, ticker)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!(symbol = %ticker.symbol, "Scan failed: {e:#}"),
+                Err(_) => error!(symbol = %ticker.symbol, "Scan timed out after 10 minutes"),
             }
         }
 
@@ -162,7 +167,7 @@ async fn scan_ticker(
                     .unwrap_or(current_price);
                 let atr = telegrambot::scoring::reconstruct_atr(&pred.indicators);
                 let score = telegrambot::scoring::compute_outcome_score(
-                    &pred.direction,
+                    pred.direction,
                     entry_price,
                     current_price,
                     atr,
@@ -231,7 +236,7 @@ async fn scan_ticker(
         has_change,
         mem.last_notified.timestamp,
         conf.notification_cooldown_secs,
-        &result.direction,
+        result.direction,
     );
 
     info!(
@@ -270,7 +275,7 @@ async fn scan_ticker(
     let prediction = telegrambot::memory::Prediction {
         timestamp: chrono::Utc::now(),
         confidence: result.confidence,
-        direction: result.direction.clone(),
+        direction: result.direction,
         summary: result.text.clone(),
         trade_plans: result.trade_plans.clone(),
         indicators: current_indicators.clone(),
@@ -295,7 +300,7 @@ async fn scan_ticker(
                     bot,
                     chat_id,
                     &ticker.symbol,
-                    &result.direction,
+                    result.direction,
                     result.confidence,
                     &result.text,
                     &tf_charts,
@@ -313,7 +318,7 @@ async fn scan_ticker(
                     bot,
                     chat_id,
                     &ticker.symbol,
-                    &result.direction,
+                    result.direction,
                     result.confidence,
                     &summary_text,
                     &result.trade_plans,

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use algotrap::prelude::Direction;
+
 // ─── Tier System ─────────────────────────────────────────────────────────────
 
 /// Response tier based on confidence thresholds.
@@ -69,21 +71,19 @@ pub fn detect_significant_change(
 }
 
 /// Determine whether a notification should be sent based on tier change,
-/// significant-change detection, time-based cooldown, and direction filter.
+/// significant-change detection, time-based cooldown, and direction.
 pub fn should_notify(
     current_tier: Tier,
     previous_tier: Option<&str>,
     has_significant_change: bool,
     last_notified_at: Option<chrono::DateTime<chrono::Utc>>,
     cooldown_secs: u64,
-    direction: &str,
+    direction: Direction,
 ) -> bool {
-    // Filter: Watch/Silent with direction NONE is never actionable
-    if current_tier != Tier::Alert && direction.eq_ignore_ascii_case("NONE") {
+    // NONE direction is not actionable — suppress across all tiers.
+    if direction.is_none() {
         return false;
     }
-
-    // Silent tier never notifies
     if current_tier == Tier::Silent {
         return false;
     }
@@ -144,17 +144,16 @@ pub fn parse_indicator_keys(config_str: &str) -> Vec<String> {
 ///
 /// Falls back to binary scoring (1.0 or 0.0) when ATR is unavailable.
 pub fn compute_outcome_score(
-    direction: &str,
+    direction: Direction,
     prediction_price: f64,
     current_price: f64,
     atr: Option<f64>,
 ) -> f64 {
     let delta = current_price - prediction_price;
     let abs_delta = delta.abs();
-    let dir = direction.to_uppercase();
 
     // NONE direction: scored conditionally against ATR
-    if dir == "NONE" {
+    if direction.is_none() {
         return match atr {
             Some(atr_val) if atr_val > 0.0 => {
                 if abs_delta < 0.5 * atr_val {
@@ -168,10 +167,10 @@ pub fn compute_outcome_score(
     }
 
     // Determine if the prediction direction was correct
-    let direction_correct = match dir.as_str() {
-        "LONG" => delta > 0.0,
-        "SHORT" => delta < 0.0,
-        _ => false,
+    let direction_correct = match direction {
+        Direction::Long => delta > 0.0,
+        Direction::Short => delta < 0.0,
+        Direction::None => false, // already handled above
     };
 
     if !direction_correct {
@@ -319,7 +318,7 @@ mod tests {
             false,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
         assert!(should_notify(
             Tier::Watch,
@@ -327,7 +326,7 @@ mod tests {
             false,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
         // Tier change to Silent still doesn't notify (Silent never notifies)
         assert!(!should_notify(
@@ -336,14 +335,14 @@ mod tests {
             false,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
     }
 
     #[test]
     fn test_should_notify_cold_start() {
         // No previous tier → always notify (unless NONE direction)
-        assert!(should_notify(Tier::Watch, None, false, None, 3600, "LONG"));
+        assert!(should_notify(Tier::Watch, None, false, None, 3600, Direction::Long));
     }
 
     #[test]
@@ -357,7 +356,7 @@ mod tests {
             true,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
         // Significant change but still in cooldown → suppress
         assert!(!should_notify(
@@ -366,7 +365,7 @@ mod tests {
             true,
             Some(recent),
             3600,
-            "LONG"
+            Direction::Long
         ));
         // No significant change + cooldown expired → suppress
         assert!(!should_notify(
@@ -375,7 +374,7 @@ mod tests {
             false,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
     }
 
@@ -390,7 +389,7 @@ mod tests {
             false,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
         // Alert but in cooldown → suppress
         assert!(!should_notify(
@@ -399,7 +398,7 @@ mod tests {
             false,
             Some(recent),
             3600,
-            "LONG"
+            Direction::Long
         ));
     }
 
@@ -412,7 +411,7 @@ mod tests {
             false,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
         assert!(!should_notify(
             Tier::Silent,
@@ -420,7 +419,7 @@ mod tests {
             true,
             Some(past),
             3600,
-            "LONG"
+            Direction::Long
         ));
     }
 
@@ -434,18 +433,21 @@ mod tests {
             true,
             Some(past),
             3600,
-            "NONE"
+            Direction::None
         ));
-        assert!(!should_notify(Tier::Watch, None, true, None, 3600, "NONE"));
-        // Alert + NONE → still notifies (Alert overrides direction filter)
-        assert!(should_notify(
+        assert!(!should_notify(Tier::Watch, None, true, None, 3600, Direction::None));
+        // Alert + NONE → also suppressed (NONE means no actionable trade)
+        assert!(!should_notify(
             Tier::Alert,
             Some("WATCH"),
             false,
             Some(past),
             3600,
-            "NONE"
+            Direction::None
         ));
+        // WAIT is the display string for NONE — same suppression applies
+        assert!(!should_notify(Tier::Watch, None, true, None, 3600, Direction::None));
+        assert!(!should_notify(Tier::Alert, Some("WATCH"), false, Some(past), 3600, Direction::None));
     }
 
     #[test]
@@ -460,7 +462,7 @@ mod tests {
     #[test]
     fn test_outcome_score_long_correct() {
         // LONG prediction, price went up, ATR = 500
-        let score = compute_outcome_score("LONG", 87000.0, 87800.0, Some(500.0));
+        let score = compute_outcome_score(Direction::Long, 87000.0, 87800.0, Some(500.0));
         // magnitude = min(1.0, 800/500) = 1.0
         // score = 1.0 × (0.6 + 1.0 × 0.4) = 1.0
         assert!((score - 1.0).abs() < f64::EPSILON);
@@ -469,7 +471,7 @@ mod tests {
     #[test]
     fn test_outcome_score_long_correct_small_move() {
         // LONG prediction, price up slightly, ATR = 500
-        let score = compute_outcome_score("LONG", 87000.0, 87100.0, Some(500.0));
+        let score = compute_outcome_score(Direction::Long, 87000.0, 87100.0, Some(500.0));
         // magnitude = min(1.0, 100/500) = 0.2
         // score = 1.0 × (0.6 + 0.2 × 0.4) = 0.68
         assert!((score - 0.68).abs() < 1e-10);
@@ -478,14 +480,14 @@ mod tests {
     #[test]
     fn test_outcome_score_long_wrong() {
         // LONG prediction, price went DOWN → 0.0
-        let score = compute_outcome_score("LONG", 87000.0, 86500.0, Some(500.0));
+        let score = compute_outcome_score(Direction::Long, 87000.0, 86500.0, Some(500.0));
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_outcome_score_short_correct() {
         // SHORT prediction, price went down
-        let score = compute_outcome_score("SHORT", 87000.0, 86200.0, Some(500.0));
+        let score = compute_outcome_score(Direction::Short, 87000.0, 86200.0, Some(500.0));
         // magnitude = min(1.0, 800/500) = 1.0
         // score = 1.0 × (0.6 + 1.0 × 0.4) = 1.0
         assert!((score - 1.0).abs() < f64::EPSILON);
@@ -494,14 +496,14 @@ mod tests {
     #[test]
     fn test_outcome_score_short_wrong() {
         // SHORT prediction, price went UP → 0.0
-        let score = compute_outcome_score("SHORT", 87000.0, 87500.0, Some(500.0));
+        let score = compute_outcome_score(Direction::Short, 87000.0, 87500.0, Some(500.0));
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_outcome_score_none_flat_correct() {
         // NONE prediction, market stayed flat (|Δ| < 0.5 × ATR)
-        let score = compute_outcome_score("NONE", 87000.0, 87100.0, Some(500.0));
+        let score = compute_outcome_score(Direction::None, 87000.0, 87100.0, Some(500.0));
         // |100| < 250 → correct no-trade → 1.0
         assert!((score - 1.0).abs() < f64::EPSILON);
     }
@@ -509,7 +511,7 @@ mod tests {
     #[test]
     fn test_outcome_score_none_missed_move() {
         // NONE prediction, significant move missed (|Δ| > 0.5 × ATR)
-        let score = compute_outcome_score("NONE", 87000.0, 87600.0, Some(500.0));
+        let score = compute_outcome_score(Direction::None, 87000.0, 87600.0, Some(500.0));
         // |600| > 250 → missed move → 0.0
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
@@ -517,21 +519,21 @@ mod tests {
     #[test]
     fn test_outcome_score_no_atr_correct() {
         // LONG prediction correct, no ATR → binary 1.0
-        let score = compute_outcome_score("LONG", 87000.0, 87500.0, None);
+        let score = compute_outcome_score(Direction::Long, 87000.0, 87500.0, None);
         assert!((score - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_outcome_score_no_atr_wrong() {
         // LONG prediction wrong, no ATR → 0.0
-        let score = compute_outcome_score("LONG", 87000.0, 86500.0, None);
+        let score = compute_outcome_score(Direction::Long, 87000.0, 86500.0, None);
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_outcome_score_none_no_atr() {
         // NONE without ATR → 0.0 (can't verify)
-        let score = compute_outcome_score("NONE", 87000.0, 87100.0, None);
+        let score = compute_outcome_score(Direction::None, 87000.0, 87100.0, None);
         assert!((score - 0.0).abs() < f64::EPSILON);
     }
 
@@ -541,7 +543,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),
@@ -598,7 +600,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),
@@ -621,7 +623,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),
@@ -645,7 +647,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),
@@ -669,7 +671,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),
@@ -693,7 +695,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),
@@ -717,7 +719,7 @@ mod tests {
         let make_pred = |score: Option<f64>| crate::memory::Prediction {
             timestamp: Utc::now(),
             confidence: 60.0,
-            direction: "LONG".into(),
+            direction: Direction::Long,
             summary: "test".into(),
             trade_plans: vec![],
             indicators: HashMap::new(),

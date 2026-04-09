@@ -4,6 +4,12 @@ Available timeframes: {{tfs}}
 ## Memory
 {{memory_context}}
 
+## Memory Patterns
+{{memory_patterns}}
+
+## KB Context
+{{kb_context}}
+
 ## Indicator Weights & Tuning
 {{weights_context}}
 
@@ -13,7 +19,8 @@ Rules: Range [{{weight_min}}, {{weight_max}}], max ±{{weight_rate_limit}}/cycle
 Tuning: Include `indicator_params` to adjust period/smooth/active. Rate-limited ±30%, min 2 active.
 
 ## KB
-Topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned. Use read_kb/write_kb sparingly (~1 in 5 cycles).
+Topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.
+The KB Context section above contains curated insights for this cycle. Use read_kb(...) only when injected context is insufficient or you need deeper detail on a specific topic. Use write_kb(...) to record new patterns when accuracy is poor (<50%) or strong (>70%).
 
 ## Scratchpad
 Use write_notes to save key observations as you analyze. Notes persist across context resets within this session.
