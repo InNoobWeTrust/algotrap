@@ -222,7 +222,7 @@ fn extract_indicator_summary(
     let cols = [
         "rssi",
         "rssi_ma",
-        "atr_reversion_percent",
+        "band_reversion",
         "structure_power",
         "structure_power_sma",
         "sharpe",
@@ -298,10 +298,10 @@ fn build_multi_tf_overview(
             };
 
             lines.push(format!(
-                "  {tf}: RSSI={rssi}, ATR_rev={atr_rev}%, \
+                "  {tf}: RSSI={rssi}, band_rev={band_rev}, \
                  structure_pwr={pwr}, sharpe={sharpe}, close={close}",
                 rssi = get_val("rssi"),
-                atr_rev = get_val("atr_reversion_percent"),
+                band_rev = get_val("band_reversion"),
                 pwr = get_val("structure_power"),
                 sharpe = get_val("sharpe"),
                 close = get_val("close"),

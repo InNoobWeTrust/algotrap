@@ -15,7 +15,7 @@ Available timeframes: {{tfs}}
 
 {{indicator_config_context}}
 
-Rules: Range [{{weight_min}}, {{weight_max}}], max ±{{weight_rate_limit}}/cycle. Standard keys: rssi, structure_power, atr_reversion_percent, sharpe, ema200.
+Rules: Range [{{weight_min}}, {{weight_max}}], max ±{{weight_rate_limit}}/cycle. Standard keys: rssi, structure_power, band_reversion, sharpe, ema200.
 Tuning: Include `indicator_params` to adjust period/smooth/active. Rate-limited ±30%, min 2 active.
 
 ## KB
@@ -25,10 +25,13 @@ The KB Context section above contains curated insights for this cycle. Use read_
 ## Scratchpad
 Use write_notes to save key observations as you analyze. Notes persist across context resets within this session.
 
+## Directional Discipline
+{{directional_discipline}}
+
 ## Output
 Final response MUST be ONLY this JSON:
 {"confidence": 72, "direction": "LONG", "summary": "2-4 sentences: evidence, conflicts, comparison to past",
- "weights": {"rssi": 0.25, "structure_power": 0.20, "atr_reversion_percent": 0.15, "sharpe": 0.20, "ema200": 0.20},
+ "weights": {"rssi": 0.25, "structure_power": 0.20, "band_reversion": 0.15, "sharpe": 0.20, "ema200": 0.20},
  "trade_plans": [{"label": "A", "direction": "LONG", "entry": 87000, "target": 88500, "stop": 86200, "rationale": "1 sentence"},
                  {"label": "B", "direction": "WAIT", "entry": null, "target": null, "stop": null, "rationale": "1 sentence"}],
  "significance_threshold": 0.25,

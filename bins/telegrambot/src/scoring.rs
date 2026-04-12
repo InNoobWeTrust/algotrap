@@ -239,15 +239,30 @@ pub fn is_low_accuracy_streak(
 
 /// Reconstruct approximate ATR from indicator snapshot.
 ///
-/// ATR ≈ close × atr_reversion_percent / 100
-/// Returns None if either `close` or `atr_reversion_percent` is missing.
+/// Prefers `atr_percent` (= ATR / open, always populated) for reliable results.
+/// Falls back to legacy `atr_reversion_percent` for old memory files.
+/// Returns None if neither key is present or values are non-positive.
 pub fn reconstruct_atr(indicators: &HashMap<String, f64>) -> Option<f64> {
     let close = indicators.get("close").copied()?;
-    let atr_pct = indicators.get("atr_reversion_percent").copied()?;
-    if close <= 0.0 || atr_pct <= 0.0 {
+    if close <= 0.0 {
         return None;
     }
-    Some(close * atr_pct / 100.0)
+
+    // Prefer atr_percent (ratio, always populated): ATR = atr_percent × close
+    if let Some(&atr_ratio) = indicators.get("atr_percent") {
+        if atr_ratio > 0.0 {
+            return Some(close * atr_ratio);
+        }
+    }
+
+    // Legacy fallback: atr_reversion_percent (often zero, less reliable)
+    if let Some(&atr_pct) = indicators.get("atr_reversion_percent") {
+        if atr_pct > 0.0 {
+            return Some(close * atr_pct / 100.0);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -576,7 +591,19 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruct_atr() {
+    fn test_reconstruct_atr_from_atr_percent() {
+        // Primary path: atr_percent = ATR / open ≈ ratio
+        let indicators = HashMap::from([
+            ("close".to_string(), 87000.0),
+            ("atr_percent".to_string(), 0.00575), // ATR ≈ 500.25
+        ]);
+        let atr = reconstruct_atr(&indicators).unwrap();
+        assert!((atr - 500.25).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_reconstruct_atr_legacy_fallback() {
+        // Legacy path: atr_reversion_percent (when atr_percent is absent)
         let indicators = HashMap::from([
             ("close".to_string(), 87000.0),
             ("atr_reversion_percent".to_string(), 0.575),
@@ -584,6 +611,18 @@ mod tests {
         let atr = reconstruct_atr(&indicators).unwrap();
         // 87000 × 0.575 / 100 = 500.25
         assert!((atr - 500.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reconstruct_atr_prefers_atr_percent() {
+        // When both keys are present, atr_percent wins
+        let indicators = HashMap::from([
+            ("close".to_string(), 87000.0),
+            ("atr_percent".to_string(), 0.00575),
+            ("atr_reversion_percent".to_string(), 0.0), // zero = would not work
+        ]);
+        let atr = reconstruct_atr(&indicators).unwrap();
+        assert!((atr - 500.25).abs() < 1.0);
     }
 
     #[test]

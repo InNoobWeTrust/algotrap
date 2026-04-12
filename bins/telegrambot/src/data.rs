@@ -100,6 +100,13 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
         .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
         .alias("atr_reversion_percent");
 
+    // Raw band reversion value (absolute price distance from ATR band).
+    // This is what the LLM sees — more interpretable than the percent form
+    // which was designed as a human buy/sell trigger.
+    let band_rev = ohlc
+        .band_reversion(&atr_osc.clone(), &bias_rev.clone())
+        .alias("band_reversion");
+
     let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
 
@@ -155,6 +162,7 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
         structure_pwr_sma,
         atr_percent,
         atr_rev_percent,
+        band_rev,
         lvrg,
         sharpe_ratio,
         is_atr_gap,

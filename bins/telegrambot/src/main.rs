@@ -38,11 +38,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
     }
 
-    // Two independent Bot instances — same token, separate HTTP clients.
-    // This prevents the scan loop's outbound messages from sharing a connection
-    // with the command dispatcher's long-polling.
-    let scan_bot = Bot::new(&conf.telegram_bot_token);
-    let cmd_bot = Bot::new(&conf.telegram_bot_token);
+    // Single shared Bot instance — clone() shares the internal Arc<reqwest::Client>
+    // rather than creating separate HTTP clients that race on Telegram's getUpdates.
+    let bot = Bot::new(&conf.telegram_bot_token);
+    let scan_bot = bot.clone();
+    let cmd_bot = bot;
     let bingx = Arc::new(algotrap::ext::bingx::BingXClient::default());
     let openai_config = OpenAIConfig::new()
         .with_api_base(&conf.llm_api_base)
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let scan_bingx = Arc::clone(&bingx);
     let scan_llm = Arc::clone(&llm_client);
     let scan_handle = tokio::spawn(async move {
-        run_alert_scan_loop(&scan_conf, &scan_bot, &scan_bingx, &scan_llm).await;
+        run_alert_scan_loop(scan_conf, &scan_bot, &scan_bingx, &scan_llm).await;
     });
 
     // Task 2: Telegram command dispatcher
@@ -88,22 +88,50 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 // ─── Alert Scan Loop ─────────────────────────────────────────────────────────
 
 async fn run_alert_scan_loop(
-    conf: &EnvConf,
+    conf: Arc<EnvConf>,
     bot: &Bot,
-    bingx: &algotrap::ext::bingx::BingXClient,
+    _bingx: &algotrap::ext::bingx::BingXClient,
     llm_client: &OpenAIClient<OpenAIConfig>,
 ) {
+    // Semaphore to limit concurrent ticker scans (avoids overloading Browserless)
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(3));
+
     loop {
         let cycle_start = tokio::time::Instant::now();
         info!("Starting alert scan cycle for {} tickers", conf.tickers.len());
 
+        // Spawn all tickers concurrently, bounded by semaphore
+        let mut handles = Vec::new();
         for ticker in &conf.tickers {
-            match tokio::time::timeout(Duration::from_secs(600), scan_ticker(conf, bot, bingx, llm_client, ticker)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => error!(symbol = %ticker.symbol, "Scan failed: {e:#}"),
-                Err(_) => error!(symbol = %ticker.symbol, "Scan timed out after 10 minutes"),
-            }
+            let sem = Arc::clone(&semaphore);
+            let conf = Arc::clone(&conf);
+            let bot = bot.clone();
+            let bingx_client = algotrap::ext::bingx::BingXClient::default();
+            let llm = llm_client.clone();
+            let ticker = ticker.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.expect("Semaphore closed");
+                match tokio::time::timeout(
+                    Duration::from_secs(600),
+                    scan_ticker(&conf, &bot, &bingx_client, &llm, &ticker),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!(symbol = %ticker.symbol, "Scan failed: {e:#}"),
+                    Err(_) => error!(symbol = %ticker.symbol, "Scan timed out after 10 minutes"),
+                }
+            }));
         }
+
+        // Wait for all tickers to finish
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        // Compact bloated KB topics (once per cycle, not per ticker)
+        llm::compact_kb_if_needed(llm_client, &conf).await;
 
         let elapsed = cycle_start.elapsed();
         info!(
@@ -142,7 +170,8 @@ async fn scan_ticker(
     const INDICATOR_KEYS: &[&str] = &[
         "rssi",
         "structure_power",
-        "atr_reversion_percent",
+        "band_reversion",
+        "atr_percent",
         "sharpe",
         "close",
     ];
@@ -374,7 +403,8 @@ fn extract_indicator_snapshot(
         for col_name in &[
             "rssi",
             "structure_power",
-            "atr_reversion_percent",
+            "band_reversion",
+            "atr_percent",
             "sharpe",
             "close",
         ] {

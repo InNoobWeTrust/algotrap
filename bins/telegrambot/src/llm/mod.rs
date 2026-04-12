@@ -462,6 +462,7 @@ fn render_prompt(
                 .replace("{{outcome_summary}}", &format_outcome_summary(mem))
                 .replace("{{kb_context}}", &format_kb_context(&conf.memory_dir, &ticker.symbol, &mem.predictions))
                 .replace("{{kb_rules}}", &format_kb_rules(mem))
+                .replace("{{directional_discipline}}", &format_directional_discipline(mem))
                 .replace("{{indicator_config_context}}", &format_indicator_config_context(
                     mem,
                     crate::scoring::is_low_accuracy_streak(&mem.predictions, 5, 0.4),
@@ -492,6 +493,12 @@ fn render_prompt(
                 .replace(
                     "{{kb_rules}}",
                     "No accuracy data yet — KB rules will activate after 3+ scored predictions.",
+                )
+                .replace(
+                    "{{directional_discipline}}",
+                    "- SHORT is equally valid as LONG. Evaluate both directions with equal rigor.\n\
+                     - NONE/WAIT is correct when signals conflict across 2+ higher timeframes.\n\
+                     - Never default to any direction because you're uncertain. Uncertainty = NONE.",
                 )
                 .replace(
                     "{{indicator_config_context}}",
@@ -593,7 +600,8 @@ fn format_outcome_summary(mem: &TickerMemory) -> String {
 /// Format conditional KB rules based on direction accuracy stats.
 ///
 /// Rules activate only when ≥3 predictions have been scored, avoiding noise from
-/// small sample sizes.
+/// small sample sizes. Uses softer language (SHOULD not MUST) and requires
+/// reading a topic before writing to prevent duplicate entries.
 fn format_kb_rules(mem: &TickerMemory) -> String {
     let (correct, total, accuracy) =
         crate::scoring::compute_direction_accuracy(&mem.predictions);
@@ -604,17 +612,25 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
 
     let mut rules: Vec<String> = Vec::new();
 
+    // Always include the read-before-write rule
+    rules.push(
+        "Before writing to any KB topic, you MUST call read_kb on that topic first \
+         to avoid duplicating existing insights."
+            .to_string(),
+    );
+
     if accuracy < 0.5 {
         rules.push(format!(
             "⚠️ Your direction accuracy is {correct}/{total} ({accuracy:.0}%), below 50%. \
-             You MUST call write_kb('lessons-learned', ...) with your hypothesis about \
-             why your direction calls have been wrong."
+             Consider calling write_kb('lessons-learned', ...) with a NEW hypothesis about \
+             why your direction calls have been wrong — but only if your observation \
+             differs from what's already recorded."
         ));
     } else if accuracy > 0.7 {
         rules.push(format!(
             "✅ Your direction accuracy is {correct}/{total} ({accuracy:.0}%), above 70%. \
-             Call write_kb('successful-setups', ...) to record what indicators/patterns \
-             are working."
+             Consider calling write_kb('successful-setups', ...) to record what indicators/patterns \
+             are working — but only if this is a genuinely new insight."
         ));
     }
 
@@ -638,18 +654,19 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
             if *count >= 3 {
                 rules.push(format!(
                     "🔴 You have {count} recent wrong {dir} calls. \
-                     Write to write_kb('false-signal-patterns', ...) your analysis of \
-                     why {dir} signals are failing."
+                     Consider writing to write_kb('false-signal-patterns', ...) your analysis of \
+                     why {dir} signals are failing — but read the topic first."
                 ));
             }
         }
     }
 
-    if rules.is_empty() {
-        "Your accuracy is in the normal range. Use KB tools when you notice noteworthy patterns.".to_string()
-    } else {
-        rules.join("\n")
+    if rules.len() == 1 {
+        // Only the read-before-write rule — add a neutral message
+        rules.push("Your accuracy is in the normal range. Use KB tools when you notice noteworthy patterns.".to_string());
     }
+
+    rules.join("\n")
 }
 
 /// Format distilled KB insights for the current cycle (≤1500 chars).
@@ -872,6 +889,38 @@ fn format_indicator_config_context(mem: &TickerMemory, low_accuracy_streak: bool
     lines.join("\n")
 }
 
+/// Format dynamic directional discipline based on prediction history.
+///
+/// Computes direction distribution from recent predictions and generates
+/// anti-bias warnings when any direction exceeds 60% of calls.
+fn format_directional_discipline(mem: &TickerMemory) -> String {
+    let mut lines = vec![
+        "- SHORT is equally valid as LONG. In bear trends (price below daily EMA200), prefer SHORT unless strong reversal evidence exists.".to_string(),
+        "- NONE/WAIT is correct when signals conflict across 2+ higher timeframes. Do not force a direction.".to_string(),
+        "- Never default to any direction because you're uncertain. Uncertainty = NONE.".to_string(),
+    ];
+
+    if !mem.predictions.is_empty() {
+        let total = mem.predictions.len();
+        let mut dir_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for p in &mem.predictions {
+            *dir_counts.entry(p.direction.to_string()).or_insert(0) += 1;
+        }
+
+        for (dir, count) in &dir_counts {
+            let pct = *count as f64 / total as f64 * 100.0;
+            if pct > 60.0 {
+                lines.push(format!(
+                    "- ⚠️ Your recent predictions show a {dir} bias ({pct:.0}%). \
+                     Actively evaluate other directions with equal rigor."
+                ));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
 
 // ─── Chat History Compression ────────────────────────────────────────────────
 
@@ -914,6 +963,111 @@ fn context_reset(
     Ok(())
 }
 
+// ─── KB Compaction ──────────────────────────────────────────────────────────
+
+/// Compact bloated KB topics via LLM summarization.
+///
+/// Checks all KB topics for size overruns. For any exceeding the limit,
+/// sends the content to the LLM with a summarization prompt and replaces
+/// the file with the condensed version.
+///
+/// Call this once per scan cycle (not per ticker) to keep I/O cheap.
+pub async fn compact_kb_if_needed(
+    llm_client: &OpenAIClient<OpenAIConfig>,
+    conf: &EnvConf,
+) {
+    let topics = crate::kb::needs_compaction(&conf.memory_dir);
+    if topics.is_empty() {
+        return;
+    }
+
+    let target = crate::kb::compact_target_chars();
+
+    for (topic, content) in topics {
+        info!(
+            topic = %topic,
+            content_len = content.len(),
+            target_len = target,
+            "Compacting KB topic via LLM"
+        );
+
+        // If content exceeds ~100K chars (~25K tokens), truncate to fit within
+        // the model's context window. Keep the header + most recent entries.
+        const MAX_INPUT_CHARS: usize = 100_000;
+        let truncated_content = if content.len() > MAX_INPUT_CHARS {
+            // Extract the header line (first line, typically "# Topic Name")
+            let header = content.lines().next().unwrap_or("# Unknown Topic");
+            let tail_start = content.len().saturating_sub(MAX_INPUT_CHARS - header.len() - 50);
+            format!(
+                "{header}\n\n[... older entries truncated for compaction ...]\n\n{}",
+                &content[tail_start..]
+            )
+        } else {
+            content.clone()
+        };
+
+        let system_prompt = format!(
+            "You are a knowledge base curator. Summarize the following trading insights \
+             into a concise, deduplicated document of at most {target} characters. \
+             Rules:\n\
+             - Keep the markdown header (# Topic Name) as the first line.\n\
+             - Merge duplicate observations into single bullet points.\n\
+             - Preserve specific ticker names, indicator values, and timestamps where they add value.\n\
+             - Remove verbose explanations — keep only actionable insights and patterns.\n\
+             - Order by recency (newest insights first).\n\
+             - Output ONLY the compacted document, no commentary."
+        );
+
+        let messages: Vec<ChatCompletionRequestMessage> = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(system_prompt.as_str())
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(truncated_content.as_str())
+                .build()
+                .unwrap()
+                .into(),
+        ];
+
+        let request = match CreateChatCompletionRequestArgs::default()
+            .model(&conf.llm_model)
+            .messages(messages)
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(topic = %topic, "Failed to build compaction request: {e}");
+                continue;
+            }
+        };
+
+        match llm_client.chat().create(request).await {
+            Ok(response) => {
+                let summary = response
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content.as_deref())
+                    .unwrap_or("# Compaction failed\n");
+
+                if let Err(e) = crate::kb::force_write_topic(&conf.memory_dir, &topic, summary) {
+                    warn!(topic = %topic, "Failed to write compacted KB: {e}");
+                } else {
+                    info!(
+                        topic = %topic,
+                        old_len = content.len(),
+                        new_len = summary.len(),
+                        "KB topic compacted successfully"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(topic = %topic, "LLM compaction call failed: {e}");
+            }
+        }
+    }
+}
 
 /// Compress older messages via a separate LLM call for semantic summarization.
 ///

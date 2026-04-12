@@ -27,6 +27,13 @@ pub const KB_TOPICS: &[&str] = &[
 /// Maximum content length per write (chars). Prevents runaway LLM writes.
 const MAX_WRITE_CHARS: usize = 2000;
 
+/// Maximum total file size (chars) before auto-compaction triggers.
+/// ~50KB — keeps KB files manageable while retaining useful history.
+const MAX_FILE_CHARS: usize = 50_000;
+
+/// Target size after compaction (chars). Leave headroom for new writes.
+const COMPACT_TARGET_CHARS: usize = 4_000;
+
 // ─── File I/O ────────────────────────────────────────────────────────────────
 
 fn kb_dir(memory_dir: &str) -> PathBuf {
@@ -76,6 +83,10 @@ pub fn read_topic(memory_dir: &str, topic: &str) -> String {
 }
 
 /// Write/append content to a KB topic file. Subject to content length limits.
+///
+/// If the file would exceed `MAX_FILE_CHARS` after the write, the write still
+/// succeeds but a compaction warning is logged. Call `needs_compaction()` to
+/// check which topics need LLM-based summarization.
 pub fn write_topic(
     memory_dir: &str,
     topic: &str,
@@ -108,8 +119,67 @@ pub fn write_topic(
     let updated = format!("{existing}\n{content}\n");
     std::fs::write(&path, &updated)?;
 
+    // Warn if approaching compaction threshold
+    if updated.len() > MAX_FILE_CHARS {
+        warn!(
+            topic,
+            file_chars = updated.len(),
+            "KB topic exceeds {MAX_FILE_CHARS} chars — needs compaction"
+        );
+    }
+
     info!(topic, content_len = content.len(), "Wrote to KB");
     Ok(format!("Successfully wrote {len} chars to '{topic}'", len = content.len()))
+}
+
+/// Overwrite a KB topic file with new content (used after LLM compaction).
+///
+/// Bypasses the append logic and replaces the entire file. The header is
+/// preserved by the caller (the LLM compaction prompt asks for it).
+pub fn force_write_topic(
+    memory_dir: &str,
+    topic: &str,
+    content: &str,
+) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    if !is_valid_topic(topic) {
+        return Err(format!("Invalid KB topic: {topic}").into());
+    }
+
+    let path = topic_path(memory_dir, topic);
+    let dir = kb_dir(memory_dir);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, content)?;
+
+    info!(
+        topic,
+        content_len = content.len(),
+        "Force-wrote compacted KB"
+    );
+    Ok(())
+}
+
+/// Return topics that exceed `MAX_FILE_CHARS` and need LLM-based compaction.
+///
+/// Returns a vec of `(topic_slug, current_content)` for topics that are
+/// over the size limit. The caller should feed each to an LLM summarization
+/// prompt and then call `force_write_topic()` with the result.
+pub fn needs_compaction(memory_dir: &str) -> Vec<(String, String)> {
+    KB_TOPICS
+        .iter()
+        .filter_map(|topic| {
+            let content = read_topic(memory_dir, topic);
+            if content.len() > MAX_FILE_CHARS {
+                Some((topic.to_string(), content))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Target size for compacted KB content.
+pub fn compact_target_chars() -> usize {
+    COMPACT_TARGET_CHARS
 }
 
 /// Read all KB topics at once (for context injection). Returns a map of
