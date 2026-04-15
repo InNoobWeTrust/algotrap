@@ -11,31 +11,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15 # hard kill if stuck
 
+    permissions:
+      contents: read
+      packages: read
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          toolchain: stable
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Cache compiled deps between runs — critical for keeping per-run cost low
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: cryptobot
-
-      - name: Build cryptobot
-        run: cargo build --release --bin cryptobot
-
-      # Binary is one-shot by default: fetch OHLC → compute indicators → write output/
-      - name: Run cryptobot (one-shot)
-        env:
-          TICKERS: ${{ secrets.CRYPTOBOT_TICKERS }}
-          CHART_TFS: ${{ secrets.CRYPTOBOT_CHART_TFS }}
-          TIMEOUT_SECS: "30"
-        run: cargo run --release --bin cryptobot
+      - name: Run cryptobot (via Docker)
+        run: |
+          # GHCR requires lowercase repo names
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$REPO-cryptobot:latest"
+          
+          docker pull $IMAGE
+          
+          # Ensure docker can write to the bind-mounted output directory
+          mkdir -p output/data
+          chmod -R 777 output
+          
+          docker run --rm \
+            -v ${{ github.workspace }}/output:/app/output \
+            -e TICKERS="${{ secrets.CRYPTOBOT_TICKERS }}" \
+            -e CHART_TFS="${{ secrets.CRYPTOBOT_CHART_TFS }}" \
+            -e TIMEOUT_SECS=30 \
+            $IMAGE
 
       # Install wrangler once so repeated calls don't re-resolve via npx
       - name: Install wrangler
