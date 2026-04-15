@@ -1,0 +1,72 @@
+name: Cryptobot Data Refresh
+
+on:
+  schedule:
+    - cron: "0 */4 * * *" # every 4 hours
+  workflow_dispatch: # manual trigger for testing
+
+jobs:
+  refresh:
+    name: Fetch + Compute + Upload to R2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # hard kill if stuck
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      # Cache compiled deps between runs — critical for keeping per-run cost low
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cryptobot
+
+      - name: Build cryptobot
+        run: cargo build --release --bin cryptobot
+
+      # Binary is one-shot by default: fetch OHLC → compute indicators → write output/
+      - name: Run cryptobot (one-shot)
+        env:
+          TICKERS: ${{ secrets.CRYPTOBOT_TICKERS }}
+          CHART_TFS: ${{ secrets.CRYPTOBOT_CHART_TFS }}
+          TIMEOUT_SECS: "30"
+        run: cargo run --release --bin cryptobot
+
+      # Install wrangler once so repeated calls don't re-resolve via npx
+      - name: Install wrangler
+        run: npm install -g wrangler@latest
+
+      # Upload all generated files to R2. The index.html and data/*.json share the
+      # same bucket origin, so relative fetch('data/SYMBOL.json') in the HTML works
+      # directly when opening https://pub-<hash>.r2.dev/index.html in a browser.
+      - name: Upload output to Cloudflare R2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          BUCKET="${{ secrets.CLOUDFLARE_R2_BUCKET }}"
+
+          echo "Uploading index.html..."
+          wrangler r2 object put "${BUCKET}/index.html" \
+            --file output/index.html \
+            --content-type "text/html; charset=utf-8" \
+            --remote
+
+          echo "Uploading ticker data files..."
+          for f in output/data/*.json; do
+            [ -f "$f" ] || continue
+            key="data/$(basename "$f")"
+            echo "  PUT ${key}"
+            wrangler r2 object put "${BUCKET}/${key}" \
+              --file "$f" \
+              --content-type "application/json" \
+              --remote
+          done
+
+          echo "Upload complete."
+

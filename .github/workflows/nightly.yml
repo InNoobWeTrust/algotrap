@@ -22,13 +22,10 @@ jobs:
         run: echo "commit_count=$(git log --oneline --since '24 hours ago' | wc -l)" >> $GITHUB_OUTPUT
 
   build:
-    name: Build
+    name: Build (Linux)
     needs: [pre-check]
     if: ${{ needs.pre-check.outputs.commit_count > 0 }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
@@ -43,58 +40,19 @@ jobs:
         run: cargo build --workspace --release --all-targets
 
       - name: Archive binaries
-        shell: bash
         run: |
-          if [ "${{ runner.os }}" == "Windows" ]; then
-            7z a algotrap-${{ runner.os }}.zip target/release/cryptobot.exe target/release/etf_dashboard.exe
-            echo "ASSET=algotrap-${{ runner.os }}.zip" >> $GITHUB_ENV
-          else
-            tar -czf algotrap-${{ runner.os }}.tar.gz -C target/release cryptobot etf_dashboard
-            echo "ASSET=algotrap-${{ runner.os }}.tar.gz" >> $GITHUB_ENV
-          fi
+          tar -czf algotrap-Linux.tar.gz -C target/release cryptobot etf_dashboard
+          echo "ASSET=algotrap-Linux.tar.gz" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: algotrap-${{ runner.os }}
-          path: ${{ env.ASSET }}
-
-  build-musl:
-    name: Build MUSL
-    needs: [pre-check]
-    if: ${{ needs.pre-check.outputs.commit_count > 0 }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install musl-tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build binaries
-        run: cargo build --workspace --release --target x86_64-unknown-linux-musl
-
-      - name: Archive binaries
-        shell: bash
-        run: |
-          tar -czf algotrap-x86_64-unknown-linux-musl.tar.gz -C target/x86_64-unknown-linux-musl/release cryptobot etf_dashboard
-          echo "ASSET=algotrap-x86_64-unknown-linux-musl.tar.gz" >> $GITHUB_ENV
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: algotrap-x86_64-unknown-linux-musl
+          name: algotrap-Linux
           path: ${{ env.ASSET }}
 
   create-release:
     name: Create Release
-    needs: [build, build-musl, pre-check]
+    needs: [build, pre-check]
     if: ${{ needs.pre-check.outputs.commit_count > 0 }}
     runs-on: ubuntu-latest
     steps:
@@ -117,12 +75,9 @@ jobs:
           prerelease: false
           files: |
             artifacts/algotrap-Linux/algotrap-Linux.tar.gz
-            artifacts/algotrap-macOS/algotrap-macOS.tar.gz
-            artifacts/algotrap-Windows/algotrap-Windows.zip
-            artifacts/algotrap-x86_64-unknown-linux-musl/algotrap-x86_64-unknown-linux-musl.tar.gz
 
   build-and-push-docker:
-    name: Build and Push Docker Image
+    name: Build and Push Docker Images
     needs: [create-release]
     runs-on: ubuntu-latest
     permissions:
@@ -144,9 +99,7 @@ jobs:
         id: repo_lowercase
         run: echo "repo=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
+      # No QEMU — linux/amd64 only, native build is faster
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -156,31 +109,18 @@ jobs:
           context: .
           file: base.Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:nightly-${{ github.run_id }}
 
-      - name: Build and push Docker image (base-musl)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: base.Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            RUST_TARGETS=x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
-          tags: |
-            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-latest
-            ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-bins:musl-nightly-${{ github.run_id }}
-
-      - name: Build and push Docker image (apps)
+      - name: Build and push Docker image (cryptobot)
         uses: docker/build-push-action@v5
         with:
           context: ./bins/cryptobot
           file: bins/cryptobot/deployment/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           build-contexts: |
             repo=.
           tags: |

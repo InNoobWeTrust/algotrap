@@ -1,5 +1,4 @@
 use algotrap::df_utils::JsonDataframe;
-use chrono::Utc;
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
@@ -12,12 +11,11 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use algotrap::ext::bingx::MAX_LIMIT;
-use algotrap::ext::ntfy;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
 use algotrap::ta::gap_zones::OhlcGapZones;
 use algotrap::ta::prelude::*;
-use algotrap::time_utils::{is_closing_timeframe, next_close_across_tfs};
+use algotrap::time_utils::next_close_across_tfs;
 
 // ─── Per-Ticker Config ───────────────────────────────────────────────────────
 
@@ -26,11 +24,9 @@ struct TickerConf {
     symbol: String,
     sl_percent: f64,
     tol_percent: f64,
-    #[serde(deserialize_with = "deserialize_tfs")]
-    tfs: Vec<Timeframe>, // signal-checking TFs
     default_tf: Timeframe,
-    #[serde(default, deserialize_with = "deserialize_tfs_opt")]
-    ntfy_tf_exclusion: Vec<Timeframe>,
+    // Legacy signal-only fields are ignored if present in existing TICKERS JSON.
+    // Serde silently drops unknown fields by default.
 }
 
 // ─── Global Config ───────────────────────────────────────────────────────────
@@ -41,11 +37,8 @@ struct EnvConf {
     tickers: Vec<TickerConf>,
     #[serde(deserialize_with = "deserialize_tfs")]
     chart_tfs: Vec<Timeframe>, // shared chart display TFs
-    cloudflare_pages_project_name: String,
-    ntfy_topic: String,
-    ntfy_always: bool,
     #[serde(default = "default_scan_interval")]
-    scan_interval_secs: u64,
+    scan_interval_secs: u64, // only used in --loop mode
     #[serde(default = "default_timeout_secs")]
     timeout_secs: u64, // per-request timeout
 }
@@ -76,26 +69,8 @@ where
         .collect()
 }
 
-/// Deserialize comma-separated timeframes (optional / can be empty).
-fn deserialize_tfs_opt<'de, D>(deserializer: D) -> Result<Vec<Timeframe>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    if s.trim().is_empty() {
-        return Ok(vec![]);
-    }
-    s.split(',')
-        .map(|tf| {
-            tf.trim()
-                .parse::<Timeframe>()
-                .map_err(serde::de::Error::custom)
-        })
-        .collect()
-}
-
 fn default_scan_interval() -> u64 {
-    900 // 15 minutes
+    900 // 15 minutes (used only in --loop mode)
 }
 
 fn default_timeout_secs() -> u64 {
@@ -109,44 +84,37 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     dotenv().ok();
     let conf: EnvConf = envy::from_env()?;
 
-    // Collect all signal TFs across tickers for scheduling
-    let all_signal_tfs: Vec<Timeframe> = conf
-        .tickers
-        .iter()
-        .flat_map(|tc| tc.tfs.iter().copied())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // --loop flag: re-enables the scheduled loop (e.g. for local/K8s use).
+    // Default behavior is one-shot: run once and exit (used by GH Actions cron).
+    let loop_mode = std::env::args().any(|a| a == "--loop");
 
     eprintln!(
-        "Starting cryptobot — {} tickers, chart_tfs={:?}, signal_tfs={:?}, max_interval={}s",
+        "Starting cryptobot — {} tickers, chart_tfs={:?}, mode={}",
         conf.tickers.len(),
         conf.chart_tfs,
-        all_signal_tfs,
-        conf.scan_interval_secs,
+        if loop_mode { "loop" } else { "one-shot" },
     );
     for tc in &conf.tickers {
-        eprintln!(
-            "  ticker: {} (signal_tfs={:?}, default_tf={}, ntfy_excl={:?})",
-            tc.symbol, tc.tfs, tc.default_tf, tc.ntfy_tf_exclusion,
-        );
+        eprintln!("  ticker: {} (default_tf={})", tc.symbol, tc.default_tf);
     }
 
-    // Lead time: run this many seconds BEFORE candle close so data is fresh
+    eprintln!("─── Scan cycle start ───");
+    match run_cycle(&conf).await {
+        Ok(()) => eprintln!("─── Scan cycle complete ───"),
+        Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
+    }
+
+    if !loop_mode {
+        return Ok(());
+    }
+
+    // ─── Loop mode: re-run aligned to chart TF candle closes ─────────────────
+    // Lead time: wake this many seconds BEFORE candle close so data is fresh.
     const LEAD_SECS: u64 = 5;
-
     loop {
-        eprintln!("─── Scan cycle start ───");
-
-        match run_cycle(&conf).await {
-            Ok(()) => eprintln!("─── Scan cycle complete ───"),
-            Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
-        }
-
-        // Calculate sleep: align to next candle close across all signal TFs
         let now = chrono::Utc::now();
         let max_interval = Duration::from_secs(conf.scan_interval_secs);
-        let sleep_dur = match next_close_across_tfs(&all_signal_tfs, now) {
+        let sleep_dur = match next_close_across_tfs(&conf.chart_tfs, now) {
             Some((secs_until, tf)) => {
                 let target = secs_until.saturating_sub(LEAD_SECS);
                 let capped = target.min(max_interval.as_secs());
@@ -163,6 +131,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         };
         tokio::time::sleep(sleep_dur).await;
+
+        eprintln!("─── Scan cycle start ───");
+        match run_cycle(&conf).await {
+            Ok(()) => eprintln!("─── Scan cycle complete ───"),
+            Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
+        }
     }
 }
 
@@ -191,16 +165,11 @@ async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
         .await;
 
         match result {
-            Ok(Ok((chart_json, signal_dfs))) => {
+            Ok(Ok(chart_json)) => {
                 // Write chart data JSON
                 let json_path = data_dir.join(format!("{}.json", ticker.symbol));
                 tokio::fs::write(&json_path, &chart_json).await?;
                 eprintln!("  Wrote {} ({} bytes)", json_path.display(), chart_json.len());
-
-                // Notify
-                if let Err(e) = notify_ticker(&signal_dfs, ticker, conf).await {
-                    eprintln!("  Notification failed for {}: {e:#}", ticker.symbol);
-                }
 
                 tickers_meta.push(TickerMeta {
                     symbol: ticker.symbol.clone(),
@@ -218,7 +187,7 @@ async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
 
-    // Render index.html (no data embedded — data loaded via fetch)
+    // Render index.html (no data embedded — data loaded via fetch from same origin)
     let tickers_json = serde_json::to_string(&tickers_meta)?;
     let chart_tfs_json = serde_json::to_string(&conf.chart_tfs)?;
     let html = render_tdv_html(&tickers_json, &chart_tfs_json);
@@ -226,8 +195,8 @@ async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
     tokio::fs::write(&html_path, &html).await?;
     eprintln!("Wrote {}", html_path.display());
 
-    // Deploy to Cloudflare Pages via wrangler
-    deploy_to_cloudflare(output_dir, &conf.cloudflare_pages_project_name)?;
+    // Upload to R2 is handled by the GH Actions workflow (wrangler r2 object put).
+    // Nothing to do here — just write output/ and exit.
 
     Ok(())
 }
@@ -238,16 +207,12 @@ async fn process_ticker(
     ticker: &TickerConf,
     chart_tfs: &[Timeframe],
     client: &ext::bingx::BingXClient,
-) -> Result<(String, HashMap<Timeframe, DataFrame>), Box<dyn Error + Send + Sync>> {
-    // Merge chart_tfs + ticker.tfs (signal TFs) to avoid duplicate fetches
-    let all_tfs: HashSet<Timeframe> = chart_tfs
-        .iter()
-        .chain(ticker.tfs.iter())
-        .copied()
-        .collect();
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    // Fetch all chart TFs concurrently
+    let chart_tfs_set: HashSet<Timeframe> = chart_tfs.iter().copied().collect();
 
-    let all_dfs = join_all(
-        all_tfs
+    let all_dfs: HashMap<Timeframe, DataFrame> = join_all(
+        chart_tfs_set
             .iter()
             .map(|tf| {
                 let client = client;
@@ -265,20 +230,24 @@ async fn process_ticker(
     .into_par_iter()
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
-            let df = process_data(klines.as_slice(), ticker).expect("Failed to process data");
-            Some((tf, df))
+            match process_data(klines.as_slice(), ticker) {
+                Ok(df) => Some((tf, df)),
+                Err(e) => {
+                    eprintln!("  Error computing indicators for {} {}: {e:#}", ticker.symbol, tf);
+                    None
+                }
+            }
         }
         Err(err) => {
             eprintln!("  Error fetching {}: {err:#?}", ticker.symbol);
             None
         }
     })
-    .collect::<HashMap<Timeframe, DataFrame>>();
+    .collect();
 
-    // Serialize only chart TFs for the JSON file
+    // Serialize all fetched TFs to JSON for the chart
     let chart_dfs_serialized: HashMap<String, Value> = all_dfs
         .par_iter()
-        .filter(|(tf, _)| chart_tfs.contains(tf))
         .map(|(tf, df)| {
             let df_json: JsonDataframe = df
                 .try_into()
@@ -289,172 +258,10 @@ async fn process_ticker(
         .collect();
     let chart_json = serde_json::to_string(&chart_dfs_serialized)?;
 
-    Ok((chart_json, all_dfs))
+    Ok(chart_json)
 }
 
-// ─── Notification ────────────────────────────────────────────────────────────
 
-async fn notify_ticker(
-    all_dfs: &HashMap<Timeframe, DataFrame>,
-    ticker: &TickerConf,
-    conf: &EnvConf,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let excluded_tfs: HashSet<_> = ticker.ntfy_tf_exclusion.iter().cloned().collect();
-    let signals: HashMap<Timeframe, i32> = all_dfs
-        .par_iter()
-        .filter(|(tf, _df)| ticker.tfs.contains(tf) && !excluded_tfs.contains(tf))
-        .map(|(tf, df)| {
-            let second_last_row = df.slice(-2, 1);
-            let signal: i32 = second_last_row
-                .column("climax_signal")
-                .expect("Failed to get signal column")
-                .get(0)
-                .expect("Cannot get signal from last confirmed candle")
-                .extract::<i32>()
-                .unwrap();
-            let signal = if conf.ntfy_always && signal == 0 {
-                1
-            } else {
-                signal
-            };
-            (*tf, signal)
-        })
-        .collect();
-    let effective_signals: HashMap<Timeframe, i32> = signals
-        .clone()
-        .into_par_iter()
-        .filter(|(tf, signal)| {
-            *signal != 0
-                && (conf.ntfy_always
-                    || is_closing_timeframe(
-                        tf,
-                        Utc::now(),
-                        Some(Duration::from_secs(conf.timeout_secs)),
-                    )
-                    .unwrap_or(false))
-        })
-        .collect();
-    let effective_tfs: Vec<Timeframe> = effective_signals
-        .clone()
-        .into_par_iter()
-        .map(|(tf, _)| tf)
-        .collect();
-    let total_weight: usize = signals.par_iter().map(|(tf, _)| tf.weight()).sum();
-    let effective_weight: usize = effective_signals
-        .par_iter()
-        .map(|(tf, _)| tf.weight())
-        .sum();
-    let need_notify = effective_weight > 0;
-
-    dbg!(&ticker.symbol, &signals, &effective_signals, need_notify, conf.ntfy_always);
-    if conf.ntfy_always || need_notify {
-        let records_serialized: HashMap<String, Value> = all_dfs
-            .par_iter()
-            .filter(|(tf, _df)| effective_tfs.contains(tf))
-            .map(|(tf, df)| {
-                let df = df
-                    .clone()
-                    .lazy()
-                    .select([col("rssi"), col("atr_reversion_percent")])
-                    .collect()
-                    .expect("Failed to extract columns");
-                let df_json: JsonDataframe = df
-                    .slice(-2, 1)
-                    .try_into()
-                    .expect("Failed to serialize data frame to json");
-                let df_json: Value = df_json.into();
-                (tf.to_string(), df_json)
-            })
-            .collect();
-        dbg!(&records_serialized);
-        let records_json = serde_json::to_string(&records_serialized)?;
-
-        let action_url = format!(
-            "https://{}.pages.dev/?ticker={}",
-            conf.cloudflare_pages_project_name, ticker.symbol
-        );
-        ntfy::NtfyMessage::default()
-            .topic(&conf.ntfy_topic)
-            .title(&format!("{} notable movements", &ticker.symbol))
-            .message_template(
-                r#"
-Last stats:
-{{ range $tf, $obj := . }}
-{{$tf}}:{{range .}}{{range $k, $v := .}}
-- {{$k}}: {{$v}}{{end}}{{end}}
-{{ end }}
-            "#
-                .trim(),
-            )
-            .message(&records_json)
-            .priority((effective_weight as f64 / total_weight as f64 * 4.).floor() as u8 + 1)
-            .tags(vec![ticker.symbol.to_string()])
-            .actions(vec![vec![
-                "view".to_string(),
-                "Open chart".to_string(),
-                action_url,
-            ]])
-            .send()
-            .await?;
-    }
-    Ok(())
-}
-
-// ─── Cloudflare Pages Deploy ─────────────────────────────────────────────────
-
-fn deploy_to_cloudflare(
-    output_dir: &std::path::Path,
-    project_name: &str,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
-    eprintln!("Deploying to Cloudflare Pages ({project_name})... (timeout: {}s)", DEPLOY_TIMEOUT.as_secs());
-
-    let mut child = match std::process::Command::new("wrangler")
-        .args([
-            "pages",
-            "deploy",
-            output_dir
-                .to_str()
-                .expect("output_dir must be valid UTF-8"),
-            "--project-name",
-            project_name,
-        ])
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to run wrangler: {e}");
-            eprintln!("  Is wrangler installed? (npm install -g wrangler)");
-            return Err(e.into());
-        }
-    };
-
-    // Poll with timeout
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
-                eprintln!("Deployment successful!");
-                return Ok(());
-            }
-            Ok(Some(status)) => {
-                let msg = format!("wrangler exited with status: {status}");
-                eprintln!("{msg}");
-                return Err(msg.into());
-            }
-            Ok(None) => {
-                if start.elapsed() > DEPLOY_TIMEOUT {
-                    eprintln!("Deploy timed out after {}s — killing wrangler", DEPLOY_TIMEOUT.as_secs());
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap zombie
-                    return Err("wrangler deploy timed out".into());
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-}
 
 // ─── Indicators ──────────────────────────────────────────────────────────────
 
