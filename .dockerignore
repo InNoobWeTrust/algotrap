@@ -1,0 +1,11 @@
+.git
+.github
+.agents
+.claude
+.DS_Store
+target
+
+bins/telegrambot/memory
+bins/telegrambot/.env
+
+geckodriver.log

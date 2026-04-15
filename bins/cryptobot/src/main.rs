@@ -1,5 +1,4 @@
 use algotrap::df_utils::JsonDataframe;
-use chrono::Utc;
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
@@ -12,216 +11,261 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use algotrap::ext::bingx::MAX_LIMIT;
-use algotrap::ext::ntfy;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
+use algotrap::ta::gap_zones::OhlcGapZones;
 use algotrap::ta::prelude::*;
-use algotrap::time_utils::is_closing_timeframe;
+use algotrap::time_utils::next_close_across_tfs;
+
+// ─── Per-Ticker Config ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
-struct EnvConf {
+struct TickerConf {
     symbol: String,
     sl_percent: f64,
     tol_percent: f64,
-    tfs: Vec<Timeframe>,
     default_tf: Timeframe,
-    cloudflare_pages_project_name: String,
-    ntfy_topic: String,
-    ntfy_tf_exclusion: Vec<Timeframe>,
-    ntfy_always: bool,
+    // Legacy signal-only fields are ignored if present in existing TICKERS JSON.
+    // Serde silently drops unknown fields by default.
+}
+
+// ─── Global Config ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+struct EnvConf {
+    #[serde(deserialize_with = "deserialize_tickers")]
+    tickers: Vec<TickerConf>,
+    #[serde(deserialize_with = "deserialize_tfs")]
+    chart_tfs: Vec<Timeframe>, // shared chart display TFs
+    #[serde(default = "default_scan_interval")]
+    scan_interval_secs: u64, // only used in --loop mode
     #[serde(default = "default_timeout_secs")]
-    timeout_secs: u64, // seconds
+    timeout_secs: u64, // per-request timeout
+}
+
+// ─── Serde helpers ───────────────────────────────────────────────────────────
+
+/// Deserialize `TICKERS` env var: a JSON array of TickerConf objects.
+fn deserialize_tickers<'de, D>(deserializer: D) -> Result<Vec<TickerConf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    serde_json::from_str(&s).map_err(serde::de::Error::custom)
+}
+
+/// Deserialize comma-separated timeframes (required field).
+fn deserialize_tfs<'de, D>(deserializer: D) -> Result<Vec<Timeframe>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    s.split(',')
+        .map(|tf| {
+            tf.trim()
+                .parse::<Timeframe>()
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
+}
+
+fn default_scan_interval() -> u64 {
+    900 // 15 minutes (used only in --loop mode)
 }
 
 fn default_timeout_secs() -> u64 {
     10
 }
 
+// ─── Main ────────────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Load dotenv
     dotenv().ok();
-
-    // Load env config
     let conf: EnvConf = envy::from_env()?;
 
-    // Convert configured timeout (seconds) to Duration
-    let timeout = Duration::from_secs(conf.timeout_secs);
+    // --loop flag: re-enables the scheduled loop (e.g. for local/K8s use).
+    // Default behavior is one-shot: run once and exit (used by GH Actions cron).
+    let loop_mode = std::env::args().any(|a| a == "--loop");
 
-    // Run the main logic with an overall timeout so the process cannot hang indefinitely.
-    let run_future = async {
-        let client = ext::bingx::BingXClient::default();
+    eprintln!(
+        "Starting cryptobot — {} tickers, chart_tfs={:?}, mode={}",
+        conf.tickers.len(),
+        conf.chart_tfs,
+        if loop_mode { "loop" } else { "one-shot" },
+    );
+    for tc in &conf.tickers {
+        eprintln!("  ticker: {} (default_tf={})", tc.symbol, tc.default_tf);
+    }
 
-        let all_dfs = join_all(
-            conf.tfs
-                .iter()
-                .map(|tf| {
-                    let client = &client;
-                    let symbol = conf.symbol.clone();
-                    async move {
-                        // Fetch 15-minute candles for symbol's perpetual
-                        client
-                            .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
-                            .await
-                            .map(|k| (*tf, k))
-                    }
-                })
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .into_par_iter()
-        .filter_map(|res| match res {
-            Ok((tf, klines)) => {
-                let df = process_data(klines.as_slice(), &conf).expect("Failed to process data");
-                Some((tf, df))
+    eprintln!("─── Scan cycle start ───");
+    match run_cycle(&conf).await {
+        Ok(()) => eprintln!("─── Scan cycle complete ───"),
+        Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
+    }
+
+    if !loop_mode {
+        return Ok(());
+    }
+
+    // ─── Loop mode: re-run aligned to chart TF candle closes ─────────────────
+    // Lead time: wake this many seconds BEFORE candle close so data is fresh.
+    const LEAD_SECS: u64 = 5;
+    loop {
+        let now = chrono::Utc::now();
+        let max_interval = Duration::from_secs(conf.scan_interval_secs);
+        let sleep_dur = match next_close_across_tfs(&conf.chart_tfs, now) {
+            Some((secs_until, tf)) => {
+                let target = secs_until.saturating_sub(LEAD_SECS);
+                let capped = target.min(max_interval.as_secs());
+                let dur = Duration::from_secs(capped.max(10)); // floor: 10s minimum
+                eprintln!(
+                    "Next close: {} in {}s — sleeping {:.0}s (lead={}s)",
+                    tf, secs_until, dur.as_secs_f64(), LEAD_SECS,
+                );
+                dur
             }
-            Err(err) => {
-                eprintln!("Error: {err:#?}");
-                None
+            None => {
+                eprintln!("No upcoming close found — sleeping {}s", max_interval.as_secs());
+                max_interval
             }
-        })
-        .collect::<HashMap<Timeframe, DataFrame>>();
-        let all_dfs_serialized: HashMap<String, Value> = all_dfs
-            .par_iter()
-            .map(|(tf, df)| {
-                let df_json: JsonDataframe = df
-                    .try_into()
-                    .expect("Failed to serialize data frame to json");
-                let df_json: Value = df_json.into();
-                (tf.to_string(), df_json)
-            })
-            .collect();
-        let df_json = serde_json::to_string(&all_dfs_serialized)?;
-        let tfs_json = serde_json::to_string(&conf.tfs)?;
-        let html_vars = TdvHtmlVars {
-            dataset: df_json,
-            symbol: format!("BingX:{}", conf.symbol),
-            tfs: tfs_json,
-            default_tf: conf.default_tf.to_string(),
-            sl_percent: format!("{:.0}", conf.sl_percent * 100.),
-            tol_percent: format!("{:.2}", conf.tol_percent * 100.),
         };
-        let tdv_html = render_tdv_html(&html_vars);
-        tokio::fs::write(format!("tdv.BingX.{}.html", conf.symbol), tdv_html).await?;
-        notify(&all_dfs, &conf).await?;
-        Ok::<(), Box<dyn Error + Send + Sync>>(())
-    };
+        tokio::time::sleep(sleep_dur).await;
 
-    match tokio::time::timeout(timeout, run_future).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => {
-            eprintln!("Error: Execution timed out after {}s", timeout.as_secs());
-            // Use a distinct non-zero exit code to indicate timeout (124 is commonly used for timeouts)
-            std::process::exit(124);
+        eprintln!("─── Scan cycle start ───");
+        match run_cycle(&conf).await {
+            Ok(()) => eprintln!("─── Scan cycle complete ───"),
+            Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
         }
     }
 }
 
-async fn notify(
-    all_dfs: &HashMap<Timeframe, DataFrame>,
-    conf: &EnvConf,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let excluded_tfs: HashSet<_> = conf.ntfy_tf_exclusion.iter().cloned().collect();
-    let signals: HashMap<Timeframe, i32> = all_dfs
-        .par_iter()
-        .filter(|(tf, _df)| !excluded_tfs.contains(tf))
-        .map(|(tf, df)| {
-            let second_last_row = df.slice(-2, 1);
-            let signal: i32 = second_last_row
-                .column("climax_signal")
-                .expect("Failed to get signal column")
-                .get(0)
-                .expect("Cannot get signal from last confirmed candle")
-                .extract::<i32>()
-                .unwrap();
-            // fake value to debug
-            let signal = if conf.ntfy_always && signal == 0 {
-                1
-            } else {
-                signal
-            };
-            (*tf, signal)
-        })
-        .collect();
-    let effective_signals: HashMap<Timeframe, i32> = signals
-        .clone()
-        .into_par_iter()
-        .filter(|(tf, signal)| {
-            *signal != 0
-                && (conf.ntfy_always
-                    || is_closing_timeframe(
-                        tf,
-                        Utc::now(),
-                        Some(Duration::from_secs(conf.timeout_secs)),
-                    )
-                    .unwrap_or(false))
-        })
-        .collect();
-    let effective_tfs: Vec<Timeframe> = effective_signals
-        .clone()
-        .into_par_iter()
-        .map(|(tf, _)| tf)
-        .collect();
-    let total_weight: usize = signals.par_iter().map(|(tf, _)| tf.weight()).sum();
-    let effective_weight: usize = effective_signals
-        .par_iter()
-        .map(|(tf, _)| tf.weight())
-        .sum();
-    let need_notify = effective_weight > 0;
+// ─── Scan Cycle ──────────────────────────────────────────────────────────────
 
-    dbg!(signals, effective_signals, need_notify, conf.ntfy_always);
-    if conf.ntfy_always || need_notify {
-        let records_serialized: HashMap<String, Value> = all_dfs
-            .par_iter()
-            .filter(|(tf, _df)| effective_tfs.contains(tf))
-            .map(|(tf, df)| {
-                let df = df
-                    .clone()
-                    .lazy()
-                    .select([col("rssi"), col("atr_reversion_percent")])
-                    .collect()
-                    .expect("Failed to extract columns");
-                let df_json: JsonDataframe = df
-                    .slice(-2, 1)
-                    .try_into()
-                    .expect("Failed to serialize data frame to json");
-                let df_json: Value = df_json.into();
-                (tf.to_string(), df_json)
-            })
-            .collect();
-        dbg!(&records_serialized);
-        let records_json = serde_json::to_string(&records_serialized)?;
+async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let client = ext::bingx::BingXClient::default();
+    let timeout = Duration::from_secs(conf.timeout_secs);
 
-        let action_url = format!("https://{}.pages.dev/", conf.cloudflare_pages_project_name);
-        ntfy::NtfyMessage::default()
-            .topic(&conf.ntfy_topic)
-            .title(&format!("{} notable movements", &conf.symbol))
-            .message_template(
-                r#"
-Last stats:
-{{ range $tf, $obj := . }}
-{{$tf}}:{{range .}}{{range $k, $v := .}}
-- {{$k}}: {{$v}}{{end}}{{end}}
-{{ end }}
-            "#
-                .trim(),
-            )
-            .message(&records_json)
-            .priority((effective_weight as f64 / total_weight as f64 * 4.).floor() as u8 + 1)
-            .tags(vec![conf.symbol.to_string()])
-            .actions(vec![vec![
-                "view".to_string(),
-                "Open chart".to_string(),
-                action_url,
-            ]])
-            .send()
-            .await?;
+    // Prepare output directory
+    let output_dir = std::path::Path::new("output");
+    let data_dir = output_dir.join("data");
+    tokio::fs::create_dir_all(&data_dir).await?;
+
+    // Collect ticker metadata for the HTML template
+    let mut tickers_meta: Vec<TickerMeta> = Vec::new();
+
+    // Process each ticker
+    for ticker in &conf.tickers {
+        eprintln!("Processing {}...", ticker.symbol);
+
+        let result = tokio::time::timeout(
+            timeout * conf.chart_tfs.len() as u32, // scale timeout by number of TFs
+            process_ticker(ticker, &conf.chart_tfs, &client),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(chart_json)) => {
+                // Write chart data JSON
+                let json_path = data_dir.join(format!("{}.json", ticker.symbol));
+                tokio::fs::write(&json_path, &chart_json).await?;
+                eprintln!("  Wrote {} ({} bytes)", json_path.display(), chart_json.len());
+
+                tickers_meta.push(TickerMeta {
+                    symbol: ticker.symbol.clone(),
+                    sl_percent: format!("{:.0}", ticker.sl_percent * 100.),
+                    tol_percent: format!("{:.2}", ticker.tol_percent * 100.),
+                    default_tf: ticker.default_tf.to_string(),
+                });
+            }
+            Ok(Err(e)) => {
+                eprintln!("  Error processing {}: {e:#}", ticker.symbol);
+            }
+            Err(_) => {
+                eprintln!("  Timeout processing {}", ticker.symbol);
+            }
+        }
     }
+
+    // Render index.html (no data embedded — data loaded via fetch from same origin)
+    let tickers_json = serde_json::to_string(&tickers_meta)?;
+    let chart_tfs_json = serde_json::to_string(&conf.chart_tfs)?;
+    let html = render_tdv_html(&tickers_json, &chart_tfs_json);
+    let html_path = output_dir.join("index.html");
+    tokio::fs::write(&html_path, &html).await?;
+    eprintln!("Wrote {}", html_path.display());
+
+    // Upload to R2 is handled by the GH Actions workflow (wrangler r2 object put).
+    // Nothing to do here — just write output/ and exit.
+
     Ok(())
 }
 
-fn indicators(conf: &EnvConf) -> Vec<Expr> {
+// ─── Per-Ticker Processing ───────────────────────────────────────────────────
+
+async fn process_ticker(
+    ticker: &TickerConf,
+    chart_tfs: &[Timeframe],
+    client: &ext::bingx::BingXClient,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    // Fetch all chart TFs concurrently
+    let chart_tfs_set: HashSet<Timeframe> = chart_tfs.iter().copied().collect();
+
+    let all_dfs: HashMap<Timeframe, DataFrame> = join_all(
+        chart_tfs_set
+            .iter()
+            .map(|tf| {
+                let client = client;
+                let symbol = ticker.symbol.clone();
+                async move {
+                    client
+                        .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
+                        .await
+                        .map(|k| (*tf, k))
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .into_par_iter()
+    .filter_map(|res| match res {
+        Ok((tf, klines)) => {
+            match process_data(klines.as_slice(), ticker) {
+                Ok(df) => Some((tf, df)),
+                Err(e) => {
+                    eprintln!("  Error computing indicators for {} {}: {e:#}", ticker.symbol, tf);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("  Error fetching {}: {err:#?}", ticker.symbol);
+            None
+        }
+    })
+    .collect();
+
+    // Serialize all fetched TFs to JSON for the chart
+    let chart_dfs_serialized: HashMap<String, Value> = all_dfs
+        .par_iter()
+        .map(|(tf, df)| {
+            let df_json: JsonDataframe = df
+                .try_into()
+                .expect("Failed to serialize data frame to json");
+            let df_json: Value = df_json.into();
+            (tf.to_string(), df_json)
+        })
+        .collect();
+    let chart_json = serde_json::to_string(&chart_dfs_serialized)?;
+
+    Ok(chart_json)
+}
+
+
+
+// ─── Indicators ──────────────────────────────────────────────────────────────
+
+fn indicators(ticker: &TickerConf) -> Vec<Expr> {
     let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
 
     // Axis conversion
@@ -327,13 +371,17 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         .alias("climax_signal_shape");
 
     // Miscs
-    let lvrg_adjust = conf.sl_percent / (1. + conf.tol_percent);
+    let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
     let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
     let sharpe_ratio = col("close").sharpe(200).alias("sharpe");
     let sharpe_ratio_color = when(sharpe_ratio.clone().gt(lit(0)))
         .then(lit("rgba(76, 175, 79, 0.5)"))
         .otherwise(lit("rgba(242, 54, 70, 0.5)"))
         .alias("sharpe_color");
+
+    // Gap zone detection columns
+    let is_atr_gap_col = ohlc.is_atr_gap(42).alias("is_atr_gap");
+    let body_ratio_col = ohlc.body_ratio().alias("body_ratio");
 
     // Selected columns to export
     vec![
@@ -372,28 +420,35 @@ fn indicators(conf: &EnvConf) -> Vec<Expr> {
         climax_signal_shape,
         sharpe_ratio,
         sharpe_ratio_color,
+        is_atr_gap_col,
+        body_ratio_col,
     ]
 }
 
-fn process_data(klines: &[Kline], conf: &EnvConf) -> Result<DataFrame, Box<dyn Error>> {
+fn process_data(klines: &[Kline], ticker: &TickerConf) -> Result<DataFrame, Box<dyn Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df.lazy().with_columns(indicators(conf)).collect().unwrap();
+    let df_with_indicators = df.lazy().with_columns(indicators(ticker)).collect().unwrap();
     Ok(df_with_indicators)
 }
 
-struct TdvHtmlVars {
-    dataset: String,
+// ─── Ticker metadata for HTML template ───────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+struct TickerMeta {
     symbol: String,
-    tfs: String,
+    sl_percent: String,
+    tol_percent: String,
     default_tf: String,
-    sl_percent: String,  // formatted, max 2 decimals
-    tol_percent: String, // formatted, max 2 decimals
 }
 
-fn render_tdv_html(vars: &TdvHtmlVars) -> String {
-    render!(TDV_HTML_TEMPLATE, dataset => vars.dataset, symbol => vars.symbol, tfs => vars.tfs, default_tf => vars.default_tf, sl_percent => vars.sl_percent, tol_percent => vars.tol_percent)
-        .trim()
-        .to_string()
+fn render_tdv_html(tickers_json: &str, chart_tfs_json: &str) -> String {
+    render!(
+        TDV_HTML_TEMPLATE,
+        tickers_json => tickers_json,
+        chart_tfs => chart_tfs_json,
+    )
+    .trim()
+    .to_string()
 }
 
 const TDV_HTML_TEMPLATE: &str = r#"
@@ -401,7 +456,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
 <html class="sl-theme-dark" style="font-size: 22px">
   <head>
     <meta charset="utf-8" />
-    <title>{{ symbol }} (InNoobWeTrust™)</title>
+    <title>InNoobWeTrust™ CryptoBot</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
     <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
@@ -420,12 +475,22 @@ const TDV_HTML_TEMPLATE: &str = r#"
         #container {
             height: 100%;
         }
+        #container.rssi-bullish {
+            background: rgba(76,175,80,0.05);
+        }
+        #container.rssi-bearish {
+            background: rgba(242,54,69,0.05);
+        }
 
         #overlay {
             position: absolute;
             top: 2.5%;
             left: 2%;
             z-index: 9999;
+        }
+        #ticker-select {
+            min-width: 200px;
+            margin-bottom: 0.25rem;
         }
         #tf-btns {
             display: inline-block;
@@ -437,17 +502,36 @@ const TDV_HTML_TEMPLATE: &str = r#"
             z-index: 9999;
             font-size: 10px;
         }
+        #loading-overlay {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.6);
+            z-index: 99999;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        #loading-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
     </style>
   </head>
   <body>
-    <div id="container" data-symbol="{{ symbol }}" data-tf="{{ default_tf }}"></div>
+    <div id="container" data-symbol="" data-tf=""></div>
+    <div id="loading-overlay"><sl-spinner style="font-size: 3rem; --track-width: 4px;"></sl-spinner></div>
     <div id="overlay">
         <div id="badges">
-            <sl-badge variant="danger" pill>SL: {{ sl_percent }}%</sl-badge>
-            <sl-badge variant="success" pill>Tol: {{ tol_percent }}%</sl-badge>
+            <sl-badge id="sl-badge" variant="danger" pill>SL: -</sl-badge>
+            <sl-badge id="tol-badge" variant="success" pill>Tol: -</sl-badge>
             <sl-badge id="atr-percent" variant="warning" pill>ATR: -</sl-badge>
             <sl-badge id="leverage" variant="primary" pill>Lvrg: -</sl-badge>
         </div>
+        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
+        <sl-select id="ticker-select" size="small" placeholder="Select ticker"></sl-select>
         <sl-divider style="--spacing: 0.25rem;"></sl-divider>
         <sl-radio-group id="tf-btns"></sl-radio-group>
     </div>
@@ -461,7 +545,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
     <script>
       const fullscreenButton = document.getElementById('fullscreen-btn');
 
-      // Function to request or exit fullscreen
       function toggleFullscreen() {
         if (!document.fullscreenElement) {
           const elem = document.documentElement;
@@ -475,7 +558,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
         }
       }
 
-      // Listen for changes in fullscreen state to update the icon
       document.addEventListener('fullscreenchange', () => {
         if (document.fullscreenElement) {
           fullscreenButton.name = 'fullscreen-exit';
@@ -484,20 +566,96 @@ const TDV_HTML_TEMPLATE: &str = r#"
         }
       });
     </script>
-    <script id="dataset" type="application/json">
-        {{ dataset }}
-    </script>
-    <script id="tfs" type="application/json">
-        {{ tfs }}
+    <!-- Gap Zone Primitive classes (must be defined before onIntervalUpdate) -->
+    <script type="text/javascript">
+        class GapZoneBandRenderer {
+            constructor(zones, chartData) { this._zones = zones; this._data = chartData; this._series = null; this._chart = null; }
+            update(series, chart) { this._series = series; this._chart = chart; }
+            draw(target) {
+                const s = this._series; const c = this._chart;
+                if (!s || !c || !this._data.length) return;
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const ts = c.timeScale();
+                    const firstTime = this._data[0]?.time;
+                    const lastTime = this._data[this._data.length - 1]?.time;
+                    if (!firstTime || !lastTime) return;
+                    const xLeft = ts.timeToCoordinate(firstTime);
+                    const xRight = ts.timeToCoordinate(lastTime);
+                    if (xLeft === null || xRight === null) return;
+                    const ratio = scope.horizontalPixelRatio;
+                    const vRatio = scope.verticalPixelRatio;
+                    this._zones.forEach(z => {
+                        const yTop = s.priceToCoordinate(z.top);
+                        const yBot = s.priceToCoordinate(z.bottom);
+                        if (yTop === null || yBot === null) return;
+                        const opacity = Math.min(0.25, 0.05 + z.trust * 0.2);
+                        const borderOpacity = Math.min(0.5, 0.1 + z.trust * 0.4);
+                        ctx.fillStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,${opacity})`
+                            : `rgba(255,152,0,${opacity})`;
+                        const x = Math.round(xLeft * ratio);
+                        const w = Math.round((xRight - xLeft + 40) * ratio);
+                        const y = Math.round(Math.min(yTop, yBot) * vRatio);
+                        const h = Math.round(Math.abs(yBot - yTop) * vRatio);
+                        ctx.fillRect(x, y, w, h);
+                        ctx.strokeStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,${borderOpacity})`
+                            : `rgba(255,152,0,${borderOpacity})`;
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4 * ratio, 4 * ratio]);
+                        ctx.beginPath();
+                        ctx.moveTo(x, y); ctx.lineTo(x + w, y);
+                        ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                    });
+                });
+            }
+        }
+        class GapZonePaneView {
+            constructor(renderer) { this._renderer = renderer; }
+            renderer() { return this._renderer; }
+        }
+        class GapZonePrimitive {
+            constructor(zones, chartData) {
+                this._renderer = new GapZoneBandRenderer(zones, chartData);
+                this._paneView = new GapZonePaneView(this._renderer);
+            }
+            attached({ series, chart }) { this._renderer.update(series, chart); }
+            detached() { this._renderer.update(null, null); }
+            paneViews() { return [this._paneView]; }
+            updateAllViews() {}
+        }
     </script>
     <script type="text/javascript">
-        const dataset = JSON.parse(document.getElementById('dataset').textContent);
-        const tfs = JSON.parse(document.getElementById('tfs').textContent);
+        // ─── Config from template ─────────────────────────────────────
+        const tickers = {{ tickers_json }};
+        const chartTfs = {{ chart_tfs }};
+
+        // ─── DOM refs ─────────────────────────────────────────────────
+        const tickerSelect = document.getElementById('ticker-select');
         const tf_btns = document.getElementById('tf-btns');
         const container = document.getElementById('container');
+        const slBadge = document.getElementById('sl-badge');
+        const tolBadge = document.getElementById('tol-badge');
         const atr_badge = document.getElementById('atr-percent');
         const lvrg_badge = document.getElementById('leverage');
+        const loadingOverlay = document.getElementById('loading-overlay');
 
+        // ─── Global state ─────────────────────────────────────────────
+        let dataset = {};
+        let currentTicker = null;
+
+        // ─── Populate ticker dropdown ─────────────────────────────────
+        tickers.forEach(t => {
+            const opt = document.createElement('sl-option');
+            opt.value = t.symbol;
+            opt.textContent = `BingX:${t.symbol}`;
+            tickerSelect.appendChild(opt);
+        });
+
+        // ─── Create chart ─────────────────────────────────────────────
         const chart = LightweightCharts.createChart(container, {
             autoSize: true,
             layout: {
@@ -519,9 +677,8 @@ const TDV_HTML_TEMPLATE: &str = r#"
             priceScaleId: '', // set as an overlay by setting a blank priceScaleId
         });
         volumeSeries.priceScale().applyOptions({
-            // set the positioning of the volume series
             scaleMargins: {
-                top: 0.8, // highest point of the series will be 80% away from the top
+                top: 0.8,
                 bottom: 0,
             },
         });
@@ -532,12 +689,11 @@ const TDV_HTML_TEMPLATE: &str = r#"
             priceFormat: {
                 type: 'volume',
             },
-            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
+            priceScaleId: '',
         });
         volumeSmaSeries.priceScale().applyOptions({
-            // set the positioning of the volume series
             scaleMargins: {
-                top: 0.8, // highest point of the series will be 80% away from the top
+                top: 0.8,
                 bottom: 0,
             },
         });
@@ -548,7 +704,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
         const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
         const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
         const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
-        // Candlestick is added last in the panel to have higher z-order
         const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
         const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
         const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
@@ -614,12 +769,16 @@ const TDV_HTML_TEMPLATE: &str = r#"
             }),
         ];
 
+        // ─── Watermark update ─────────────────────────────────────────
         const watermarkUpdate = () => {
-            const tf = tf_btns.value || container.dataset.tf || tfs[0];
-            const atr = +(dataset[tf].slice(-1)[0].atr_percent * 100).toFixed(2);
-            const lvrg = Math.floor(dataset[tf].slice(-1)[0]["leverage"]);
-            atr_badge.innerHTML = `ATR: ${atr}%`;
-            lvrg_badge.innerHTML = `x${lvrg}`;
+            const tf = tf_btns.value || container.dataset.tf || chartTfs[0];
+            const lastBar = dataset[tf]?.slice(-1)[0];
+            if (lastBar) {
+                const atr = +(lastBar.atr_percent * 100).toFixed(2);
+                const lvrg = Math.floor(lastBar.leverage);
+                atr_badge.innerHTML = `ATR: ${atr}%`;
+                lvrg_badge.innerHTML = `x${lvrg}`;
+            }
             const watermarks = [
                 {
                     lines: [
@@ -672,7 +831,9 @@ const TDV_HTML_TEMPLATE: &str = r#"
             });
         }
 
+        // ─── TF update ────────────────────────────────────────────────
         const onIntervalUpdate = (tf) => {
+            if (!dataset[tf]) return;
             const data = dataset[tf].map(d => ({
                 ...d,
                 time: Math.floor(d.time / 1000),
@@ -764,9 +925,62 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 color: d.climax_signal_color,
                 shape: d.climax_signal_shape,
             }))
+            // ATR Climax circles
+            data.forEach(d => {
+                if (d.close >= d.atr_upperband) {
+                    markers.push({
+                        time: d.time,
+                        position: 'aboveBar',
+                        shape: 'circle',
+                        color: 'rgba(157,225,159,0.7)',
+                        size: 3,
+                    });
+                }
+                if (d.close <= d.atr_lowerband) {
+                    markers.push({
+                        time: d.time,
+                        position: 'belowBar',
+                        shape: 'circle',
+                        color: 'rgba(201,134,134,0.7)',
+                        size: 3,
+                    });
+                }
+            });
+            markers.sort((a, b) => a.time - b.time);
             markersSeries.setMarkers(markers);
+
+            // ─── Gap Zone Bands ────────────────────────────────────────
+            const gapZones = [];
+            const MIN_TRUST = 0.3;
+            data.forEach(d => {
+                if (d.is_atr_gap && d.body_ratio >= MIN_TRUST) {
+                    const bottom = Math.min(d.open, d.close);
+                    const top = Math.max(d.open, d.close);
+                    const bullish = d.close > d.open;
+                    const rssiStrength = Math.abs((d.rssi || 50) - 50) / 50;
+                    const trust = d.body_ratio * (0.5 + 0.5 * rssiStrength);
+                    gapZones.push({ top, bottom, direction: bullish ? 'bullish' : 'bearish', trust });
+                }
+            });
+            const recentGaps = gapZones.slice(-10);
+            if (window._gapPrimitive) {
+                try { candlestickSeries.detachPrimitive(window._gapPrimitive); } catch(_) {}
+            }
+            if (recentGaps.length > 0) {
+                window._gapPrimitive = new GapZonePrimitive(recentGaps, data);
+                candlestickSeries.attachPrimitive(window._gapPrimitive);
+            }
+
+            // ─── RSSI Tint ─────────────────────────────────────────────
+            const lastRssi = data[data.length - 1]?.rssi || 50;
+            container.classList.remove('rssi-bullish', 'rssi-bearish');
+            if (lastRssi > 59) container.classList.add('rssi-bullish');
+            else if (lastRssi < 41) container.classList.add('rssi-bearish');
+
             watermarkUpdate();
         }
+
+        // ─── Layout ───────────────────────────────────────────────────
         const onSizeUpdate = () => {
             const tmpSeries = chart.panes()[0].getSeries()[0];
             const len = tmpSeries.data().length;
@@ -781,7 +995,9 @@ const TDV_HTML_TEMPLATE: &str = r#"
             });
         });
         resizeObserver.observe(container);
-        tfs.forEach(tf => {
+
+        // ─── TF buttons ───────────────────────────────────────────────
+        chartTfs.forEach(tf => {
             const tf_btn = document.createElement('sl-radio-button');
             tf_btn.innerText = tf;
             tf_btn.value = tf
@@ -792,10 +1008,54 @@ const TDV_HTML_TEMPLATE: &str = r#"
             });
             tf_btns.appendChild(tf_btn);
         });
-        // Click default timeframe
-        requestAnimationFrame(() => {
-            [...tf_btns.children].find(b => b.textContent == container.dataset.tf)?.click();
-        })
+
+        // ─── Ticker loading ───────────────────────────────────────────
+        async function loadTicker(symbol) {
+            loadingOverlay.classList.add('active');
+            try {
+                const resp = await fetch(`data/${symbol}.json`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                dataset = await resp.json();
+
+                const ticker = tickers.find(t => t.symbol === symbol);
+                currentTicker = ticker;
+                container.dataset.symbol = `BingX:${symbol}`;
+                container.dataset.tf = ticker.default_tf;
+
+                // Update badges
+                slBadge.innerHTML = `SL: ${ticker.sl_percent}%`;
+                tolBadge.innerHTML = `Tol: ${ticker.tol_percent}%`;
+
+                // Update page title
+                document.title = `BingX:${symbol} (InNoobWeTrust™)`;
+
+                // Click default TF
+                requestAnimationFrame(() => {
+                    const defaultBtn = [...tf_btns.children].find(b => b.textContent == ticker.default_tf);
+                    if (defaultBtn) defaultBtn.click();
+                    else if (tf_btns.children[0]) tf_btns.children[0].click();
+                });
+            } catch(e) {
+                console.error(`Failed to load ticker data for ${symbol}:`, e);
+            } finally {
+                loadingOverlay.classList.remove('active');
+            }
+        }
+
+        // ─── URL sync + init ──────────────────────────────────────────
+        tickerSelect.addEventListener('sl-change', (e) => {
+            const symbol = e.target.value;
+            history.replaceState(null, '', `?ticker=${symbol}`);
+            loadTicker(symbol);
+        });
+
+        // Initial load from URL params or first ticker
+        const params = new URLSearchParams(location.search);
+        const initialTicker = params.get('ticker') || tickers[0]?.symbol;
+        if (initialTicker) {
+            tickerSelect.value = initialTicker;
+            loadTicker(initialTicker);
+        }
     </script>
   </body>
 </html>

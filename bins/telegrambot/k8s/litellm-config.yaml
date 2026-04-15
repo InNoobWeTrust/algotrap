@@ -1,0 +1,31 @@
+model_list:
+  # ── 0x multiplier (free) GitHub Copilot models ──────────────
+  # Auth: litellm uses OAuth device flow on first request.
+  # Check pod logs for the auth URL + code.
+  - model_name: gpt-5-mini
+    litellm_params:
+      model: github_copilot/gpt-5-mini
+      reasoning_effort: high
+      max_completion_tokens: 4096
+      include_reasoning: true
+  - model_name: gpt-4.1
+    litellm_params:
+      model: github_copilot/gpt-4.1
+  - model_name: gpt-4o
+    litellm_params:
+      model: github_copilot/gpt-4o
+  - model_name: raptor-mini
+    litellm_params:
+      model: github_copilot/raptor-mini
+
+general_settings:
+  master_key: sk-litellm-proxy
+  # Persistent proxy — using PVC for SQLite
+  allow_requests_on_db_unavailable: true
+  store_model_in_db: false
+  disable_spend_logs: true
+  disable_error_logs: true
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false

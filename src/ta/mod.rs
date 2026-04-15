@@ -1,5 +1,6 @@
 pub(crate) mod common;
 pub mod experimental;
+pub mod gap_zones;
 pub(crate) mod ma;
 pub(crate) mod metric;
 pub(crate) mod ohlc;

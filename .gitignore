@@ -4,6 +4,11 @@ Cargo.lock
 .bacon-locations
 *.html
 *.log
+**/output/
 .env
 k8s/**/secret.yaml
 bins/cryptobot/deployment/envs/*.env
+# Local config/cache
+.wrangler/
+bins/telegrambot/cluster_memory/
+bins/telegrambot/memory/

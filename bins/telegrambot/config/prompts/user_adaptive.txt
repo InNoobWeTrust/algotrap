@@ -1,0 +1,10 @@
+Evaluate {{symbol}} for trade opportunities. Use the tools to gather indicator data across timeframes.
+
+Before forming your conclusion:
+1. Compare current indicator evidence against the failure/success patterns in the Memory Patterns and KB Context sections.
+2. If current conditions match a known failure pattern, reduce confidence even if indicators look strong.
+3. If current conditions match a known successful setup, you may increase confidence — but only if live indicator data supports it.
+4. Current indicators override stale historical notes when they conflict. Do not force a call based on old patterns if the data disagrees.
+5. Do NOT change weights arbitrarily — only adjust when current evidence justifies it.
+
+Consider your past predictions and their outcomes. Return your adaptive JSON assessment with updated weights and at least 2 trade plan scenarios.
