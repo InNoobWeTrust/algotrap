@@ -13,10 +13,12 @@ COPY src ./src
 # Copy the manifests from bins
 COPY bins/cryptobot/Cargo.toml ./bins/cryptobot/
 COPY bins/etf_dashboard/Cargo.toml ./bins/etf_dashboard/
+COPY bins/telegrambot/Cargo.toml ./bins/telegrambot/
 
 # Copy the actual source code from bins
 COPY bins/cryptobot/src ./bins/cryptobot/src
 COPY bins/etf_dashboard/src ./bins/etf_dashboard/src
+COPY bins/telegrambot/src ./bins/telegrambot/src
 
 # Build the binaries and put to root under `/bin` (build for musl to avoid runtime dynamic deps)
 # RUN cargo install --target x86_64-unknown-linux-musl --path bins/cryptobot --root /
@@ -25,7 +27,7 @@ ARG RUST_TARGETS
 RUN <<'EOF' bash
 set -euxo pipefail
 
-if [ -n "$RUST_TARGETS" ]; then
+if [ -n "${RUST_TARGETS:-}" ]; then
   # If any requested target is a musl target, install musl toolchain deps once
   case "$RUST_TARGETS" in
     *-musl*) HAS_MUSL=1 ;;
@@ -78,7 +80,9 @@ if [ -n "$RUST_TARGETS" ]; then
   done
 else
   cargo install --path ./bins/cryptobot --root / &&
-  cargo install --path ./bins/etf_dashboard --root /
+  cargo install --path ./bins/etf_dashboard --root / &&
+  cp /bin/cryptobot /app/cryptobot &&
+  cp /bin/etf_dashboard /app/etf_dashboard
 fi
 EOF
 # # Strip binaries to reduce size (optional; present because binutils was installed above)

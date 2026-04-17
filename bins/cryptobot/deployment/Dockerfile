@@ -11,8 +11,8 @@ COPY --from=repo bins/etf_dashboard/Cargo.toml ./bins/etf_dashboard/Cargo.toml
 COPY --from=repo bins/etf_dashboard/src ./bins/etf_dashboard/src
 COPY --from=repo bins/telegrambot/Cargo.toml ./bins/telegrambot/Cargo.toml
 COPY --from=repo bins/telegrambot/src ./bins/telegrambot/src
-COPY Cargo.toml ./bins/cryptobot/Cargo.toml
-COPY src ./bins/cryptobot/src
+COPY --from=repo bins/cryptobot/Cargo.toml ./bins/cryptobot/Cargo.toml
+COPY --from=repo bins/cryptobot/src ./bins/cryptobot/src
 
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -38,8 +38,8 @@ COPY --from=repo bins/etf_dashboard/Cargo.toml ./bins/etf_dashboard/Cargo.toml
 COPY --from=repo bins/etf_dashboard/src ./bins/etf_dashboard/src
 COPY --from=repo bins/telegrambot/Cargo.toml ./bins/telegrambot/Cargo.toml
 COPY --from=repo bins/telegrambot/src ./bins/telegrambot/src
-COPY Cargo.toml ./bins/cryptobot/Cargo.toml
-COPY src ./bins/cryptobot/src
+COPY --from=repo bins/cryptobot/Cargo.toml ./bins/cryptobot/Cargo.toml
+COPY --from=repo bins/cryptobot/src ./bins/cryptobot/src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/cargo-target \
