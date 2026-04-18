@@ -117,7 +117,7 @@ jobs:
       - name: Build and push Docker image (cryptobot)
         uses: docker/build-push-action@v5
         with:
-          context: ./bins/cryptobot
+          context: .
           file: bins/cryptobot/deployment/Dockerfile
           push: true
           platforms: linux/amd64
