@@ -128,8 +128,7 @@ mod chart_tests {
         let template = include_str!("chart_template.html");
 
         // Match `d.xxx` and `d["xxx"]` patterns in JS
-        let re =
-            regex::Regex::new(r#"d\.([a-z_][a-z0-9_]*)|d\["([a-z_][a-z0-9_]*)"\]"#).unwrap();
+        let re = regex::Regex::new(r#"d\.([a-z_][a-z0-9_]*)|d\["([a-z_][a-z0-9_]*)"\]"#).unwrap();
         let referenced: HashSet<&str> = re
             .captures_iter(template)
             .filter_map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str()))

@@ -51,7 +51,16 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    serde_json::from_str(&s).map_err(serde::de::Error::custom)
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(serde::de::Error::custom(
+            "TICKERS is required and must not be empty",
+        ));
+    }
+
+    serde_json::from_str(s).map_err(|json_err| {
+        serde::de::Error::custom(format!("failed to parse TICKERS as JSON: {json_err}"))
+    })
 }
 
 /// Deserialize comma-separated timeframes (required field).
@@ -60,6 +69,13 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(serde::de::Error::custom(
+            "CHART_TFS is required and must not be empty",
+        ));
+    }
+
     s.split(',')
         .map(|tf| {
             tf.trim()
@@ -67,6 +83,19 @@ where
                 .map_err(serde::de::Error::custom)
         })
         .collect()
+}
+
+fn require_non_empty_env(name: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => Ok(()),
+        Ok(_) => Err(format!("{name} is required but is empty").into()),
+        Err(std::env::VarError::NotPresent) => {
+            Err(format!("{name} is required but was not set").into())
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{name} must be valid Unicode").into())
+        }
+    }
 }
 
 fn default_scan_interval() -> u64 {
@@ -82,6 +111,8 @@ fn default_timeout_secs() -> u64 {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     dotenv().ok();
+    require_non_empty_env("TICKERS")?;
+    require_non_empty_env("CHART_TFS")?;
     let conf: EnvConf = envy::from_env()?;
 
     // --loop flag: re-enables the scheduled loop (e.g. for local/K8s use).
@@ -261,8 +292,6 @@ async fn process_ticker(
     Ok(chart_json)
 }
 
-
-
 // ─── Indicators ──────────────────────────────────────────────────────────────
 
 fn indicators(ticker: &TickerConf) -> Vec<Expr> {
@@ -427,7 +456,11 @@ fn indicators(ticker: &TickerConf) -> Vec<Expr> {
 
 fn process_data(klines: &[Kline], ticker: &TickerConf) -> Result<DataFrame, Box<dyn Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df.lazy().with_columns(indicators(ticker)).collect().unwrap();
+    let df_with_indicators = df
+        .lazy()
+        .with_columns(indicators(ticker))
+        .collect()
+        .unwrap();
     Ok(df_with_indicators)
 }
 

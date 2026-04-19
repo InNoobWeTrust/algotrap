@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     dotenv().ok();
 
     let conf: EnvConf = envy::from_env()?;
+    conf.validate()?;
     info!(
         tickers = conf.tickers.len(),
         scan_interval = conf.scan_interval_secs,

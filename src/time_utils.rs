@@ -150,9 +150,18 @@ pub fn seconds_until_next_close(tf: &Timeframe, now: DateTime<Utc>) -> u64 {
 
     match tf {
         // Fixed-period TFs: close at multiples of period_secs from epoch
-        Timeframe::M1 | Timeframe::M5 | Timeframe::M15 | Timeframe::M30 | Timeframe::H1
-        | Timeframe::H2 | Timeframe::H4 | Timeframe::H6 | Timeframe::H8 | Timeframe::H12
-        | Timeframe::D1 | Timeframe::D3 => {
+        Timeframe::M1
+        | Timeframe::M5
+        | Timeframe::M15
+        | Timeframe::M30
+        | Timeframe::H1
+        | Timeframe::H2
+        | Timeframe::H4
+        | Timeframe::H6
+        | Timeframe::H8
+        | Timeframe::H12
+        | Timeframe::D1
+        | Timeframe::D3 => {
             let period_secs = match tf {
                 Timeframe::M1 => 60,
                 Timeframe::M5 => 300,
@@ -217,10 +226,7 @@ pub fn seconds_until_next_close(tf: &Timeframe, now: DateTime<Utc>) -> u64 {
 
 /// Find the minimum seconds until next candle close across a set of timeframes.
 /// Returns (secs_until_close, which_tf).
-pub fn next_close_across_tfs(
-    tfs: &[Timeframe],
-    now: DateTime<Utc>,
-) -> Option<(u64, Timeframe)> {
+pub fn next_close_across_tfs(tfs: &[Timeframe], now: DateTime<Utc>) -> Option<(u64, Timeframe)> {
     tfs.iter()
         .map(|tf| (seconds_until_next_close(tf, now), *tf))
         .filter(|(secs, _)| *secs > 0) // skip TFs at exact boundary

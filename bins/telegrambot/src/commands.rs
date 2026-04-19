@@ -63,29 +63,27 @@ pub async fn run_command_dispatcher(bot: Bot, state: HandlerState) {
     let handler = dptree::entry()
         // Branch 1: Regular messages (groups, private chats)
         .branch(
-            Update::filter_message().filter_command::<Command>().endpoint(
-                move |bot: Bot, msg: Message, cmd: Command| {
+            Update::filter_message()
+                .filter_command::<Command>()
+                .endpoint(move |bot: Bot, msg: Message, cmd: Command| {
                     let state = state_for_msg.clone();
                     async move {
                         handle_command(bot, msg, cmd, state).await;
                         respond(())
                     }
-                },
-            ),
+                }),
         )
         // Branch 2: Channel posts
         .branch(
             Update::filter_channel_post()
                 .filter_command::<Command>()
-                .endpoint(
-                    move |bot: Bot, msg: Message, cmd: Command| {
-                        let state = state_for_channel.clone();
-                        async move {
-                            handle_command(bot, msg, cmd, state).await;
-                            respond(())
-                        }
-                    },
-                ),
+                .endpoint(move |bot: Bot, msg: Message, cmd: Command| {
+                    let state = state_for_channel.clone();
+                    async move {
+                        handle_command(bot, msg, cmd, state).await;
+                        respond(())
+                    }
+                }),
         );
 
     let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
@@ -157,7 +155,10 @@ async fn handle_command(bot: Bot, msg: Message, cmd: Command, state: HandlerStat
                 }
                 None => {
                     let _ = bot
-                        .send_message(msg.chat.id, "Usage: /status <SYMBOL>\nExample: /status BTC-USDT")
+                        .send_message(
+                            msg.chat.id,
+                            "Usage: /status <SYMBOL>\nExample: /status BTC-USDT",
+                        )
                         .await;
                 }
             }
@@ -174,7 +175,10 @@ async fn handle_command(bot: Bot, msg: Message, cmd: Command, state: HandlerStat
                 }
                 None => {
                     let _ = bot
-                        .send_message(msg.chat.id, "Usage: /digest <SYMBOL>\nExample: /digest BTC-USDT")
+                        .send_message(
+                            msg.chat.id,
+                            "Usage: /digest <SYMBOL>\nExample: /digest BTC-USDT",
+                        )
                         .await;
                 }
             }
@@ -191,7 +195,10 @@ async fn handle_command(bot: Bot, msg: Message, cmd: Command, state: HandlerStat
                 }
                 None => {
                     let _ = bot
-                        .send_message(msg.chat.id, "Usage: /weights <SYMBOL>\nExample: /weights BTC-USDT")
+                        .send_message(
+                            msg.chat.id,
+                            "Usage: /weights <SYMBOL>\nExample: /weights BTC-USDT",
+                        )
                         .await;
                 }
             }
@@ -214,7 +221,9 @@ async fn handle_command(bot: Bot, msg: Message, cmd: Command, state: HandlerStat
                     let _ = bot
                         .send_message(
                             msg.chat.id,
-                            format!("Unknown ticker: {symbol}. Use /list to see available tickers."),
+                            format!(
+                                "Unknown ticker: {symbol}. Use /list to see available tickers."
+                            ),
                         )
                         .await;
                     return;
@@ -285,11 +294,7 @@ fn format_status(symbol: &str, mem: &memory::TickerMemory) -> String {
         .map(|p| p.timestamp.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| "never".to_string());
 
-    let last_tier = mem
-        .last_notified
-        .tier
-        .as_deref()
-        .unwrap_or("none");
+    let last_tier = mem.last_notified.tier.as_deref().unwrap_or("none");
 
     format!(
         "━━━ 📊 {symbol} Status ━━━\n\
@@ -375,10 +380,8 @@ fn format_weights(symbol: &str, mem: &memory::TickerMemory) -> String {
 async fn run_manual_analysis(
     state: &HandlerState,
     ticker: &crate::config::TickerConf,
-) -> Result<
-    (llm::AnalysisResult, Vec<(String, Vec<u8>)>),
-    Box<dyn core::error::Error + Send + Sync>,
-> {
+) -> Result<(llm::AnalysisResult, Vec<(String, Vec<u8>)>), Box<dyn core::error::Error + Send + Sync>>
+{
     // 1. Fetch market data (manual mode uses default indicator config)
     let ic = crate::memory::IndicatorConfig::default();
     let all_dfs = data::fetch_all_data(&state.bingx, ticker, &ic).await?;
@@ -396,19 +399,21 @@ async fn run_manual_analysis(
         let params = ic.gap_zone_params();
         let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
         let gap_zones_json = crate::chart::gap_zones_to_chart_json(&zones, 0.3);
-        let chart_html =
-            match crate::chart::render_single_tf_chart_html(tf, df, ticker, &gap_zones_json, rssi_tint) {
-                Ok(html) => html,
-                Err(e) => {
-                    error!(tf = %tf_label, "Failed to render chart: {e:#}");
-                    continue;
-                }
-            };
-        match crate::browserless::capture_chart_screenshot(
-            &chart_html,
-            &state.conf.browserless_url,
-        )
-        .await
+        let chart_html = match crate::chart::render_single_tf_chart_html(
+            tf,
+            df,
+            ticker,
+            &gap_zones_json,
+            rssi_tint,
+        ) {
+            Ok(html) => html,
+            Err(e) => {
+                error!(tf = %tf_label, "Failed to render chart: {e:#}");
+                continue;
+            }
+        };
+        match crate::browserless::capture_chart_screenshot(&chart_html, &state.conf.browserless_url)
+            .await
         {
             Ok(png) => {
                 info!(tf = %tf_label, "Captured chart screenshot");

@@ -129,7 +129,10 @@ pub fn write_topic(
     }
 
     info!(topic, content_len = content.len(), "Wrote to KB");
-    Ok(format!("Successfully wrote {len} chars to '{topic}'", len = content.len()))
+    Ok(format!(
+        "Successfully wrote {len} chars to '{topic}'",
+        len = content.len()
+    ))
 }
 
 /// Overwrite a KB topic file with new content (used after LLM compaction).
@@ -227,7 +230,10 @@ mod tests {
     #[test]
     fn test_humanize_topic() {
         assert_eq!(humanize_topic("market-regimes"), "Market Regimes");
-        assert_eq!(humanize_topic("cross-ticker-signals"), "Cross Ticker Signals");
+        assert_eq!(
+            humanize_topic("cross-ticker-signals"),
+            "Cross Ticker Signals"
+        );
     }
 
     #[test]
@@ -257,8 +263,12 @@ mod tests {
         let dir_str = dir.to_str().unwrap();
 
         seed_kb(dir_str).unwrap();
-        let result = write_topic(dir_str, "lessons-learned", "BTC tends to gap fill on Mondays.")
-            .unwrap();
+        let result = write_topic(
+            dir_str,
+            "lessons-learned",
+            "BTC tends to gap fill on Mondays.",
+        )
+        .unwrap();
         assert!(result.contains("Successfully wrote"));
 
         let content = read_topic(dir_str, "lessons-learned");

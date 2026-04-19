@@ -392,4 +392,3 @@ mod tests {
         assert!(msg.contains("Scan:"));
     }
 }
-

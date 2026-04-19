@@ -134,7 +134,9 @@ pub async fn run_agent(
         }
 
         let mut req_builder = CreateChatCompletionRequestArgs::default();
-        req_builder.model(&conf.llm_model).messages(messages.clone());
+        req_builder
+            .model(&conf.llm_model)
+            .messages(messages.clone());
         if !tools.is_empty() {
             req_builder.tools(tools.clone());
         }
@@ -148,9 +150,12 @@ pub async fn run_agent(
         if conf.llm_debug {
             println!("\n--- [LLM Turn {}] ---", turn);
             let response_json = serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
-            
+
             if let Some(usage) = response_json.get("usage") {
-                println!("📊 [Usage]: {}", serde_json::to_string(usage).unwrap_or_default());
+                println!(
+                    "📊 [Usage]: {}",
+                    serde_json::to_string(usage).unwrap_or_default()
+                );
             }
 
             let msg_json = serde_json::to_value(assistant_msg).unwrap_or(serde_json::Value::Null);
@@ -166,8 +171,7 @@ pub async fn run_agent(
         // Check if the LLM wants to call tools
         match &assistant_msg.tool_calls {
             Some(tool_calls) if !tool_calls.is_empty() => {
-                let mut assistant_builder =
-                    ChatCompletionRequestAssistantMessageArgs::default();
+                let mut assistant_builder = ChatCompletionRequestAssistantMessageArgs::default();
                 if let Some(ref content) = assistant_msg.content {
                     assistant_builder.content(content.as_str());
                 }
@@ -187,10 +191,16 @@ pub async fn run_agent(
                     );
 
                     let default_ic = IndicatorConfig::default();
-                    let ic = memory
-                        .map(|m| &m.indicator_config)
-                        .unwrap_or(&default_ic);
-                    let result = execute_tool_call(tool_call, all_dfs, conf, ticker, ic, &mut session_scratchpad).await?;
+                    let ic = memory.map(|m| &m.indicator_config).unwrap_or(&default_ic);
+                    let result = execute_tool_call(
+                        tool_call,
+                        all_dfs,
+                        conf,
+                        ticker,
+                        ic,
+                        &mut session_scratchpad,
+                    )
+                    .await?;
 
                     debug!(
                         tool = %tool_call.function.name,
@@ -264,7 +274,10 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
 fn parse_alert_json(text: &str) -> AnalysisResult {
     // Inline helper: check if trade plans are aligned with declared direction.
     // NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
-    fn check_conviction(direction: algotrap::prelude::Direction, plans: &[crate::memory::TradePlan]) -> bool {
+    fn check_conviction(
+        direction: algotrap::prelude::Direction,
+        plans: &[crate::memory::TradePlan],
+    ) -> bool {
         if direction.is_none() {
             return true; // NONE is inherently neutral
         }
@@ -274,7 +287,8 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
         let matching = plans
             .iter()
             .filter(|p| {
-                p.direction.parse::<algotrap::prelude::Direction>()
+                p.direction
+                    .parse::<algotrap::prelude::Direction>()
                     .map(|d| d == direction)
                     .unwrap_or(false)
             })
@@ -293,17 +307,9 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
         if let Some(end) = text.rfind('}') {
             let json_str = &text[start..=end];
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let confidence = v["confidence"]
-                    .as_f64()
-                    .unwrap_or(0.0)
-                    .clamp(0.0, 100.0);
-                let direction = parse_direction(
-                    v["direction"].as_str().unwrap_or("NONE")
-                );
-                let summary = v["summary"]
-                    .as_str()
-                    .unwrap_or(text)
-                    .to_string();
+                let confidence = v["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
+                let direction = parse_direction(v["direction"].as_str().unwrap_or("NONE"));
+                let summary = v["summary"].as_str().unwrap_or(text).to_string();
 
                 // Parse trade plans if present
                 let trade_plans = v["trade_plans"]
@@ -320,10 +326,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                                     entry: plan["entry"].as_f64(),
                                     target: plan["target"].as_f64(),
                                     stop: plan["stop"].as_f64(),
-                                    rationale: plan["rationale"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    rationale: plan["rationale"].as_str().unwrap_or("").to_string(),
                                 })
                             })
                             .collect::<Vec<_>>()
@@ -343,7 +346,9 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                 // Parse significance threshold (if present)
                 let significance_threshold = v["significance_threshold"].as_f64();
                 if significance_threshold.is_none() {
-                    warn!("LLM response missing 'significance_threshold' — retaining previous value");
+                    warn!(
+                        "LLM response missing 'significance_threshold' — retaining previous value"
+                    );
                 }
 
                 // Parse indicator params (if present — absent = no-op)
@@ -356,10 +361,8 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                 // Conviction check: do trade plans align with declared direction?
                 let conviction_aligned = check_conviction(direction, &trade_plans);
                 if !conviction_aligned {
-                    let plan_dirs: Vec<&str> = trade_plans
-                        .iter()
-                        .map(|p| p.direction.as_str())
-                        .collect();
+                    let plan_dirs: Vec<&str> =
+                        trade_plans.iter().map(|p| p.direction.as_str()).collect();
                     warn!(
                         direction = %direction,
                         plans = ?plan_dirs,
@@ -409,12 +412,8 @@ fn render_prompt(
     memory: Option<&TickerMemory>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let path = std::path::Path::new(&conf.prompts_dir).join(filename);
-    let template = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "Failed to read prompt file {}: {e}",
-            path.display()
-        )
-    })?;
+    let template = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read prompt file {}: {e}", path.display()))?;
 
     // Base placeholders (shared by all modes)
     let mut rendered = template
@@ -460,13 +459,22 @@ fn render_prompt(
                 .replace("{{memory_patterns}}", &format_memory_patterns(mem))
                 .replace("{{weights_context}}", &format_weights_context(mem))
                 .replace("{{outcome_summary}}", &format_outcome_summary(mem))
-                .replace("{{kb_context}}", &format_kb_context(&conf.memory_dir, &ticker.symbol, &mem.predictions))
+                .replace(
+                    "{{kb_context}}",
+                    &format_kb_context(&conf.memory_dir, &ticker.symbol, &mem.predictions),
+                )
                 .replace("{{kb_rules}}", &format_kb_rules(mem))
-                .replace("{{directional_discipline}}", &format_directional_discipline(mem))
-                .replace("{{indicator_config_context}}", &format_indicator_config_context(
-                    mem,
-                    crate::scoring::is_low_accuracy_streak(&mem.predictions, 5, 0.4),
-                ));
+                .replace(
+                    "{{directional_discipline}}",
+                    &format_directional_discipline(mem),
+                )
+                .replace(
+                    "{{indicator_config_context}}",
+                    &format_indicator_config_context(
+                        mem,
+                        crate::scoring::is_low_accuracy_streak(&mem.predictions, 5, 0.4),
+                    ),
+                );
         }
         None => {
             rendered = rendered
@@ -576,9 +584,7 @@ fn format_outcome_summary(mem: &TickerMemory) -> String {
         crate::scoring::compute_direction_accuracy(&mem.predictions);
 
     if scored_count == 0 {
-        return format!(
-            "Your past {total} predictions have not been validated yet."
-        );
+        return format!("Your past {total} predictions have not been validated yet.");
     }
 
     let scored: Vec<f64> = mem
@@ -603,11 +609,11 @@ fn format_outcome_summary(mem: &TickerMemory) -> String {
 /// small sample sizes. Uses softer language (SHOULD not MUST) and requires
 /// reading a topic before writing to prevent duplicate entries.
 fn format_kb_rules(mem: &TickerMemory) -> String {
-    let (correct, total, accuracy) =
-        crate::scoring::compute_direction_accuracy(&mem.predictions);
+    let (correct, total, accuracy) = crate::scoring::compute_direction_accuracy(&mem.predictions);
 
     if total < 3 {
-        return "No accuracy data yet — KB rules will activate after 3+ scored predictions.".to_string();
+        return "No accuracy data yet — KB rules will activate after 3+ scored predictions."
+            .to_string();
     }
 
     let mut rules: Vec<String> = Vec::new();
@@ -643,7 +649,8 @@ fn format_kb_rules(mem: &TickerMemory) -> String {
         .take(5)
         .collect();
     if recent_scored.len() >= 3 {
-        let mut dir_fails: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut dir_fails: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for pred in &recent_scored {
             if pred.outcome_score.unwrap_or(1.0) < 0.5 {
                 let key = pred.direction.to_string();
@@ -689,7 +696,11 @@ fn format_kb_context(
     } else if scored_count >= 3 && accuracy > 0.7 {
         &["successful-setups", "lessons-learned"]
     } else {
-        &["lessons-learned", "false-signal-patterns", "successful-setups"]
+        &[
+            "lessons-learned",
+            "false-signal-patterns",
+            "successful-setups",
+        ]
     };
 
     // Extract ticker base symbol for filtering (e.g. "BTC" from "BTC-USDT")
@@ -732,20 +743,23 @@ fn format_kb_context(
             if !generic.is_empty() {
                 sections.push(format!(
                     "[{topic}] (generic — verify against current {symbol} conditions)\n{}",
-                    generic.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n")
+                    generic
+                        .iter()
+                        .map(|l| l.trim())
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 ));
             }
         } else {
             let ticker_lines: Vec<&str> = relevant.iter().take(8).copied().collect();
-            sections.push(format!(
-                "[{topic}]\n{}",
-                ticker_lines.join("\n")
-            ));
+            sections.push(format!("[{topic}]\n{}", ticker_lines.join("\n")));
         }
     }
 
     if sections.is_empty() {
-        return format!("No curated KB insights yet for {symbol}. Use read_kb to explore topics when needed.");
+        return format!(
+            "No curated KB insights yet for {symbol}. Use read_kb to explore topics when needed."
+        );
     }
 
     let result = sections.join("\n\n");
@@ -865,10 +879,16 @@ fn format_indicator_config_context(mem: &TickerMemory, low_accuracy_streak: bool
         let mut parts = vec![format!("  {status} {name}")];
 
         if let Some(ref spec) = params.period {
-            parts.push(format!("period={:.0} [{:.0}-{:.0}]", spec.value, spec.min, spec.max));
+            parts.push(format!(
+                "period={:.0} [{:.0}-{:.0}]",
+                spec.value, spec.min, spec.max
+            ));
         }
         if let Some(ref spec) = params.smooth {
-            parts.push(format!("smooth={:.0} [{:.0}-{:.0}]", spec.value, spec.min, spec.max));
+            parts.push(format!(
+                "smooth={:.0} [{:.0}-{:.0}]",
+                spec.value, spec.min, spec.max
+            ));
         }
         lines.push(parts.join(" "));
     }
@@ -949,7 +969,9 @@ fn context_reset(
     // Inject scratchpad as user message
     messages.push(
         ChatCompletionRequestUserMessageArgs::default()
-            .content(format!("[Your analysis notes from earlier turns]:\n{notes_text}"))
+            .content(format!(
+                "[Your analysis notes from earlier turns]:\n{notes_text}"
+            ))
             .build()?
             .into(),
     );
@@ -972,10 +994,7 @@ fn context_reset(
 /// the file with the condensed version.
 ///
 /// Call this once per scan cycle (not per ticker) to keep I/O cheap.
-pub async fn compact_kb_if_needed(
-    llm_client: &OpenAIClient<OpenAIConfig>,
-    conf: &EnvConf,
-) {
+pub async fn compact_kb_if_needed(llm_client: &OpenAIClient<OpenAIConfig>, conf: &EnvConf) {
     let topics = crate::kb::needs_compaction(&conf.memory_dir);
     if topics.is_empty() {
         return;
@@ -997,7 +1016,9 @@ pub async fn compact_kb_if_needed(
         let truncated_content = if content.len() > MAX_INPUT_CHARS {
             // Extract the header line (first line, typically "# Topic Name")
             let header = content.lines().next().unwrap_or("# Unknown Topic");
-            let tail_start = content.len().saturating_sub(MAX_INPUT_CHARS - header.len() - 50);
+            let tail_start = content
+                .len()
+                .saturating_sub(MAX_INPUT_CHARS - header.len() - 50);
             format!(
                 "{header}\n\n[... older entries truncated for compaction ...]\n\n{}",
                 &content[tail_start..]
@@ -1093,9 +1114,7 @@ async fn compress_history(
         .filter_map(|msg| {
             // Extract text content from each message type
             match msg {
-                ChatCompletionRequestMessage::User(m) => {
-                    Some(format!("User: {:?}", m.content))
-                }
+                ChatCompletionRequestMessage::User(m) => Some(format!("User: {:?}", m.content)),
                 ChatCompletionRequestMessage::Assistant(m) => {
                     let content = match &m.content {
                         Some(c) => format!("{c:?}"),
@@ -1153,13 +1172,11 @@ async fn compress_history(
     );
 
     // Replace old messages with the summary
-    let kept_messages: Vec<ChatCompletionRequestMessage> =
-        messages[to_compress + 1..].to_vec();
-    let summary_msg: ChatCompletionRequestMessage =
-        ChatCompletionRequestUserMessageArgs::default()
-            .content(format!("[Previous analysis summary]: {summary}"))
-            .build()?
-            .into();
+    let kept_messages: Vec<ChatCompletionRequestMessage> = messages[to_compress + 1..].to_vec();
+    let summary_msg: ChatCompletionRequestMessage = ChatCompletionRequestUserMessageArgs::default()
+        .content(format!("[Previous analysis summary]: {summary}"))
+        .build()?
+        .into();
 
     // Rebuild: system + summary + kept recent messages
     let system_msg = messages[0].clone();
@@ -1177,7 +1194,8 @@ mod tests {
 
     #[test]
     fn test_parse_alert_json_valid() {
-        let text = r#"{"confidence": 85.5, "direction": "LONG", "summary": "Strong bullish setup"}"#;
+        let text =
+            r#"{"confidence": 85.5, "direction": "LONG", "summary": "Strong bullish setup"}"#;
         let result = parse_alert_json(text);
         assert!((result.confidence - 85.5).abs() < f64::EPSILON);
         assert_eq!(result.direction, algotrap::prelude::Direction::Long);
@@ -1237,7 +1255,8 @@ That's all."#;
 
     #[test]
     fn test_parse_analysis_result_alert_mode() {
-        let text = r#"{"confidence": 90, "direction": "SHORT", "summary": "Bearish reversal"}"#.to_string();
+        let text = r#"{"confidence": 90, "direction": "SHORT", "summary": "Bearish reversal"}"#
+            .to_string();
         let result = parse_analysis_result(text, AnalysisMode::AlertScan);
         assert!((result.confidence - 90.0).abs() < f64::EPSILON);
         assert_eq!(result.direction, algotrap::prelude::Direction::Short);
@@ -1288,7 +1307,10 @@ That's all."#;
             // Verify alphabetical order
             let conflicts_pos = content.find("[conflicts]").unwrap();
             let observations_pos = content.find("[observations]").unwrap();
-            assert!(conflicts_pos < observations_pos, "Keys should be alphabetically sorted");
+            assert!(
+                conflicts_pos < observations_pos,
+                "Keys should be alphabetically sorted"
+            );
         } else {
             panic!("Expected user message with notes");
         }
@@ -1529,4 +1551,3 @@ That's all."#;
         assert!(!result.is_empty());
     }
 }
-

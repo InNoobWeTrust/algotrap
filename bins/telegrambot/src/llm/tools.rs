@@ -40,11 +40,14 @@ pub fn build_tools(
         .map(|schema| {
             let name = schema["name"].as_str().unwrap_or("unknown").to_string();
             let description = schema["description"].as_str().unwrap_or("").to_string();
-            let parameters = schema.get("parameters").cloned().unwrap_or(serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }));
+            let parameters = schema
+                .get("parameters")
+                .cloned()
+                .unwrap_or(serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }));
 
             ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObjectArgs::default()
@@ -136,7 +139,8 @@ pub async fn execute_tool_call(
             let params = ic.gap_zone_params();
             let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
             let gap_zones_json = crate::chart::gap_zones_to_chart_json(&zones, 0.3);
-            let chart_html = render_single_tf_chart_html(&tf, df, ticker, &gap_zones_json, rssi_tint)?;
+            let chart_html =
+                render_single_tf_chart_html(&tf, df, ticker, &gap_zones_json, rssi_tint)?;
 
             match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
                 Ok(_png) => Ok(format!(
@@ -172,26 +176,18 @@ pub async fn execute_tool_call(
             }
         }
         "write_notes" => {
-            let key = args["key"]
-                .as_str()
-                .unwrap_or("default")
-                .to_string();
-            let content = args["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let key = args["key"].as_str().unwrap_or("default").to_string();
+            let content = args["content"].as_str().unwrap_or("").to_string();
             scratchpad.insert(key, content);
             Ok("Noted.".to_string())
         }
         "read_notes" => {
             let key = args.get("key").and_then(|v| v.as_str());
             match key {
-                Some(k) => {
-                    match scratchpad.get(k) {
-                        Some(content) => Ok(content.clone()),
-                        None => Ok(format!("No notes found for key '{k}'.")),
-                    }
-                }
+                Some(k) => match scratchpad.get(k) {
+                    Some(content) => Ok(content.clone()),
+                    None => Ok(format!("No notes found for key '{k}'.")),
+                },
                 None => {
                     if scratchpad.is_empty() {
                         Ok("No notes saved yet.".to_string())
@@ -320,11 +316,8 @@ fn build_multi_tf_overview(
 }
 
 /// Extract OHLC columns from a DataFrame and compute gap zone summary.
-fn compute_gap_zone_context(
-    df: &DataFrame,
-    ic: &crate::memory::IndicatorConfig,
-) -> Option<String> {
-    use algotrap::ta::gap_zones::{self, is_atr_gap, body_ratio};
+fn compute_gap_zone_context(df: &DataFrame, ic: &crate::memory::IndicatorConfig) -> Option<String> {
+    use algotrap::ta::gap_zones::{self, body_ratio, is_atr_gap};
 
     if df.height() == 0 {
         return None;
