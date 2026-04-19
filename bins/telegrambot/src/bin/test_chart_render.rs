@@ -56,10 +56,18 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             let params = ic.gap_zone_params();
             let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
             let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(&zones, 0.3);
-            println!("    gap zones: {} (of {} raw)", zones.len().min(10), zones.len());
+            println!(
+                "    gap zones: {} (of {} raw)",
+                zones.len().min(10),
+                zones.len()
+            );
 
             let chart_html = telegrambot::chart::render_single_tf_chart_html(
-                tf, df, ticker, &gap_zones_json, rssi_tint,
+                tf,
+                df,
+                ticker,
+                &gap_zones_json,
+                rssi_tint,
             )?;
 
             let filename = format!(
@@ -76,7 +84,8 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     }
 
     // Create an index page linking to all charts
-    let mut index = String::from(r#"<!DOCTYPE html>
+    let mut index = String::from(
+        r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"/><title>Chart Render Test</title>
 <style>
 body { font-family: system-ui; background: #1a1a1a; color: #eee; padding: 20px; }
@@ -86,7 +95,8 @@ li { margin: 8px 0; }
 h1 { color: #fff; }
 </style></head><body>
 <h1>🧪 Chart Render Test</h1><ul>
-"#);
+"#,
+    );
     for p in &html_paths {
         let name = p.file_stem().unwrap().to_string_lossy();
         index.push_str(&format!(

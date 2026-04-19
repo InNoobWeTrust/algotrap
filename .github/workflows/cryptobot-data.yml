@@ -23,6 +23,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate required secrets
+        env:
+          CRYPTOBOT_TICKERS: ${{ secrets.CRYPTOBOT_TICKERS }}
+          CRYPTOBOT_CHART_TFS: ${{ secrets.CRYPTOBOT_CHART_TFS }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          missing=0
+          for name in CRYPTOBOT_TICKERS CRYPTOBOT_CHART_TFS CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_R2_BUCKET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is required for cryptobot-data.yml but is unset or empty"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Run cryptobot (via Docker)
         run: |
           # GHCR requires lowercase repo names
@@ -74,4 +94,3 @@ jobs:
           done
 
           echo "Upload complete."
-

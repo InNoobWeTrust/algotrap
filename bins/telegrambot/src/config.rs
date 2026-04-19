@@ -21,6 +21,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
+    let s = s.trim();
     s.split(',')
         .map(|tf| {
             tf.trim()
@@ -107,7 +108,16 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    serde_json::from_str(&s).map_err(serde::de::Error::custom)
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(serde::de::Error::custom(
+            "TICKERS is required and must not be empty",
+        ));
+    }
+
+    serde_json::from_str(s).map_err(|json_err| {
+        serde::de::Error::custom(format!("failed to parse TICKERS as JSON: {json_err}"))
+    })
 }
 
 fn default_scan_interval() -> u64 {
@@ -163,6 +173,32 @@ fn default_prompts_dir() -> String {
 }
 
 impl EnvConf {
+    pub fn validate(&self) -> Result<(), std::io::Error> {
+        for (name, value) in [
+            ("TELEGRAM_BOT_TOKEN", self.telegram_bot_token.as_str()),
+            ("LLM_API_BASE", self.llm_api_base.as_str()),
+            ("LLM_API_KEY", self.llm_api_key.as_str()),
+            ("LLM_MODEL", self.llm_model.as_str()),
+            ("BROWSERLESS_URL", self.browserless_url.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{name} is required and must not be empty"),
+                ));
+            }
+        }
+
+        if self.tickers.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TICKERS must contain at least one ticker config",
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Find a ticker config by symbol (case-insensitive).
     pub fn find_ticker(&self, symbol: &str) -> Option<&TickerConf> {
         self.tickers
@@ -268,11 +304,41 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_tickers_string_returns_clear_error() {
+        let mut env = base_env();
+        env.insert("TICKERS".into(), "   ".into());
+
+        let result: Result<EnvConf, _> = envy::from_iter(env.into_iter());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TICKERS is required and must not be empty"));
+    }
+
+    #[test]
     fn test_empty_tickers_array() {
         let mut env = base_env();
         env.insert("TICKERS".into(), "[]".into());
         let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
         assert!(conf.tickers.is_empty());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_required_string_fields() {
+        let mut env = base_env();
+        env.insert("LLM_API_KEY".into(), "   ".into());
+
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let err = conf.validate().unwrap_err().to_string();
+        assert!(err.contains("LLM_API_KEY is required and must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_tickers() {
+        let mut env = base_env();
+        env.insert("TICKERS".into(), "[]".into());
+
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let err = conf.validate().unwrap_err().to_string();
+        assert!(err.contains("TICKERS must contain at least one ticker config"));
     }
 
     #[test]

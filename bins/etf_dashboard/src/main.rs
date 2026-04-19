@@ -146,7 +146,13 @@ async fn get_etf_data(
         }))
         .collect()?;
     let start_date = etf_df.clone().column("Date")?.date()?.phys.get(0).unwrap();
-    let end_date = etf_df.clone().column("Date")?.date()?.phys.get(etf_df.height() - 1).unwrap();
+    let end_date = etf_df
+        .clone()
+        .column("Date")?
+        .date()?
+        .phys
+        .get(etf_df.height() - 1)
+        .unwrap();
     let start_timestamp = start_date as i64 * 86_400;
     let end_timestamp = end_date as i64 * 86_400;
     client.close().await?;

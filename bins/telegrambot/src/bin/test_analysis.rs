@@ -16,6 +16,7 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     dotenv().ok();
 
     let conf: EnvConf = envy::from_env()?;
+    conf.validate()?;
 
     println!("═══════════════════════════════════════════════════════════════");
     println!(

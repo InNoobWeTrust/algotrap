@@ -39,8 +39,7 @@ pub async fn fetch_all_data(
     .into_par_iter()
     .filter_map(|res| match res {
         Ok((tf, klines)) => {
-            let df =
-                process_data(klines.as_slice(), ticker, ic).expect("Failed to process data");
+            let df = process_data(klines.as_slice(), ticker, ic).expect("Failed to process data");
             Some((tf, df))
         }
         Err(err) => {
@@ -68,7 +67,9 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
     let vol_sma = col("volume").ema(20).alias("volume_sma");
 
     let bias_smooth = ic.smooth("bias_reversion", 9);
-    let bias_rev = ohlc.bias_reversion_smoothed(bias_smooth).alias("bias_reversion");
+    let bias_rev = ohlc
+        .bias_reversion_smoothed(bias_smooth)
+        .alias("bias_reversion");
 
     let ema_period = ic.period("ema200", 200);
     let ema200 = col("close").ema(ema_period).alias("ema200");
@@ -77,8 +78,12 @@ pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> V
     let neutral_revrsi = (col("open") + ohlc.bar_bias())
         .rev_rsi(revrsi_period, 50.)
         .alias("neutral_revrsi");
-    let bullish_revrsi = col("high").rev_rsi(revrsi_period, 70.).alias("bullish_revrsi");
-    let bearish_revrsi = col("low").rev_rsi(revrsi_period, 30.).alias("bearish_revrsi");
+    let bullish_revrsi = col("high")
+        .rev_rsi(revrsi_period, 70.)
+        .alias("bullish_revrsi");
+    let bearish_revrsi = col("low")
+        .rev_rsi(revrsi_period, 30.)
+        .alias("bearish_revrsi");
 
     let atr_period = ic.period("atr", 42);
     let atr = ohlc.atr(atr_period).alias("ATR");
@@ -177,6 +182,10 @@ pub fn process_data(
     ic: &crate::memory::IndicatorConfig,
 ) -> Result<DataFrame, Box<dyn core::error::Error>> {
     let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df.lazy().with_columns(indicators(ticker, ic)).collect().unwrap();
+    let df_with_indicators = df
+        .lazy()
+        .with_columns(indicators(ticker, ic))
+        .collect()
+        .unwrap();
     Ok(df_with_indicators)
 }

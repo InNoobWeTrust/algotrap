@@ -1,12 +1,12 @@
 use crate::model::Kline;
 use core::error::Error;
 use core::fmt::Display;
+use core::time::Duration;
 use hex;
 use hmac::{Hmac, Mac};
 use reqwest::Url;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
-use core::time::Duration;
 use tap::Pipe;
 
 type HmacSha256 = Hmac<Sha256>;

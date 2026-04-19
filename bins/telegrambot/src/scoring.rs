@@ -357,7 +357,14 @@ mod tests {
     #[test]
     fn test_should_notify_cold_start() {
         // No previous tier → always notify (unless NONE direction)
-        assert!(should_notify(Tier::Watch, None, false, None, 3600, Direction::Long));
+        assert!(should_notify(
+            Tier::Watch,
+            None,
+            false,
+            None,
+            3600,
+            Direction::Long
+        ));
     }
 
     #[test]
@@ -450,7 +457,14 @@ mod tests {
             3600,
             Direction::None
         ));
-        assert!(!should_notify(Tier::Watch, None, true, None, 3600, Direction::None));
+        assert!(!should_notify(
+            Tier::Watch,
+            None,
+            true,
+            None,
+            3600,
+            Direction::None
+        ));
         // Alert + NONE → also suppressed (NONE means no actionable trade)
         assert!(!should_notify(
             Tier::Alert,
@@ -461,8 +475,22 @@ mod tests {
             Direction::None
         ));
         // WAIT is the display string for NONE — same suppression applies
-        assert!(!should_notify(Tier::Watch, None, true, None, 3600, Direction::None));
-        assert!(!should_notify(Tier::Alert, Some("WATCH"), false, Some(past), 3600, Direction::None));
+        assert!(!should_notify(
+            Tier::Watch,
+            None,
+            true,
+            None,
+            3600,
+            Direction::None
+        ));
+        assert!(!should_notify(
+            Tier::Alert,
+            Some("WATCH"),
+            false,
+            Some(past),
+            3600,
+            Direction::None
+        ));
     }
 
     #[test]
