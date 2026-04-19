@@ -44,6 +44,9 @@ jobs:
           fi
 
       - name: Run cryptobot (via Docker)
+        env:
+          TICKERS: ${{ secrets.CRYPTOBOT_TICKERS }}
+          CHART_TFS: ${{ secrets.CRYPTOBOT_CHART_TFS }}
         run: |
           # GHCR requires lowercase repo names
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
@@ -57,8 +60,8 @@ jobs:
           
           docker run --rm \
             -v ${{ github.workspace }}/output:/app/output \
-            -e TICKERS="${{ secrets.CRYPTOBOT_TICKERS }}" \
-            -e CHART_TFS="${{ secrets.CRYPTOBOT_CHART_TFS }}" \
+            -e TICKERS \
+            -e CHART_TFS \
             -e TIMEOUT_SECS=30 \
             $IMAGE
 
