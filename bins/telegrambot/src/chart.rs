@@ -1,8 +1,6 @@
-use algotrap::df_utils::JsonDataframe;
+use algotrap::engine::traits::ComputedFrame;
 use algotrap::prelude::*;
 use minijinja::render;
-use polars::prelude::DataFrame;
-use serde_json::Value;
 
 use crate::config::TickerConf;
 
@@ -46,15 +44,16 @@ const BASE_COLUMNS: &[&str] = &["time", "open", "high", "low", "close", "volume"
 /// capture — no interactive toggle needed.
 pub fn render_single_tf_chart_html(
     tf: &Timeframe,
-    df: &DataFrame,
+    df: &dyn ComputedFrame,
     ticker: &TickerConf,
     gap_zones_json: &str,
     rssi_tint: &str,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
-    let df_json: JsonDataframe = df
-        .try_into()
-        .expect("Failed to serialize data frame to json");
-    let df_json: Value = df_json.into();
+    let records = df
+        .to_json_records()
+        .map_err(|e| std::io::Error::other(format!("{e}")))?;
+    let df_json =
+        serde_json::Value::Array(records.into_iter().map(serde_json::Value::Object).collect());
     let dataset = serde_json::to_string(&df_json)?;
 
     Ok(render!(
@@ -80,13 +79,10 @@ pub fn rssi_tint_class(last_rssi: f64) -> &'static str {
     }
 }
 
-/// Extract the last RSSI value from a DataFrame, defaulting to 50.0.
-pub fn last_rssi_from_df(df: &DataFrame) -> f64 {
-    df.column("rssi")
-        .ok()
-        .and_then(|col| col.f64().ok())
-        .and_then(|ca| ca.get(ca.len().saturating_sub(1)))
-        .unwrap_or(50.0)
+/// Extract the last RSSI value from a ComputedFrame, defaulting to 50.0.
+pub fn last_rssi_from_df(df: &dyn ComputedFrame) -> f64 {
+    let last_row = df.len().saturating_sub(1);
+    df.f64_at("rssi", last_row).ok().flatten().unwrap_or(50.0)
 }
 
 /// Convert gap zones to chart-level JSON for band rendering.

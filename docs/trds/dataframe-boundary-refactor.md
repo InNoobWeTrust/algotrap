@@ -285,3 +285,107 @@ The challenge included a security pass on the migration boundary and dependency 
   - `src/ta/*` exposing Polars `Expr` as the shared indicator contract
 - This TRD intentionally does not commit to DuckDB as the final backend. It commits to the refactor that makes a credible evaluation possible.
 - DuckDB Rust UDFs strengthen the migration case for indicators by reducing how much bespoke logic would need to be rewritten into SQL, but they do not remove the need for the boundary refactor described here.
+
+## Implementation Status (2026-04-23)
+
+> **Phase 1: Engine Boundary Module** — COMPLETED
+
+The engine abstraction layer has been implemented in `src/engine/`:
+
+| File | Status | Purpose |
+|------|--------|---------|
+| `src/engine/mod.rs` | ✅ | Public exports for engine module |
+| `src/engine/error.rs` | ✅ | `MarketError` enum with `ErrorKind` variants |
+| `src/engine/traits.rs` | ✅ | `MarketFrameEngine` and `ComputedFrame` traits |
+| `src/engine/validation.rs` | ✅ | `Ticker`, `ValidatedTicker`, `ValidatedIndicator` |
+| `src/engine/type_mapper.rs` | ✅ | DuckDB type mapping utilities |
+| `src/engine/json_serializer.rs` | ✅ | JSON serialization with NaN policy |
+| `src/engine/kline_batch.rs` | ✅ | `RawKlineBatch`, `BatchLimits` |
+| `src/engine/polars_engine.rs` | ✅ | `PolarsEngine` implementation (indicators stubbed) |
+| `src/engine/duckdb_engine.rs` | ✅ | `DuckDBEngine` stub |
+
+**Updated**: `src/lib.rs` now exports `pub mod engine;`
+
+**Compilation**: ✅ `cargo check` passes (no errors)
+
+### Current State
+
+The `PolarsEngine` currently provides:
+- `compute_telegram()` — converts Kline → DataFrame (indicator computation stubbed)
+- `compute_crypto()` — converts Kline → DataFrame (indicator computation stubbed)
+- `ComputedFrame` implementation wrapping `DataFrame`
+
+### What's Working
+
+1. **Engine trait boundary**: `MarketFrameEngine` trait with `Send + Sync` enforcement
+2. **ComputedFrame trait**: `len()`, `columns()`, `slice_last()`, `f64_at()`, `string_at()`, `to_json_records()`, `has_column()`
+3. **Error handling**: `MarketError` with typed variants
+4. **Input validation**: `ValidatedTicker` with ASCII-only validation
+5. **DuckDB type mapping**: `DuckDbType` enum with Polars type conversion
+
+### What's Stubbed
+
+- `PolarsEngine::compute_telegram()` — does not apply telegram indicators yet
+- `PolarsEngine::compute_crypto()` — does not apply crypto indicators yet
+- `DuckDBEngine` — returns error indicating not implemented
+
+## Next Steps
+
+### Phase 2: Implement Indicator Logic in PolarsEngine
+
+**Priority**: HIGH
+
+**Tasks**:
+1. Integrate telegram indicator expressions from `bins/telegrambot/src/data.rs::indicators()` into `PolarsEngine::compute_telegram()`
+2. Integrate crypto indicator expressions from `bins/cryptobot/src/main.rs::indicators()` into `PolarsEngine::compute_crypto()`
+3. Wire `IndicatorConfig` through the engine boundary
+
+**Files to modify**:
+- `src/engine/polars_engine.rs`
+
+**Success criteria**:
+- `PolarsEngine::compute_telegram()` produces same columns as `data.rs::process_data()`
+- `PolarsEngine::compute_crypto()` produces same columns as `cryptobot::main.rs::process_data()`
+
+### Phase 3: Update Downstream Consumers
+
+**Priority**: HIGH
+
+**Tasks**:
+1. Update `bins/telegrambot/src/data.rs` to use `PolarsEngine` instead of inline `process_data()`
+2. Update `bins/telegrambot/src/chart.rs` to use `ComputedFrame` instead of `&DataFrame`
+3. Update `bins/telegrambot/src/llm/tools.rs` to use `ComputedFrame` instead of `&DataFrame`
+4. Update `bins/telegrambot/src/main.rs` helper functions
+5. Update `bins/cryptobot/src/main.rs` to use `PolarsEngine` and `ComputedFrame`
+
+**Files to modify**:
+- `bins/telegrambot/src/data.rs`
+- `bins/telegrambot/src/chart.rs`
+- `bins/telegrambot/src/llm/tools.rs`
+- `bins/telegrambot/src/main.rs`
+- `bins/cryptobot/src/main.rs`
+
+**Success criteria**:
+- No direct `polars::DataFrame` or `&DataFrame` in downstream consumer signatures
+- All consumers use `ComputedFrame` interface
+
+### Phase 4: DuckDB + Rust UDF Evaluation Slice
+
+**Priority**: MEDIUM
+
+**Prerequisites**: Phase 2 and Phase 3 complete with Polars parity verified
+
+**Tasks**:
+1. Implement `DuckDBEngine::compute_crypto()` for `cryptobot` only
+2. Use DuckDB SQL for table shaping (OHLCV projection, window functions)
+3. Implement Rust UDFs for complex indicators (RevRSI, band reversion, gap zones)
+4. Document cold-start and steady-state performance vs Polars baseline
+
+**Files to create/modify**:
+- `src/engine/duckdb_engine.rs` — implement fully
+- New Rust UDF modules as needed
+
+**Child BDD Specs Required**:
+- `docs/specs/cryptobot-duckdb-prototype.md`
+
+---

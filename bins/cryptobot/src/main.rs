@@ -1,4 +1,3 @@
-use algotrap::df_utils::JsonDataframe;
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
@@ -10,6 +9,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+use algotrap::engine::error::MarketError;
+use algotrap::engine::polars_engine::PolarsEngine;
+use algotrap::engine::traits::{ComputedFrame, MarketFrameEngine};
+#[allow(unused_imports)]
+use algotrap::engine::validation::{ValidatedIndicator, ValidatedTicker};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
 use algotrap::ta::experimental::OhlcExperimental;
@@ -152,12 +156,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 let dur = Duration::from_secs(capped.max(10)); // floor: 10s minimum
                 eprintln!(
                     "Next close: {} in {}s — sleeping {:.0}s (lead={}s)",
-                    tf, secs_until, dur.as_secs_f64(), LEAD_SECS,
+                    tf,
+                    secs_until,
+                    dur.as_secs_f64(),
+                    LEAD_SECS,
                 );
                 dur
             }
             None => {
-                eprintln!("No upcoming close found — sleeping {}s", max_interval.as_secs());
+                eprintln!(
+                    "No upcoming close found — sleeping {}s",
+                    max_interval.as_secs()
+                );
                 max_interval
             }
         };
@@ -200,7 +210,11 @@ async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
                 // Write chart data JSON
                 let json_path = data_dir.join(format!("{}.json", ticker.symbol));
                 tokio::fs::write(&json_path, &chart_json).await?;
-                eprintln!("  Wrote {} ({} bytes)", json_path.display(), chart_json.len());
+                eprintln!(
+                    "  Wrote {} ({} bytes)",
+                    json_path.display(),
+                    chart_json.len()
+                );
 
                 tickers_meta.push(TickerMeta {
                     symbol: ticker.symbol.clone(),
@@ -242,7 +256,7 @@ async fn process_ticker(
     // Fetch all chart TFs concurrently
     let chart_tfs_set: HashSet<Timeframe> = chart_tfs.iter().copied().collect();
 
-    let all_dfs: HashMap<Timeframe, DataFrame> = join_all(
+    let all_dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = join_all(
         chart_tfs_set
             .iter()
             .map(|tf| {
@@ -260,15 +274,16 @@ async fn process_ticker(
     .await
     .into_par_iter()
     .filter_map(|res| match res {
-        Ok((tf, klines)) => {
-            match process_data(klines.as_slice(), ticker) {
-                Ok(df) => Some((tf, df)),
-                Err(e) => {
-                    eprintln!("  Error computing indicators for {} {}: {e:#}", ticker.symbol, tf);
-                    None
-                }
+        Ok((tf, klines)) => match process_data(klines.as_slice(), ticker) {
+            Ok(df) => Some((tf, df)),
+            Err(e) => {
+                eprintln!(
+                    "  Error computing indicators for {} {}: {e:#}",
+                    ticker.symbol, tf
+                );
+                None
             }
-        }
+        },
         Err(err) => {
             eprintln!("  Error fetching {}: {err:#?}", ticker.symbol);
             None
@@ -280,13 +295,13 @@ async fn process_ticker(
     let chart_dfs_serialized: HashMap<String, Value> = all_dfs
         .par_iter()
         .map(|(tf, df)| {
-            let df_json: JsonDataframe = df
-                .try_into()
-                .expect("Failed to serialize data frame to json");
-            let df_json: Value = df_json.into();
-            (tf.to_string(), df_json)
+            let records = df.to_json_records()?;
+            let df_json = serde_json::Value::Array(
+                records.into_iter().map(serde_json::Value::Object).collect(),
+            );
+            Ok::<_, MarketError>((tf.to_string(), df_json))
         })
-        .collect();
+        .collect::<Result<HashMap<_, _>, MarketError>>()?;
     let chart_json = serde_json::to_string(&chart_dfs_serialized)?;
 
     Ok(chart_json)
@@ -294,6 +309,7 @@ async fn process_ticker(
 
 // ─── Indicators ──────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn indicators(ticker: &TickerConf) -> Vec<Expr> {
     let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
 
@@ -454,14 +470,15 @@ fn indicators(ticker: &TickerConf) -> Vec<Expr> {
     ]
 }
 
-fn process_data(klines: &[Kline], ticker: &TickerConf) -> Result<DataFrame, Box<dyn Error>> {
-    let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df
-        .lazy()
-        .with_columns(indicators(ticker))
-        .collect()
-        .unwrap();
-    Ok(df_with_indicators)
+fn process_data(
+    klines: &[Kline],
+    ticker: &TickerConf,
+) -> Result<Box<dyn ComputedFrame>, MarketError> {
+    let engine = PolarsEngine::new();
+    let validated_ticker =
+        ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent)?;
+
+    engine.compute_crypto(klines, validated_ticker)
 }
 
 // ─── Ticker metadata for HTML template ───────────────────────────────────────

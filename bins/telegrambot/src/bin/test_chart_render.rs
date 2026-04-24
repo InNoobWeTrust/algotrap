@@ -47,14 +47,14 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 Some(df) => df,
                 None => continue,
             };
-            println!("  📊 {} {} — {} candles", ticker.symbol, tf, df.height());
+            println!("  📊 {} {} — {} candles", ticker.symbol, tf, df.len());
 
-            let last_rssi = telegrambot::chart::last_rssi_from_df(df);
+            let last_rssi = telegrambot::chart::last_rssi_from_df(df.as_ref());
             let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
 
             // Extract gap zones for this TF
             let params = ic.gap_zone_params();
-            let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
+            let zones = algotrap::ta::gap_zones::extract_gap_zones(df.as_dataframe(), &params);
             let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(&zones, 0.3);
             println!(
                 "    gap zones: {} (of {} raw)",
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
             let chart_html = telegrambot::chart::render_single_tf_chart_html(
                 tf,
-                df,
+                df.as_ref(),
                 ticker,
                 &gap_zones_json,
                 rssi_tint,

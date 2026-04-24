@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use algotrap::engine::traits::ComputedFrame;
 use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
 use teloxide::RequestError;
@@ -394,14 +395,14 @@ async fn run_manual_analysis(
             Some(df) => df,
             None => continue,
         };
-        let last_rssi = crate::chart::last_rssi_from_df(df);
+        let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
         let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
         let params = ic.gap_zone_params();
-        let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
+        let zones = algotrap::ta::gap_zones::extract_gap_zones(df.as_dataframe(), &params);
         let gap_zones_json = crate::chart::gap_zones_to_chart_json(&zones, 0.3);
         let chart_html = match crate::chart::render_single_tf_chart_html(
             tf,
-            df,
+            df.as_ref(),
             ticker,
             &gap_zones_json,
             rssi_tint,

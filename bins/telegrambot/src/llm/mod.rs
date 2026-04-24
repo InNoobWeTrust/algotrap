@@ -12,11 +12,11 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs,
 };
 use chrono::Utc;
-use polars::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::config::{EnvConf, TickerConf};
 use crate::memory::{IndicatorConfig, TickerMemory};
+use algotrap::engine::traits::ComputedFrame;
 
 pub use tools::{build_tools, execute_tool_call};
 
@@ -64,7 +64,7 @@ pub async fn run_agent(
     llm_client: &OpenAIClient<OpenAIConfig>,
     conf: &EnvConf,
     ticker: &TickerConf,
-    all_dfs: &HashMap<Timeframe, DataFrame>,
+    all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
     mode: AnalysisMode,
     memory: Option<&TickerMemory>,
 ) -> Result<AnalysisResult, Box<dyn core::error::Error + Send + Sync>> {

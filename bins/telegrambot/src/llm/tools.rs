@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use algotrap::engine::traits::ComputedFrame;
 use algotrap::prelude::*;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionTool, ChatCompletionTools, FunctionObjectArgs,
 };
-use polars::prelude::*;
 use tracing::warn;
 
 use crate::browserless::capture_chart_screenshot;
@@ -66,7 +66,7 @@ pub fn build_tools(
 /// Execute a tool call and return the result as a string.
 pub async fn execute_tool_call(
     tool_call: &ChatCompletionMessageToolCall,
-    all_dfs: &HashMap<Timeframe, DataFrame>,
+    all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
     conf: &EnvConf,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
@@ -82,11 +82,11 @@ pub async fn execute_tool_call(
                 .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
             match all_dfs.get(&tf) {
                 Some(df) => {
-                    let last_rows = df.slice(-3, 3);
-                    let mut summary = extract_indicator_summary(&last_rows, &tf)?;
+                    let last_rows = df.slice_last(3)?;
+                    let mut summary = extract_indicator_summary(&*last_rows, &tf)?;
                     // Append gap zone context if active
                     if ic.is_active("gap_zones") {
-                        if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
+                        if let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic) {
                             summary.push_str("\n");
                             summary.push_str(&gap_ctx);
                         }
@@ -107,8 +107,8 @@ pub async fn execute_tool_call(
                 .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
             match all_dfs.get(&tf) {
                 Some(df) => {
-                    let rows = df.slice(-(num as i64), num);
-                    let price_data = extract_price_action(&rows)?;
+                    let rows = df.slice_last(num)?;
+                    let price_data = extract_price_action(&*rows)?;
                     Ok(price_data)
                 }
                 None => Ok(format!(
@@ -134,13 +134,18 @@ pub async fn execute_tool_call(
                     ));
                 }
             };
-            let last_rssi = crate::chart::last_rssi_from_df(df);
+            let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
             let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
-            let params = ic.gap_zone_params();
-            let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
-            let gap_zones_json = crate::chart::gap_zones_to_chart_json(&zones, 0.3);
+            let gap_zones_json = if ic.is_active("gap_zones") {
+                let raw_df = df.as_dataframe();
+                let params = ic.gap_zone_params();
+                let zones = algotrap::ta::gap_zones::extract_gap_zones(raw_df, &params);
+                crate::chart::gap_zones_to_chart_json(&zones, 0.3)
+            } else {
+                "[]".to_string()
+            };
             let chart_html =
-                render_single_tf_chart_html(&tf, df, ticker, &gap_zones_json, rssi_tint)?;
+                render_single_tf_chart_html(&tf, df.as_ref(), ticker, &gap_zones_json, rssi_tint)?;
 
             match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
                 Ok(_png) => Ok(format!(
@@ -210,7 +215,7 @@ pub async fn execute_tool_call(
 // ─── Data Extraction Helpers ─────────────────────────────────────────────────
 
 fn extract_indicator_summary(
-    df: &DataFrame,
+    df: &dyn ComputedFrame,
     tf: &Timeframe,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec![format!("=== {tf} Indicator Summary (last 3 candles) ===")];
@@ -228,20 +233,36 @@ fn extract_indicator_summary(
     ];
 
     for col_name in &cols {
-        if let Ok(series) = df.column(col_name) {
-            let values: Vec<String> = (0..series.len())
-                .map(|i| format!("{}", series.get(i).unwrap_or(AnyValue::Null)))
-                .collect();
+        if df.has_column(col_name) {
+            let rows = df.len();
+            let mut values = Vec::new();
+            for i in 0..rows {
+                if let Ok(Some(v)) = df.f64_at(col_name, i) {
+                    values.push(format!("{}", v));
+                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
+                    values.push(v);
+                } else {
+                    values.push("null".to_string());
+                }
+            }
             lines.push(format!("  {col_name}: [{}]", values.join(", ")));
         }
     }
 
     // Also include latest OHLC for context
     for col_name in ["open", "high", "low", "close", "volume"] {
-        if let Ok(series) = df.column(col_name) {
-            let values: Vec<String> = (0..series.len())
-                .map(|i| format!("{}", series.get(i).unwrap_or(AnyValue::Null)))
-                .collect();
+        if df.has_column(col_name) {
+            let rows = df.len();
+            let mut values = Vec::new();
+            for i in 0..rows {
+                if let Ok(Some(v)) = df.f64_at(col_name, i) {
+                    values.push(format!("{}", v));
+                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
+                    values.push(v);
+                } else {
+                    values.push("null".to_string());
+                }
+            }
             lines.push(format!("  {col_name}: [{}]", values.join(", ")));
         }
     }
@@ -250,27 +271,29 @@ fn extract_indicator_summary(
 }
 
 fn extract_price_action(
-    df: &DataFrame,
+    df: &dyn ComputedFrame,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec!["=== Price Action ===".to_string()];
 
-    for i in 0..df.height() {
-        let row: Vec<String> = ["time", "open", "high", "low", "close", "volume"]
-            .iter()
-            .filter_map(|col_name| {
-                df.column(col_name)
-                    .ok()
-                    .map(|c| format!("{col_name}={}", c.get(i).unwrap_or(AnyValue::Null)))
-            })
-            .collect();
-        lines.push(format!("  Candle {}: {}", i + 1, row.join(", ")));
+    for i in 0..df.len() {
+        let mut row_parts = Vec::new();
+        for col_name in ["time", "open", "high", "low", "close", "volume"] {
+            if df.has_column(col_name) {
+                if let Ok(Some(v)) = df.f64_at(col_name, i) {
+                    row_parts.push(format!("{col_name}={}", v));
+                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
+                    row_parts.push(format!("{col_name}={v}"));
+                }
+            }
+        }
+        lines.push(format!("  Candle {}: {}", i + 1, row_parts.join(", ")));
     }
 
     Ok(lines.join("\n"))
 }
 
 fn build_multi_tf_overview(
-    all_dfs: &HashMap<Timeframe, DataFrame>,
+    all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
@@ -284,13 +307,17 @@ fn build_multi_tf_overview(
 
     for tf in &tfs {
         if let Some(df) = all_dfs.get(tf) {
-            let last = df.slice(-1, 1);
+            let last = df.slice_last(1)?;
             let get_val = |name: &str| -> String {
-                last.column(name)
-                    .ok()
-                    .and_then(|c| c.get(0).ok())
-                    .map(|v| format!("{v}"))
-                    .unwrap_or_else(|| "N/A".to_string())
+                if last.has_column(name) {
+                    last.f64_at(name, 0)
+                        .ok()
+                        .flatten()
+                        .map(|v| format!("{v}"))
+                        .unwrap_or_else(|| "N/A".to_string())
+                } else {
+                    "N/A".to_string()
+                }
             };
 
             lines.push(format!(
@@ -305,7 +332,7 @@ fn build_multi_tf_overview(
 
             // Append gap zone summary per timeframe if active
             if ic.is_active("gap_zones") {
-                if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
+                if let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic) {
                     lines.push(format!("    {gap_ctx}"));
                 }
             }
@@ -315,40 +342,30 @@ fn build_multi_tf_overview(
     Ok(lines.join("\n"))
 }
 
-/// Extract OHLC columns from a DataFrame and compute gap zone summary.
-fn compute_gap_zone_context(df: &DataFrame, ic: &crate::memory::IndicatorConfig) -> Option<String> {
-    use algotrap::ta::gap_zones::{self, body_ratio, is_atr_gap};
-
-    if df.height() == 0 {
+fn compute_gap_zone_context(
+    df: &dyn ComputedFrame,
+    ic: &crate::memory::IndicatorConfig,
+) -> Option<String> {
+    if df.is_empty() {
         return None;
     }
 
+    for col in ["is_atr_gap", "body_ratio", "open", "close"] {
+        if !df.has_column(col) {
+            return None;
+        }
+    }
+
     let params = ic.gap_zone_params();
-
-    // Use pre-computed columns if available, fallback to on-the-fly
-    let working_df = if df.column("is_atr_gap").is_ok() && df.column("body_ratio").is_ok() {
-        df.clone()
-    } else {
-        let ohlc: algotrap::ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
-        df.clone()
-            .lazy()
-            .with_columns([
-                is_atr_gap(&ohlc, params.atr_period).alias("is_atr_gap"),
-                body_ratio(&ohlc).alias("body_ratio"),
-            ])
-            .collect()
-            .ok()?
-    };
-
-    let zones = gap_zones::extract_gap_zones(&working_df, &params);
+    let zones = algotrap::ta::gap_zones::extract_gap_zones(df.as_dataframe(), &params);
 
     if zones.is_empty() {
         return Some("Gap zones: none detected".to_string());
     }
 
-    let closes = df.column("close").ok()?.f64().ok()?;
-    let current_price = closes.get(closes.len() - 1)?;
-    let summary = gap_zones::gap_zone_summary(&zones, current_price);
+    let n = df.len();
+    let current_price = df.f64_at("close", n - 1).ok()??;
+    let summary = algotrap::ta::gap_zones::gap_zone_summary(&zones, current_price);
 
     let nearest_str = match summary.nearest_gap {
         Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})"),

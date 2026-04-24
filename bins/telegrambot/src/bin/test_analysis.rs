@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         println!("✅ Fetched {} timeframes", all_dfs.len());
 
         for (tf, df) in &all_dfs {
-            println!("   {tf}: {} candles", df.height());
+            println!("   {tf}: {} candles", df.len());
         }
 
         // 2. Run LLM agent in alert scan mode
