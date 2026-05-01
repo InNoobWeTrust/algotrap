@@ -65,6 +65,12 @@ jobs:
             -e TIMEOUT_SECS=30 \
             $IMAGE
 
+      # wrangler@latest requires Node >= 22; ubuntu-latest defaults to Node 20
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       # Install wrangler once so repeated calls don't re-resolve via npx
       - name: Install wrangler
         run: npm install -g wrangler@latest
