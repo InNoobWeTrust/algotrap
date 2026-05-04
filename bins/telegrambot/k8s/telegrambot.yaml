@@ -1,5 +1,6 @@
 # ─── Telegrambot K8s Deployment ───────────────────────────────────────────────
-# Runs the analysis bot inside the cluster alongside browserless + litellm.
+# Runs the analysis bot inside the cluster alongside browserless.
+# LLM requests are routed to the Kilo AI gateway (external).
 #
 # Prerequisites:
 #   1. Build and push the image:
@@ -9,7 +10,6 @@
 #   3. Deploy prompts + dependencies:
 #      kubectl apply -f bins/telegrambot/k8s/prompts-configmap.yaml
 #      kubectl apply -f bins/telegrambot/k8s/browserless.yaml
-#      kubectl apply -f bins/telegrambot/k8s/litellm.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,9 +36,6 @@ spec:
             - secretRef:
                 name: telegrambot-env
           env:
-            # Override with in-cluster service URLs
-            - name: LLM_API_BASE
-              value: "http://litellm.default.svc.cluster.local:4000/v1"
             - name: BROWSERLESS_URL
               value: "http://browserless.default.svc.cluster.local:3000"
             # Memory/KB storage
