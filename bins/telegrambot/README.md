@@ -64,16 +64,18 @@ All via environment variables (see [`.env.example`](.env.example)):
 | `PROMPTS_DIR`             | Prompt config directory       | `config/prompts`           |
 | `ANALYSIS_INTERVAL_SECS`  | Loop interval (default: 3600) | `3600`                     |
 
-## Prompt Configuration
+## Prompt & Tool Configuration
 
-System prompts, user messages, and tool schemas are **external files** loaded
-at runtime from `PROMPTS_DIR`. Edit without recompilation:
+System prompts and user messages are **external files** loaded at runtime
+from `PROMPTS_DIR`. Tool definitions and parameter schemas are automatically
+derived in Rust code via [`llm_tool`](https://docs.rs/llm-tool) from comprehensive docstrings.
 
 ```text
 config/prompts/
-├── system.txt     — system prompt ({{symbol}}, {{tfs}}, {{default_tf}})
-├── user.txt       — user message  ({{symbol}}, {{time}})
-└── tools.json     — tool schemas  (name, description, parameters)
+├── system.txt             — manual /analyze system prompt ({{symbol}}, {{tfs}}, {{default_tf}})
+├── user.txt               — manual /analyze user prompt ({{symbol}}, {{time}})
+├── system_adaptive.txt    — alert scan system prompt (weights, thresholds, memory)
+└── user_adaptive.txt      — alert scan user prompt (dynamic memory context)
 ```
 
 In Kubernetes, these are mounted from a ConfigMap:
@@ -142,12 +144,12 @@ src/
 ├── telegram.rs          — Telegram messaging (media groups + ticker header)
 └── llm/
     ├── mod.rs           — agentic LLM loop + external prompt loading
-    └── tools.rs         — tool schema loading (tools.json) + execution
+    └── tools.rs         — tool definitions (derived via llm_tool) + execution
 config/prompts/          — external prompt templates (loaded at runtime)
 k8s/
 ├── browserless.yaml     — Browserless deployment
 ├── litellm.yaml         — LiteLLM proxy deployment
-├── prompts-configmap.yaml — Prompt config (system, user, tools)
+├── prompts-configmap.yaml — Prompt config (system, user templates)
 └── telegrambot.yaml     — Bot deployment (w/ ConfigMap mount)
 deployment/
 ├── Dockerfile           — Multi-stage Debian build

@@ -11,6 +11,8 @@ teloxide = { version = "0.17", features = ["macros"] }
 
 # LLM (OpenAI-compatible via litellm)
 async-openai = { version = "0.33", features = ["chat-completion"] }
+llm-tool = "0.9"
+schemars = "1"
 
 # Async runtime
 tokio = { version = "1.45", features = ["full"] }

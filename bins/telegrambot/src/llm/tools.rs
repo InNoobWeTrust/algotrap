@@ -1,9 +1,16 @@
+//! Module: telegrambot::llm::tools
+//!
+//! Provides LLM tool definitions with schemas automatically derived from
+//! Rust docstrings using `llm_tool` (https://docs.rs/llm-tool), plus tool
+//! execution and data extraction logic.
+
 use std::collections::HashMap;
 
 use algotrap::prelude::*;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionTool, ChatCompletionTools, FunctionObjectArgs,
 };
+use llm_tool::{llm_tool, ToolError, ToolRegistry};
 use polars::prelude::*;
 use tracing::warn;
 
@@ -13,47 +20,124 @@ use crate::config::{EnvConf, TickerConf};
 
 use super::AnalysisMode;
 
-/// Build LLM tool definitions by loading schemas from `tools.json`.
+// ─── Tool Declarations (Schemas automatically derived via llm_tool) ─────────
+
+/// Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, gap zones.
+#[llm_tool]
+fn get_indicator_summary(
+    /// The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')
+    timeframe: String,
+) -> Result<String, ToolError> {
+    Ok(timeframe)
+}
+
+/// Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.
+#[llm_tool]
+fn get_price_action(
+    /// The timeframe (e.g., '1h', '4h', '1d')
+    timeframe: String,
+    /// Number of recent candles to return (max 20, default 5)
+    num_candles: Option<usize>,
+) -> Result<String, ToolError> {
+    let _ = num_candles;
+    Ok(timeframe)
+}
+
+/// Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually. Call this when you need to see the chart patterns, support/resistance levels, or visual confirmation of indicators.
+#[llm_tool]
+fn capture_chart(
+    /// Which timeframe to focus the chart on (e.g., '4h'). Defaults to ticker's default timeframe.
+    timeframe: Option<String>,
+) -> Result<String, ToolError> {
+    Ok(timeframe.unwrap_or_default())
+}
+
+/// Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.
+#[llm_tool]
+fn get_multi_tf_overview() -> Result<String, ToolError> {
+    Ok(String::new())
+}
+
+/// Read a knowledge base topic. The KB stores persistent insights across scan cycles. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.
+#[llm_tool]
+fn read_kb(
+    /// The KB topic slug to read (e.g., 'market-regimes', 'lessons-learned')
+    topic: String,
+) -> Result<String, ToolError> {
+    Ok(topic)
+}
+
+/// Write or append content to a knowledge base topic. Use markdown format. Content is appended to existing content. Max 2000 chars per write. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.
+#[llm_tool]
+fn write_kb(
+    /// The KB topic slug to write to (e.g., 'lessons-learned')
+    topic: String,
+    /// The markdown content to append to the topic file (max 2000 chars)
+    content: String,
+) -> Result<String, ToolError> {
+    Ok(format!("{topic}: {content}"))
+}
+
+/// Save analysis notes to your in-session scratchpad. Use this to record key observations, conflicts, or intermediate conclusions as you analyze. Notes persist across context resets within this session but are discarded at scan end. Overwrites existing content for the same key.
+#[llm_tool]
+fn write_notes(
+    /// A short label for this note (e.g., 'observations', 'conflicts', 'handoff')
+    key: String,
+    /// The note content to save
+    content: String,
+) -> Result<String, ToolError> {
+    Ok(format!("{key}: {content}"))
+}
+
+/// Read your analysis notes from the in-session scratchpad. Call with a specific key to read one note, or omit the key to read all notes.
+#[llm_tool]
+fn read_notes(
+    /// Optional: specific note key to read. Omit to read all notes.
+    key: Option<String>,
+) -> Result<String, ToolError> {
+    Ok(key.unwrap_or_default())
+}
+
+/// Build the full `ToolRegistry` containing all available LLM tools.
+pub fn create_tool_registry() -> ToolRegistry {
+    ToolRegistry::new()
+        .with_tool(GetIndicatorSummary)
+        .with_tool(GetPriceAction)
+        .with_tool(CaptureChart)
+        .with_tool(GetMultiTfOverview)
+        .with_tool(ReadKb)
+        .with_tool(WriteKb)
+        .with_tool(WriteNotes)
+        .with_tool(ReadNotes)
+}
+
+/// Build LLM tool definitions derived automatically from `llm_tool`.
 ///
 /// In `AlertScan` mode, `capture_chart` is excluded to avoid wasteful
 /// Browserless calls for below-threshold tickers.
 pub fn build_tools(
-    conf: &EnvConf,
+    _conf: &EnvConf,
     mode: AnalysisMode,
 ) -> Result<Vec<ChatCompletionTools>, Box<dyn core::error::Error + Send + Sync>> {
-    let path = std::path::Path::new(&conf.prompts_dir).join("tools.json");
-    let json_str = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read tool schemas from {}: {e}", path.display()))?;
+    let registry = create_tool_registry();
+    let definitions = registry.definitions();
 
-    let schemas: Vec<serde_json::Value> = serde_json::from_str(&json_str)?;
-
-    let tools = schemas
+    let tools = definitions
         .into_iter()
-        .filter(|schema| {
+        .filter(|def| {
             // In alert scan mode, exclude capture_chart (ADR-5)
             if mode == AnalysisMode::AlertScan {
-                schema["name"].as_str() != Some("capture_chart")
+                def.name != "capture_chart"
             } else {
                 true
             }
         })
-        .map(|schema| {
-            let name = schema["name"].as_str().unwrap_or("unknown").to_string();
-            let description = schema["description"].as_str().unwrap_or("").to_string();
-            let parameters = schema
-                .get("parameters")
-                .cloned()
-                .unwrap_or(serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }));
-
+        .map(|def| {
             ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObjectArgs::default()
-                    .name(name)
-                    .description(description)
-                    .parameters(parameters)
+                    .name(def.name.to_string())
+                    .description(def.description.to_string())
+                    .parameters(def.parameter_schema)
                     .build()
                     .expect("Failed to build tool function"),
             })
@@ -72,11 +156,11 @@ pub async fn execute_tool_call(
     ic: &crate::memory::IndicatorConfig,
     scratchpad: &mut HashMap<String, String>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
-    let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
-
     match tool_call.function.name.as_str() {
         "get_indicator_summary" => {
-            let tf_str = args["timeframe"].as_str().unwrap_or("4h");
+            let params: GetIndicatorSummaryParams =
+                serde_json::from_str(&tool_call.function.arguments)?;
+            let tf_str = &params.timeframe;
             let tf: Timeframe = tf_str
                 .parse()
                 .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
@@ -87,7 +171,7 @@ pub async fn execute_tool_call(
                     // Append gap zone context if active
                     if ic.is_active("gap_zones") {
                         if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
-                            summary.push_str("\n");
+                            summary.push('\n');
                             summary.push_str(&gap_ctx);
                         }
                     }
@@ -100,8 +184,10 @@ pub async fn execute_tool_call(
             }
         }
         "get_price_action" => {
-            let tf_str = args["timeframe"].as_str().unwrap_or("4h");
-            let num = args["num_candles"].as_u64().unwrap_or(5).min(20) as usize;
+            let params: GetPriceActionParams =
+                serde_json::from_str(&tool_call.function.arguments)?;
+            let tf_str = &params.timeframe;
+            let num = params.num_candles.unwrap_or(5).min(20);
             let tf: Timeframe = tf_str
                 .parse()
                 .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
@@ -118,8 +204,12 @@ pub async fn execute_tool_call(
             }
         }
         "capture_chart" => {
+            let params: CaptureChartParams =
+                serde_json::from_str(&tool_call.function.arguments).unwrap_or(CaptureChartParams {
+                    timeframe: None,
+                });
             let default_tf_str = ticker.default_tf.to_string();
-            let tf_str = args["timeframe"].as_str().unwrap_or(&default_tf_str);
+            let tf_str = params.timeframe.as_deref().unwrap_or(&default_tf_str);
 
             // Parse timeframe and render per-TF chart HTML
             let tf: Timeframe = tf_str
@@ -159,31 +249,32 @@ pub async fn execute_tool_call(
             Ok(overview)
         }
         "read_kb" => {
-            let topic = args["topic"].as_str().unwrap_or("");
-            let content = crate::kb::read_topic(&conf.memory_dir, topic);
+            let params: ReadKbParams = serde_json::from_str(&tool_call.function.arguments)?;
+            let content = crate::kb::read_topic(&conf.memory_dir, &params.topic);
             if content.is_empty() {
-                Ok(format!("KB topic '{topic}' is empty."))
+                Ok(format!("KB topic '{}' is empty.", params.topic))
             } else {
                 Ok(content)
             }
         }
         "write_kb" => {
-            let topic = args["topic"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            match crate::kb::write_topic(&conf.memory_dir, topic, content) {
+            let params: WriteKbParams = serde_json::from_str(&tool_call.function.arguments)?;
+            match crate::kb::write_topic(&conf.memory_dir, &params.topic, &params.content) {
                 Ok(msg) => Ok(msg),
                 Err(e) => Ok(format!("Failed to write KB: {e}")),
             }
         }
         "write_notes" => {
-            let key = args["key"].as_str().unwrap_or("default").to_string();
-            let content = args["content"].as_str().unwrap_or("").to_string();
-            scratchpad.insert(key, content);
+            let params: WriteNotesParams = serde_json::from_str(&tool_call.function.arguments)?;
+            scratchpad.insert(params.key, params.content);
             Ok("Noted.".to_string())
         }
         "read_notes" => {
-            let key = args.get("key").and_then(|v| v.as_str());
-            match key {
+            let params: ReadNotesParams =
+                serde_json::from_str(&tool_call.function.arguments).unwrap_or(ReadNotesParams {
+                    key: None,
+                });
+            match params.key.as_deref() {
                 Some(k) => match scratchpad.get(k) {
                     Some(content) => Ok(content.clone()),
                     None => Ok(format!("No notes found for key '{k}'.")),
@@ -364,4 +455,135 @@ fn compute_gap_zone_context(df: &DataFrame, ic: &crate::memory::IndicatorConfig)
         summary.overlap_at_price.weighted_trust,
         nearest_str
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_env_conf() -> EnvConf {
+        let env: HashMap<String, String> = [
+            (
+                "TICKERS",
+                r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"4h","default_tf":"4h"}]"#,
+            ),
+            ("TELEGRAM_BOT_TOKEN", "test"),
+            ("TELEGRAM_CHAT_ID", "-100"),
+            ("LLM_API_BASE", "http://localhost:4000/v1"),
+            ("LLM_API_KEY", "sk-test"),
+            ("LLM_MODEL", "test-model"),
+            ("BROWSERLESS_URL", "http://localhost:3000"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        envy::from_iter(env).unwrap()
+    }
+
+    #[test]
+    fn test_registry_contains_all_tools() {
+        let registry = create_tool_registry();
+        let defs = registry.definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_ref()).collect();
+
+        assert_eq!(names.len(), 8);
+        assert!(names.contains(&"get_indicator_summary"));
+        assert!(names.contains(&"get_price_action"));
+        assert!(names.contains(&"capture_chart"));
+        assert!(names.contains(&"get_multi_tf_overview"));
+        assert!(names.contains(&"read_kb"));
+        assert!(names.contains(&"write_kb"));
+        assert!(names.contains(&"write_notes"));
+        assert!(names.contains(&"read_notes"));
+    }
+
+    #[test]
+    fn test_build_tools_full_analysis_mode() {
+        let conf = dummy_env_conf();
+        let tools = build_tools(&conf, AnalysisMode::FullAnalysis).unwrap();
+        assert_eq!(tools.len(), 8);
+    }
+
+    #[test]
+    fn test_build_tools_alert_scan_mode_excludes_capture_chart() {
+        let conf = dummy_env_conf();
+        let tools = build_tools(&conf, AnalysisMode::AlertScan).unwrap();
+        assert_eq!(tools.len(), 7);
+
+        for tool in &tools {
+            if let ChatCompletionTools::Function(func) = tool {
+                assert_ne!(func.function.name, "capture_chart");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_docstrings_and_schema_properties() {
+        let registry = create_tool_registry();
+        let defs = registry.definitions();
+
+        // 1. get_indicator_summary
+        let ind_def = defs
+            .iter()
+            .find(|d| d.name == "get_indicator_summary")
+            .unwrap();
+        assert!(ind_def.description.contains("technical indicator values"));
+        assert!(
+            ind_def.parameter_schema["properties"]["timeframe"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("timeframe to get indicators for")
+        );
+        let req = ind_def.parameter_schema["required"].as_array().unwrap();
+        assert!(req.contains(&serde_json::json!("timeframe")));
+
+        // 2. get_price_action
+        let pa_def = defs.iter().find(|d| d.name == "get_price_action").unwrap();
+        assert!(pa_def.description.contains("OHLCV price action"));
+        assert!(
+            pa_def.parameter_schema["properties"]["num_candles"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Number of recent candles")
+        );
+
+        // 3. get_multi_tf_overview
+        let multi_def = defs
+            .iter()
+            .find(|d| d.name == "get_multi_tf_overview")
+            .unwrap();
+        assert!(multi_def.description.contains("overview across ALL"));
+
+        // 4. read_kb
+        let read_kb_def = defs.iter().find(|d| d.name == "read_kb").unwrap();
+        assert!(read_kb_def.description.contains("knowledge base topic"));
+        assert!(read_kb_def.parameter_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("topic")));
+
+        // 5. write_kb
+        let write_kb_def = defs.iter().find(|d| d.name == "write_kb").unwrap();
+        let write_req = write_kb_def.parameter_schema["required"].as_array().unwrap();
+        assert!(write_req.contains(&serde_json::json!("topic")));
+        assert!(write_req.contains(&serde_json::json!("content")));
+
+        // 6. write_notes
+        let write_notes_def = defs.iter().find(|d| d.name == "write_notes").unwrap();
+        let notes_req = write_notes_def.parameter_schema["required"].as_array().unwrap();
+        assert!(notes_req.contains(&serde_json::json!("key")));
+        assert!(notes_req.contains(&serde_json::json!("content")));
+
+        // 7. read_notes (key should be optional)
+        let read_notes_def = defs.iter().find(|d| d.name == "read_notes").unwrap();
+        assert!(read_notes_def.description.contains("in-session scratchpad"));
+        if let Some(req_array) = read_notes_def
+            .parameter_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+        {
+            assert!(!req_array.contains(&serde_json::json!("key")));
+        }
+    }
 }
