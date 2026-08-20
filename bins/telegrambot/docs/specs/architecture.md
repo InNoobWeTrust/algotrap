@@ -23,7 +23,7 @@ multiple timeframes and deliver actionable recommendations.
 │    ├─► llm::run_agent()        (multi-turn)            │
 │    │     ├─► load_and_render_prompt(system.txt)        │
 │    │     ├─► load_and_render_prompt(user.txt)          │
-│    │     ├─► build_tools(tools.json)                   │
+│    │     ├─► build_tools(llm_tool derived schemas)     │
 │    │     ├─► tools::get_multi_tf_overview              │
 │    │     ├─► tools::get_indicator_summary              │
 │    │     ├─► tools::get_price_action                   │
@@ -55,13 +55,12 @@ src/
 ├── telegram.rs          — send_analysis (media groups, Unicode header, split)
 ├── llm/
 │   ├── mod.rs           — run_agent: multi-turn loop + prompt file loading
-│   └── tools.rs         — tool schema loading (tools.json) + execution logic
+│   └── tools.rs         — tool definitions (derived via llm_tool) + execution logic
 └── bin/
     └── test_analysis.rs — standalone test (no Telegram)
 config/prompts/          — runtime-loaded prompt templates
 ├── system.txt           — system prompt ({{symbol}}, {{tfs}}, {{default_tf}})
-├── user.txt             — user message ({{symbol}}, {{time}})
-└── tools.json           — tool schemas (name, description, parameters)
+└── user.txt             — user message ({{symbol}}, {{time}})
 ```
 
 ## Dependencies
@@ -95,13 +94,14 @@ The agent uses a multi-turn conversation with tool calling:
 4. See `docs/specs/llm-prompt-engineering.md` for template variable contract
 
 ### Shared (Both Modes)
-- **Tool schemas** from `tools.json` (market data tools + `read_kb`/`write_kb`)
+- **Tool schemas** derived in code via `llm_tool` from function docstrings (market data tools + `read_kb`/`write_kb` + scratchpad tools)
 - LLM iteratively calls tools (max 10 turns):
   - `get_multi_tf_overview` — bird's eye view across all timeframes
   - `get_indicator_summary` — last 3 candles of key indicators for a TF
   - `get_price_action` — raw OHLCV data for a TF
   - `capture_chart` — Browserless screenshot (cached per TF)
   - `read_kb` / `write_kb` — persistent knowledge base access
+  - `read_notes` / `write_notes` — in-session scratchpad working memory
 
 ## Telegram Output Format
 
@@ -151,7 +151,7 @@ The ticker is rendered using Unicode Mathematical Bold Sans-Serif characters
 - Resources: 500m CPU, 1Gi memory
 
 ### Prompt Configuration (K8s ConfigMap)
-- `k8s/prompts-configmap.yaml` contains `system.txt`, `user.txt`, `tools.json`
+- `k8s/prompts-configmap.yaml` contains `system.txt`, `user.txt`, `system_adaptive.txt`, `user_adaptive.txt`
 - Mounted at `/etc/telegrambot/prompts` via volume mount
 - `PROMPTS_DIR` env var points to mount path
 - Edit prompts → `kubectl apply` + `rollout restart` — **no Docker rebuild**

@@ -34,9 +34,6 @@ pub const CHART_COLUMNS: &[&str] = &[
     "biased_candle",
 ];
 
-/// OHLCV base columns — always present, not in the registry.
-const BASE_COLUMNS: &[&str] = &["time", "open", "high", "low", "close", "volume"];
-
 // ─── Chart Rendering ─────────────────────────────────────────────────────────
 
 /// Render a chart HTML page for a **single** timeframe.
@@ -122,6 +119,8 @@ const TDV_HTML_TEMPLATE: &str = include_str!("chart_template.html");
 mod chart_tests {
     use super::*;
     use std::collections::HashSet;
+
+    const BASE_COLUMNS: &[&str] = &["time", "open", "high", "low", "close", "volume"];
 
     #[test]
     fn chart_template_references_only_known_columns() {
