@@ -108,7 +108,14 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    let s = s.trim();
+    let mut s = s.trim();
+    if (s.starts_with('\'') && s.ends_with('\''))
+        || (s.starts_with('"') && s.ends_with('"') && !s.starts_with("\"[") && !s.starts_with("[{"))
+    {
+        if s.len() >= 2 {
+            s = s[1..s.len() - 1].trim();
+        }
+    }
     if s.is_empty() {
         return Err(serde::de::Error::custom(
             "TICKERS is required and must not be empty",
@@ -319,6 +326,18 @@ mod tests {
         env.insert("TICKERS".into(), "[]".into());
         let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
         assert!(conf.tickers.is_empty());
+    }
+
+    #[test]
+    fn test_quoted_tickers_json() {
+        let mut env = base_env();
+        env.insert(
+            "TICKERS".into(),
+            "'[{\"symbol\":\"BTC-USDT\",\"sl_percent\":0.02,\"tol_percent\":0.01,\"tfs\":\"1h\",\"default_tf\":\"1h\"}]'".into(),
+        );
+        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        assert_eq!(conf.tickers.len(), 1);
+        assert_eq!(conf.tickers[0].symbol, "BTC-USDT");
     }
 
     #[test]
