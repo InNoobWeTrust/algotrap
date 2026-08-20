@@ -111,9 +111,13 @@ impl BingXClient {
             .await?;
 
         if response["code"] != 0 {
-            eprintln!("Error: {response:#?}");
+            let msg = response["msg"].as_str().unwrap_or("unknown BingX error");
+            let code = &response["code"];
+            return Err(format!("BingX API error code {code}: {msg}").into());
         }
 
-        Ok(serde_json::from_value(response["data"].clone()).unwrap())
+        let data = serde_json::from_value(response["data"].clone())
+            .map_err(|e| format!("Failed to deserialize BingX klines: {e}"))?;
+        Ok(data)
     }
 }
