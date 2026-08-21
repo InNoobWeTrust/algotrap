@@ -3,7 +3,8 @@
 # LLM requests are routed to the Kilo AI gateway (external).
 #
 # Prerequisites:
-#   1. Build and push the image:
+#   1. Build and push from the repository root. The Docker builder downloads, verifies, and
+#      compiles the pinned linux/amd64 glibc DuckDB source artifact:
 #      docker build -f bins/telegrambot/deployment/Dockerfile -t telegrambot:latest .
 #   2. Create the config secret:
 #      kubectl create secret generic telegrambot-env --from-env-file=bins/telegrambot/.env
@@ -36,6 +37,8 @@ spec:
             - secretRef:
                 name: telegrambot-env
           env:
+            - name: DUCKDB_LIBRARY_PATH
+              value: /usr/local/lib/libduckdb.so
             - name: BROWSERLESS_URL
               value: "http://browserless.default.svc.cluster.local:3000"
             # Memory/KB storage

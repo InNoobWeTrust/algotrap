@@ -4,14 +4,13 @@ use crate::engine::error::MarketError;
 use crate::engine::telegram_config::TelegramIndicatorConfig;
 use crate::engine::validation::{ValidatedIndicator, ValidatedTicker};
 use crate::model::kline::Kline;
-use polars::prelude::DataFrame;
 
 /// Engine trait for compute backends.
 ///
 /// All implementations must be Send + Sync to ensure thread-safety
 /// when used across async tasks.
 pub trait MarketFrameEngine: Send + Sync {
-    /// Returns a string identifying the compute backend (e.g., "polars", "duckdb").
+    /// Returns the compute backend identity for logging and diagnostics.
     /// Used for logging, error context, and debugging.
     fn engine_identity(&self) -> &str;
 
@@ -76,16 +75,6 @@ pub trait ComputedFrame: Send + Sync {
         &self,
     ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, MarketError>;
 
-    /// Returns a reference to the underlying DataFrame.
-    ///
-    /// **This is a migration aid** - needed because downstream consumers (e.g., `ta::gap_zones`)
-    /// are not yet migrated to use `ComputedFrame`. Once all consumers use the engine boundary,
-    /// this method should be removed.
-    fn as_dataframe(&self) -> &DataFrame;
-
     /// Returns true if the column exists in this frame.
     fn has_column(&self, column: &str) -> bool;
-
-    /// Returns the underlying Polars DataFrame when available.
-    fn dataframe(&self) -> Option<&DataFrame>;
 }

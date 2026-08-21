@@ -114,6 +114,66 @@ impl BingXClient {
             eprintln!("Error: {response:#?}");
         }
 
-        Ok(serde_json::from_value(response["data"].clone()).unwrap())
+        deserialize_futures_klines(response["data"].clone()).map_err(Into::into)
+    }
+}
+
+/// Deserializes futures klines in the chronological order required by TA.
+pub(crate) fn deserialize_futures_klines(
+    payload: serde_json::Value,
+) -> Result<Vec<Kline>, serde_json::Error> {
+    let mut klines = serde_json::from_value::<Vec<Kline>>(payload)?;
+    // WHY: BingX futures-klines payloads are documented newest-first; TA requires oldest-first.
+    klines.reverse();
+    Ok(klines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deserialize_futures_klines;
+    use serde_json::json;
+
+    #[test]
+    fn futures_klines_normalize_bingx_newest_first_payload_without_changing_candles() {
+        let payload = json!([
+            {
+                "open": "102.0",
+                "high": "103.0",
+                "low": "101.0",
+                "close": "102.5",
+                "volume": "12.0",
+                "time": 1_700_000_120_000_i64,
+                "adjclose": "102.25"
+            },
+            {
+                "open": "101.0",
+                "high": "102.0",
+                "low": "100.0",
+                "close": "101.5",
+                "volume": "11.0",
+                "time": 1_700_000_060_000_i64,
+                "adjclose": null
+            },
+            {
+                "open": "100.0",
+                "high": "101.0",
+                "low": "99.0",
+                "close": "100.5",
+                "volume": "10.0",
+                "time": 1_700_000_000_000_i64,
+                "adjclose": "100.25"
+            }
+        ]);
+
+        let klines = deserialize_futures_klines(payload).unwrap();
+
+        assert_eq!(klines.len(), 3);
+        assert!(klines.windows(2).all(|pair| pair[0].time < pair[1].time));
+        assert_eq!(klines[0].time, 1_700_000_000_000);
+        assert_eq!(klines[0].open, 100.0);
+        assert_eq!(klines[0].adjclose, Some(100.25));
+        assert_eq!(klines[2].time, 1_700_000_120_000);
+        assert_eq!(klines[2].close, 102.5);
+        assert_eq!(klines[2].adjclose, Some(102.25));
     }
 }

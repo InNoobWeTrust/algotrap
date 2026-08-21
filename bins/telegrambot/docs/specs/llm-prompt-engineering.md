@@ -197,7 +197,7 @@ analysis mode selection, output schema contract, and chat history compression.
 | 2 | Edge cases | Chat history compression says "compressed into a single summary message" — who writes the summary? The LLM can't summarize its own context. | A separate LLM call with fresh context summarizes the old messages. This preserves semantic meaning (indicator trends, cross-TF signals) that code-based truncation would lose. | author-won (fixed) |
 | 3 | Evidence | "≤ 400 tokens (~1600 characters)" — is this mapping accurate? | Approximate guideline, not a hard assert. Code truncates by character limit. Token count is model-dependent. | author-won |
 | 4 | Alternatives | Outcome summary "if accuracy is low, be more conservative" could create a death spiral (low accuracy → lower confidence → fewer alerts → less data → stays low). | Fixed: reworded to "High accuracy means reliable signals. Low accuracy suggests re-weighting indicators — do not simply suppress confidence." | author-won (fixed) |
-| 5 | Longevity | 6 hardcoded indicator names — every doc needs updating when adding indicators. | Indicators change very rarely (requires Polars pipeline changes). Single source in config is over-engineering for v2. | author-won |
+| 5 | Longevity | 6 hardcoded indicator names — every doc needs updating when adding indicators. | Indicators change very rarely (requires previous dataframe implementation pipeline changes). Single source in config is over-engineering for v2. | author-won |
 
 ### Challenge Summary
 

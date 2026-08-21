@@ -33,7 +33,7 @@ GitHub Actions Cron (e.g., every 4 hours):
   1. Rust caching restores previous build for speed.
   2. cargo run --release --bin cryptobot
      → Fetch OHLC data for configured tickers
-     → Process TA indicators via Polars
+     → Process TA indicators via previous dataframe implementation
      → Generate /output/data/*.json
      → Render index.html relative frontend
   3. wrangler r2 object put (via npx)

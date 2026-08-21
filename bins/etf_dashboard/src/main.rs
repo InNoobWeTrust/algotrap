@@ -1,221 +1,294 @@
 use algotrap::ext::{webdriver::*, yfinance::*};
-use algotrap::prelude::*;
-use algotrap::ta::prelude::*;
+use algotrap::prelude::Kline;
+use chrono::{NaiveDate, TimeZone, Utc};
 use core::error::Error;
 use fantoccini::Locator;
 use minijinja::render;
-use polars::lazy::prelude::*;
-use polars::prelude::*;
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
 use std::path::Path;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
+type EtfRows = Vec<Map<String, Value>>;
+
+#[derive(Debug, Clone, PartialEq)]
+struct EtfFlowRow {
+    date: NaiveDate,
+    flows: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DashboardDatasets {
+    price: Vec<Value>,
+    volume: Vec<Value>,
+    netflow: Vec<Value>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_tracing();
-    let mut etf_funds_dfs: Vec<DataFrame> = Vec::new(); // Net flow daily of individual funds
-    let mut etf_total_dfs: Vec<DataFrame> = Vec::new(); // Net flow total daily
-    let mut etf_cumulative_funds_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow of individual funds daily
-    let mut etf_cumulative_total_dfs: Vec<DataFrame> = Vec::new(); // Cumulative net flow total daily
-    let mut ticker_dfs: Vec<DataFrame> = Vec::new(); // Asset price daily
-    let mut fund_vols_dfs: Vec<DataFrame> = Vec::new(); // Trade volume daily of individual funds
-    let mut fund_vol_total_dfs: Vec<DataFrame> = Vec::new(); // Trade volume total daily
-    let srcs = vec![
+    for (ticker, url, script) in [
         (BTC_TICKER, ETF_BTC_URL, ETF_BTC_EXTRACT_SCRIPT),
         (ETH_TICKER, ETF_ETH_URL, ETF_ETH_EXTRACT_SCRIPT),
         (SOL_TICKER, ETF_SOL_URL, ETF_SOL_EXTRACT_SCRIPT),
-    ];
-    for (ticker, url, script) in srcs {
-        // Inner scope to automatically dispose webdriver before printing to avoid polluting console logs
-        let (etf_df, start_timestamp, end_timestamp) = get_etf_data(url, script).await?;
-        etf_funds_dfs.push(etf_df.clone());
-        let fund_tickers: Vec<_> = etf_df
-            .get_column_names()
-            .into_iter()
-            .filter(|name| *name != "Date" && *name != "Total")
-            .map(|s| s.to_string())
-            .collect();
-
-        etf_total_dfs.push(
-            etf_df
-                .clone()
-                .lazy()
-                .with_columns(etf_netflow_features(&fund_tickers))
-                .collect()?,
-        );
-
-        // To yfinance after we got the starting date
-        info!("Fetch ticker {ticker}...");
-        let yfinance_client = YfinanceClient::new();
-        // returns historic quotes with daily interval
-        let klines = yfinance_client
+    ] {
+        let (raw_rows, start_timestamp, end_timestamp) = get_etf_data(url, script).await?;
+        let flows = normalize_etf_rows(raw_rows)?;
+        let funds = fund_columns(&flows);
+        let client = YfinanceClient::new();
+        let asset_klines = client
             .get_quote_history(ticker, start_timestamp, end_timestamp, YfinanceInterval::D1)
             .await?;
-        let ticker_df = klines.iter().cloned().to_dataframe().unwrap();
-        let ticker_df = ticker_df
-            .lazy()
-            .with_column(
-                (col("time") * lit(1000))
-                    .cast(DataType::Datetime(TimeUnit::Milliseconds, None))
-                    .alias("Date"),
-            )
-            .collect()?;
-        ticker_dfs.push(ticker_df);
+        let mut fund_histories = HashMap::new();
 
-        let mut fund_volume_dfs = Vec::new();
-
-        for fund_ticker in fund_tickers {
-            info!("Fetch fund ticker {}...", &fund_ticker);
-            match yfinance_client
-                .get_quote_history(
-                    &fund_ticker,
-                    start_timestamp,
-                    end_timestamp,
-                    YfinanceInterval::D1,
-                )
+        for fund in &funds {
+            match client
+                .get_quote_history(fund, start_timestamp, end_timestamp, YfinanceInterval::D1)
                 .await
             {
-                Ok(klines) => {
-                    if !klines.is_empty() {
-                        let fund_df = klines.iter().cloned().to_dataframe().unwrap();
-                        let fund_df = fund_df
-                            .lazy()
-                            .with_column(
-                                (col("time") * lit(1000))
-                                    .cast(DataType::Datetime(TimeUnit::Milliseconds, None))
-                                    .dt()
-                                    .date()
-                                    .alias("Date"),
-                            )
-                            .select([col("Date"), col("volume").alias(&fund_ticker)])
-                            .collect()?;
-                        fund_volume_dfs.push(fund_df);
-                    }
+                Ok(klines) if !klines.is_empty() => {
+                    fund_histories.insert(fund.clone(), klines);
                 }
-                Err(e) => {
-                    warn!("Could not fetch ticker {fund_ticker}: {e}");
-                }
+                Ok(_) => warn!(ticker = %fund, "Fund history was empty"),
+                Err(error) => warn!(ticker = %fund, "Could not fetch fund history: {error}"),
             }
         }
 
-        if !fund_volume_dfs.is_empty() {
-            let mut combined_vols_df = fund_volume_dfs[0].clone();
-            if fund_volume_dfs.len() > 1 {
-                for i in 1..fund_volume_dfs.len() {
-                    combined_vols_df = combined_vols_df
-                        .lazy()
-                        .join_builder()
-                        .with(fund_volume_dfs[i].clone().lazy())
-                        .left_on([col("Date")])
-                        .right_on([col("Date")])
-                        .how(JoinType::Full)
-                        .coalesce(JoinCoalesce::CoalesceColumns)
-                        .finish()
-                        .collect()?;
-                }
-            }
-            fund_vols_dfs.push(combined_vols_df);
-        }
+        let datasets = build_dashboard_datasets(&flows, &asset_klines, &fund_histories);
+        write_dashboard_artifact(ticker, &datasets)?;
+        info!(
+            ticker,
+            flow_rows = flows.len(),
+            price_rows = datasets.price.len(),
+            "Wrote ETF dashboard"
+        );
     }
-    dbg!(&etf_funds_dfs, &ticker_dfs, &fund_vols_dfs);
     Ok(())
 }
 
-/// Extract dataframe from html table at url and return together with start and end timestamp in
-/// seconds since epoch
+/// Fetches one ETF flow table and derives its inclusive UTC date range.
 async fn get_etf_data(
     url: &str,
     extract_script: &str,
-) -> Result<(DataFrame, i64, i64), Box<dyn Error + Sync + Send>> {
+) -> Result<(EtfRows, i64, i64), Box<dyn Error + Send + Sync>> {
     let geckodriver = GeckoDriver::default_with_log(Path::new("geckodriver.log"))?;
     let client = geckodriver.create_client(false).await?;
-    info!("Going to {url}...");
     client.goto(url).await?;
-    let elem = client.find(Locator::Css("table.etf")).await?;
-    let etf_df = client
-        .extract_table(&elem, Some(extract_script.to_string()))
-        .await?;
-    let etf_df = etf_df
-        .lazy()
-        .with_column(col("Date").str().to_date(StrptimeOptions {
-            format: Some("%d %b %Y".into()),
-            strict: false,
-            exact: true,
-            cache: false,
-        }))
-        .collect()?;
-    let start_date = etf_df.clone().column("Date")?.date()?.phys.get(0).unwrap();
-    let end_date = etf_df
-        .clone()
-        .column("Date")?
-        .date()?
-        .phys
-        .get(etf_df.height() - 1)
-        .unwrap();
-    let start_timestamp = start_date as i64 * 86_400;
-    let end_timestamp = end_date as i64 * 86_400;
+    let element = client.find(Locator::Css("table.etf")).await?;
+    let rows = validate_etf_rows(
+        client
+            .extract_table(&element, Some(extract_script.to_owned()))
+            .await?,
+    )?;
+    let normalized = normalize_etf_rows(rows.clone())?;
+    let start = normalized
+        .first()
+        .ok_or("ETF table has no dated rows")?
+        .date;
+    let end = normalized.last().ok_or("ETF table has no dated rows")?.date;
     client.close().await?;
-
-    Ok((etf_df, start_timestamp, end_timestamp))
+    Ok((rows, date_timestamp(start), date_timestamp(end)))
 }
 
-/// Sum total net flow across all funds
-fn etf_netflow_features(fund_cols: &[String]) -> Vec<Expr> {
-    let mut features = Vec::new();
-
-    // Net flow total
-    let total_exprs: Vec<Expr> = fund_cols.iter().map(|c| col(c)).collect();
-    features.push(
-        sum_horizontal(total_exprs, true)
-            .expect("Failed to sum by funds")
-            .alias("netflow_total"),
-    );
-
-    // MA20 of net flow total
-    features.push(col("netflow_total").sma(20).alias("netflow_total_ma20"));
-
-    // Cumulative net flow total
-    features.push(
-        col("netflow_total")
-            .cum_sum(false)
-            .alias("cumulative_netflow_total"),
-    );
-
-    // Cumulative net flow of individual funds
-    for ticker in fund_cols {
-        features.push(
-            col(ticker)
-                .cum_sum(false)
-                .alias(&format!("cumulative_netflow_{}", ticker)),
-        );
+/// Validates browser-extracted ETF rows before normalization.
+fn validate_etf_rows(rows: EtfRows) -> Result<EtfRows, Box<dyn Error + Send + Sync>> {
+    if rows.is_empty() {
+        return Err("ETF table has no rows".into());
     }
-
-    features
+    for (index, row) in rows.iter().enumerate() {
+        let date = row
+            .get("Date")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("ETF row {index} has no Date string"))?;
+        NaiveDate::parse_from_str(date.trim(), "%d %b %Y")
+            .map_err(|error| format!("ETF row {index} has invalid Date {date:?}: {error}"))?;
+    }
+    Ok(rows)
 }
 
-// Sum vol across all funds
-fn fund_vol_features(vol_cols: &[String]) -> Vec<Expr> {
-    let mut features = Vec::new();
+/// Parses browser cells, sorts dates ascending, and combines duplicate dated observations.
+fn normalize_etf_rows(rows: EtfRows) -> Result<Vec<EtfFlowRow>, Box<dyn Error + Send + Sync>> {
+    let mut by_date = BTreeMap::<NaiveDate, BTreeMap<String, f64>>::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        let date_cell = row
+            .get("Date")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("ETF row {index} has no Date string"))?;
+        let date = NaiveDate::parse_from_str(date_cell.trim(), "%d %b %Y")?;
+        let daily = by_date.entry(date).or_default();
+        for (fund, cell) in row {
+            if fund == "Date" || fund == "Total" {
+                continue;
+            }
+            if let Some(flow) = parse_flow_cell(&cell)? {
+                *daily.entry(fund).or_default() += flow;
+            }
+        }
+    }
+    Ok(by_date
+        .into_iter()
+        .map(|(date, flows)| EtfFlowRow { date, flows })
+        .collect())
+}
 
-    // Volume total
-    let vol_exprs: Vec<Expr> = vol_cols.iter().map(|c| col(c)).collect();
-    features.push(
-        sum_horizontal(vol_exprs, true)
-            .expect("Failed to sum by vol")
-            .alias("volume_total"),
-    );
+fn parse_flow_cell(cell: &Value) -> Result<Option<f64>, Box<dyn Error + Send + Sync>> {
+    let value = match cell {
+        Value::Null => return Ok(None),
+        Value::Number(value) => value
+            .as_f64()
+            .ok_or("ETF flow number is not representable as f64")?,
+        Value::String(value) => {
+            let cleaned = value.trim().replace(',', "");
+            if cleaned.is_empty() || cleaned == "-" {
+                return Ok(None);
+            }
+            cleaned.parse::<f64>()?
+        }
+        _ => return Err("ETF flow cell must be a number, string, or null".into()),
+    };
+    if value.is_finite() {
+        Ok(Some(value))
+    } else {
+        Err("ETF flow cell must be finite".into())
+    }
+}
 
-    // MA20 of volume total
-    features.push(col("volume_total").sma(20).alias("volume_total_ma20"));
+fn fund_columns(rows: &[EtfFlowRow]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.flows.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 
-    features
+/// Builds the price, total-volume, and net-flow datasets expected by the dashboard artifact.
+fn build_dashboard_datasets(
+    flows: &[EtfFlowRow],
+    asset_history: &[Kline],
+    fund_histories: &HashMap<String, Vec<Kline>>,
+) -> DashboardDatasets {
+    let funds = fund_columns(flows);
+    let prices = asset_history
+        .iter()
+        .map(|kline| (kline_date(kline), kline.close))
+        .collect::<BTreeMap<_, _>>();
+    let volumes = fund_histories
+        .iter()
+        .flat_map(|(fund, klines)| {
+            klines
+                .iter()
+                .map(|kline| ((kline_date(kline), fund.clone()), kline.volume))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut cumulative_total = 0.0;
+    let mut cumulative_by_fund = BTreeMap::<String, f64>::new();
+    let mut netflow_total_history = Vec::new();
+    let mut volume_total_history = Vec::new();
+    let mut price = Vec::new();
+    let mut volume = Vec::new();
+    let mut netflow = Vec::new();
+
+    for row in flows {
+        let daily_total = funds
+            .iter()
+            .map(|fund| row.flows.get(fund).copied().unwrap_or(0.0))
+            .sum::<f64>();
+        cumulative_total += daily_total;
+        netflow_total_history.push(daily_total);
+        let volume_total = funds
+            .iter()
+            .map(|fund| {
+                volumes
+                    .get(&(row.date, fund.clone()))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .sum::<f64>();
+        volume_total_history.push(volume_total);
+        let mut record = Map::new();
+        record.insert("time".into(), json!(date_timestamp(row.date)));
+        record.insert("netflow_total".into(), json!(daily_total));
+        record.insert(
+            "netflow_total_ma20".into(),
+            optional_json(trailing_average(&netflow_total_history, 20)),
+        );
+        record.insert("cumulative_netflow_total".into(), json!(cumulative_total));
+        for fund in &funds {
+            let flow = row.flows.get(fund).copied().unwrap_or(0.0);
+            let cumulative = cumulative_by_fund.entry(fund.clone()).or_default();
+            *cumulative += flow;
+            record.insert(fund.clone(), json!(flow));
+            record.insert(format!("cumulative_netflow_{fund}"), json!(*cumulative));
+        }
+        netflow.push(Value::Object(record));
+        volume.push(json!({"time": date_timestamp(row.date), "value": volume_total, "ma20": trailing_average(&volume_total_history, 20)}));
+        if let Some(close) = prices.get(&row.date) {
+            price.push(json!({"time": date_timestamp(row.date), "value": close}));
+        }
+    }
+    DashboardDatasets {
+        price,
+        volume,
+        netflow,
+    }
+}
+
+fn trailing_average(values: &[f64], period: usize) -> Option<f64> {
+    (values.len() >= period)
+        .then(|| values[values.len() - period..].iter().sum::<f64>() / period as f64)
+}
+
+fn optional_json(value: Option<f64>) -> Value {
+    value.map_or(Value::Null, |value| json!(value))
+}
+
+fn kline_date(kline: &Kline) -> NaiveDate {
+    Utc.timestamp_opt(kline.time, 0)
+        .single()
+        .expect("valid yfinance timestamp")
+        .date_naive()
+}
+
+fn date_timestamp(date: NaiveDate) -> i64 {
+    date.and_hms_opt(0, 0, 0)
+        .expect("midnight is valid")
+        .and_utc()
+        .timestamp()
+}
+
+fn write_dashboard_artifact(
+    symbol: &str,
+    datasets: &DashboardDatasets,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    std::fs::create_dir_all("output")?;
+    std::fs::write(
+        format!("output/{symbol}.html"),
+        render_tdv_html(symbol, datasets)?,
+    )?;
+    Ok(())
+}
+
+fn render_tdv_html(
+    symbol: &str,
+    datasets: &DashboardDatasets,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let datasets = json!({
+        "price": datasets.price,
+        "volume": datasets.volume,
+        "netflow": datasets.netflow,
+    });
+    Ok(
+        render!(TDV_HTML_TEMPLATE, symbol => symbol, datasets => serde_json::to_string(&datasets)?)
+            .trim()
+            .to_string(),
+    )
 }
 
 fn setup_tracing() {
     let subscriber = tracing_subscriber::Registry::default()
         .with(
-            // stdout layer, to view everything in the console
             tracing_subscriber::fmt::layer()
                 .compact()
                 .with_ansi(std::io::stdin().is_terminal())
@@ -227,500 +300,84 @@ fn setup_tracing() {
             tracing_subscriber::filter::targets::Targets::new()
                 .with_target("etf_dashboard", tracing::level_filters::LevelFilter::DEBUG),
         );
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("tracing subscriber must only be initialized once");
 }
 
 const BTC_TICKER: &str = "BTC-USD";
 const ETH_TICKER: &str = "ETH-USD";
 const SOL_TICKER: &str = "SOL-USD";
-
 const ETF_BTC_URL: &str = "https://farside.co.uk/bitcoin-etf-flow-all-data/";
 const ETF_ETH_URL: &str = "https://farside.co.uk/ethereum-etf-flow-all-data/";
 const ETF_SOL_URL: &str = "https://farside.co.uk/sol/";
+const ETF_BTC_EXTRACT_SCRIPT: &str = r#"const table = arguments[0]; const rows = [...table.rows]; const headerIndex = rows.findIndex(row => [...row.cells].some(cell => cell.innerText.trim() === 'Date')); if (headerIndex < 0) throw new Error('ETF table has no Date header'); const headers = [...rows[headerIndex].cells].map(cell => cell.innerText.trim()).filter(Boolean); return rows.slice(headerIndex + 1).map(row => [...row.cells].map(cell => cell.innerText.trim())).filter(cells => cells.length >= headers.length && /^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/.test(cells[0])).map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] === '-' ? null : cells[index]))));"#;
+const ETF_ETH_EXTRACT_SCRIPT: &str = ETF_BTC_EXTRACT_SCRIPT;
+const ETF_SOL_EXTRACT_SCRIPT: &str = ETF_BTC_EXTRACT_SCRIPT;
 
-const ETF_BTC_EXTRACT_SCRIPT: &str = r#"
-const table = arguments[0];
-const rows = table.rows;
-const headers = [];
-const jsonData = [];
+const TDV_HTML_TEMPLATE: &str = r#"<!doctype html><html><head><meta charset=\"utf-8\"><title>{{ symbol }} ETF flows</title></head><body><h1>{{ symbol }} ETF flows</h1><script id=\"dashboard-datasets\" type=\"application/json\">{{ datasets }}</script><script>const datasets=JSON.parse(document.getElementById('dashboard-datasets').textContent);</script></body></html>"#;
 
-// Extract headers
-headers.push(...[...rows[0].cells].slice(0,-1).map(e => e.innerText));
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-// Extract data
-for (let i = 2; i < rows.length - 4; i++) {
-    const rowObject = {};
-    const cells = [...rows[i].cells].slice(0,-1);
-    for (let j = 0; j < cells.length; j++) {
-        let innerTxt = cells[j].innerText;
-        if (innerTxt == '-') {
-            rowObject[headers[j]] = null;
-        } else {
-            rowObject[headers[j]] = cells[j].innerText;
+    fn kline(time: i64, close: f64, volume: f64) -> Kline {
+        Kline {
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume,
+            time,
+            adjclose: None,
         }
     }
-    jsonData.push(rowObject);
-}
-
-return jsonData
-"#;
-
-const ETF_ETH_EXTRACT_SCRIPT: &str = r#"
-const table = arguments[0];
-const rows = table.rows;
-const headers = [];
-const jsonData = [];
-
-// Extract headers
-headers.push("Date", ...[...rows[1].cells].slice(1,-1).map(e => e.innerText));
-
-// Extract data
-for (let i = 5; i < rows.length - 1; i++) {
-    const rowObject = {};
-    const cells = [...rows[i].cells].slice(0,-1);
-    for (let j = 0; j < cells.length; j++) {
-        let innerTxt = cells[j].innerText;
-        if (innerTxt == '-') {
-            rowObject[headers[j]] = null;
-        } else {
-            rowObject[headers[j]] = cells[j].innerText;
-        }
+    #[test]
+    fn normalization_sorts_combines_duplicates_and_preserves_missing_as_zero_later() {
+        let rows = serde_json::from_value(json!([{"Date":"03 Jan 2026","IBIT":"1,200.5","FBTC":null},{"Date":"02 Jan 2026","IBIT":"-2","FBTC":"3"},{"Date":"03 Jan 2026","IBIT":"4.5"}])).unwrap();
+        let normalized = normalize_etf_rows(rows).unwrap();
+        assert_eq!(
+            normalized.iter().map(|row| row.date).collect::<Vec<_>>(),
+            vec![
+                NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()
+            ]
+        );
+        assert_eq!(normalized[1].flows["IBIT"], 1205.0);
+        assert!(!normalized[1].flows.contains_key("FBTC"));
     }
-    jsonData.push(rowObject);
-}
-
-return jsonData
-"#;
-
-const ETF_SOL_EXTRACT_SCRIPT: &str = r#"
-const table = arguments[0];
-const rows = table.rows;
-const headers = [];
-const jsonData = [];
-
-// Extract headers
-headers.push("Date", ...[...rows[1].cells].slice(1,-1).map(e => e.innerText));
-
-// Extract data
-for (let i = 5; i < rows.length - 1; i++) {
-    const rowObject = {};
-    const cells = [...rows[i].cells].slice(0,-1);
-    for (let j = 0; j < cells.length; j++) {
-        let innerTxt = cells[j].innerText;
-        if (innerTxt == '-') {
-            rowObject[headers[j]] = null;
-        } else {
-            rowObject[headers[j]] = cells[j].innerText;
-        }
+    #[test]
+    fn dashboard_datasets_join_history_and_compute_features() {
+        let rows = normalize_etf_rows(serde_json::from_value(json!([{"Date":"02 Jan 2026","IBIT":"10","FBTC":"-2"},{"Date":"03 Jan 2026","IBIT":null,"FBTC":"4"}])).unwrap()).unwrap();
+        let jan_2 = date_timestamp(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
+        let jan_3 = date_timestamp(NaiveDate::from_ymd_opt(2026, 1, 3).unwrap());
+        let datasets = build_dashboard_datasets(
+            &rows,
+            &[kline(jan_2, 100.0, 0.0)],
+            &HashMap::from([
+                (
+                    "IBIT".into(),
+                    vec![kline(jan_2, 0.0, 50.0), kline(jan_3, 0.0, 60.0)],
+                ),
+                ("FBTC".into(), vec![kline(jan_2, 0.0, 30.0)]),
+            ]),
+        );
+        assert_eq!(datasets.price, vec![json!({"time":jan_2,"value":100.0})]);
+        assert_eq!(datasets.volume[0]["value"], 80.0);
+        assert_eq!(datasets.volume[1]["value"], 60.0);
+        assert_eq!(datasets.netflow[1]["netflow_total"], 4.0);
+        assert_eq!(datasets.netflow[1]["cumulative_netflow_total"], 12.0);
+        assert!(datasets.netflow[1]["netflow_total_ma20"].is_null());
     }
-    jsonData.push(rowObject);
+    #[test]
+    fn rendered_artifact_contains_constructed_datasets() {
+        let datasets = DashboardDatasets {
+            price: vec![json!({"time": 1, "value": 2})],
+            volume: vec![],
+            netflow: vec![json!({"netflow_total": 3})],
+        };
+        let html = render_tdv_html("BTC-USD", &datasets).unwrap();
+        assert!(html.contains("BTC-USD ETF flows"));
+        assert!(html.contains("netflow_total"));
+        assert!(html.contains("dashboard-datasets"));
+    }
 }
-
-return jsonData
-"#;
-
-struct TdvHtmlVars {
-    price_dataset: String,
-    volume_dataset: String,
-    netflow_dataset: String,
-    symbol: String,
-}
-
-fn render_tdv_html(vars: &TdvHtmlVars) -> String {
-    render!(
-        TDV_HTML_TEMPLATE,
-        price_dataset => vars.price_dataset,
-        volume_dataset => vars.volume_dataset,
-        netflow_dataset => vars.netflow_dataset,
-        symbol => vars.symbol,
-    )
-    .trim()
-    .to_string()
-}
-
-const TDV_HTML_TEMPLATE: &str = r#"
-<!DOCTYPE html>
-<html class="sl-theme-dark" style="font-size: 22px">
-  <head>
-    <meta charset="utf-8" />
-    <title>{{ symbol }} (InNoobWeTrust™)</title>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
-    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
-    <style>
-        html, body {
-            height: 100%;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            min-height: 100%;
-            box-sizing: border-box;
-        }
-
-        #container {
-            height: 100%;
-        }
-
-        #fullscreen-btn {
-            position: absolute;
-            bottom: 15px;
-            left: -6px;
-            z-index: 9999;
-            font-size: 10px;
-        }
-    </style>
-  </head>
-  <body>
-    <div id="container" data-symbol="{{ symbol }}" data-tf="{{ default_tf }}"></div>
-    <sl-icon-button
-      id="fullscreen-btn"
-      name="fullscreen"
-      label="Toggle Fullscreen"
-      style="font-size: 2rem;"
-      onclick="toggleFullscreen()">
-    </sl-icon-button>
-    <script>
-      const fullscreenButton = document.getElementById('fullscreen-btn');
-
-      // Function to request or exit fullscreen
-      function toggleFullscreen() {
-        if (!document.fullscreenElement) {
-          const elem = document.documentElement;
-          elem.requestFullscreen?.();
-          elem.webkitRequestFullscreen?.();
-          elem.msRequestFullscreen?.();
-        } else {
-          document.exitFullscreen?.();
-          document.webkitExitFullscreen?.();
-          document.msExitFullscreen?.();
-        }
-      }
-
-      // Listen for changes in fullscreen state to update the icon
-      document.addEventListener('fullscreenchange', () => {
-        if (document.fullscreenElement) {
-          fullscreenButton.name = 'fullscreen-exit';
-        } else {
-          fullscreenButton.name = 'fullscreen';
-        }
-      });
-    </script>
-    <script id="price-dataset" type="application/json">
-        {{ price_dataset }}
-    </script>
-    <script id="volume-dataset" type="application/json">
-        {{ volume_dataset }}
-    </script>
-    <script id="netflow-dataset" type="application/json">
-        {{ netflow_dataset }}
-    </script>
-    <script type="text/javascript">
-        const price_dataset = JSON.parse(document.getElementById('price-dataset').textContent);
-        const volume_dataset = JSON.parse(document.getElementById('volume-dataset').textContent);
-        const netflow_dataset = JSON.parse(document.getElementById('netflow-dataset').textContent);
-        const container = document.getElementById('container');
-
-        const chart = LightweightCharts.createChart(container, {
-            autoSize: true,
-            layout: {
-                background: { color: '#22222240' },
-                textColor: '#DDD',
-            },
-            grid: {
-                vertLines: { color: '#44444440' },
-                horzLines: { color: '#44444440' },
-            },
-            timeScale: {
-                timeVisible: true,
-            },
-        });
-        const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
-            priceFormat: {
-                type: 'volume',
-            },
-            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
-        });
-        volumeSeries.priceScale().applyOptions({
-            // set the positioning of the volume series
-            scaleMargins: {
-                top: 0.8, // highest point of the series will be 80% away from the top
-                bottom: 0,
-            },
-        });
-        const volumeSmaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
-            lineColor: '#00000000',
-            topColor: '#FDD8354C',
-            bottomColor: '#FDD8352F',
-            priceFormat: {
-                type: 'volume',
-            },
-            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
-        });
-        volumeSmaSeries.priceScale().applyOptions({
-            // set the positioning of the volume series
-            scaleMargins: {
-                top: 0.8, // highest point of the series will be 80% away from the top
-                bottom: 0,
-            },
-        });
-        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, {});
-        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, {});
-        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
-        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
-        const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
-        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
-        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
-        // Candlestick is added last in the panel to have higher z-order
-        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
-        const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
-        const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(76, 175, 80, 0.3)',
-            topFillColor1: 'rgba(76, 175, 80, 0.2)',
-            topFillColor2: 'rgba(76, 175, 80, 0.5)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.3)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.5)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
-        }, 1);
-        const structurePwrDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(76, 175, 80, 0.5)',
-            topFillColor1: 'rgba(76, 175, 80, 0.05)',
-            topFillColor2: 'rgba(76, 175, 80, 0.1)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.5)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
-        }, 1);
-        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        const rssiMaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 50 },
-            topLineColor: 'rgba(76, 175, 80, 0.1)',
-            topFillColor1: 'rgba(76, 175, 80, 0.2)',
-            topFillColor2: 'rgba(76, 175, 80, 0.3)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.3)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
-        }, 2);
-        const rssiDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 50 },
-            topLineColor: 'rgba(76, 175, 80, 0.2)',
-            topFillColor1: 'rgba(76, 175, 80, 0.05)',
-            topFillColor2: 'rgba(76, 175, 80, 0.1)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.2)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
-        }, 2);
-        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
-        const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
-        const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
-        const textWatermarks = [
-            LightweightCharts.createTextWatermark(chart.panes()[0], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[1], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[2], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[3], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[4], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-        ];
-
-        const watermarkUpdate = () => {
-            const tf = tf_btns.value || container.dataset.tf || tfs[0];
-            const atr = +(dataset[tf].slice(-1)[0].atr_percent * 100).toFixed(2);
-            const lvrg = Math.floor(dataset[tf].slice(-1)[0]["leverage"]);
-            atr_badge.innerHTML = `ATR: ${atr}%`;
-            lvrg_badge.innerHTML = `x${lvrg}`;
-            const watermarks = [
-                {
-                    lines: [
-                        {
-                            text: `${container.dataset.symbol} ${tf}`,
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 24,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'Structure Power (9, 16)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'RSSI (14, 9)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'ATR Reversion (42, 1.618)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'Sharpe (200)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-            ];
-            Object.entries(textWatermarks).forEach(([k,v]) => {
-                v.applyOptions(watermarks[k]);
-            });
-        }
-
-        const onIntervalUpdate = (tf) => {
-            const data = dataset[tf].map(d => ({
-                ...d,
-                time: Math.floor(d.time / 1000),
-            }));
-            candlestickSeries.setData(data);
-            volumeSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.volume,
-                color: d.volume_color,
-            })));
-            volumeSmaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.volume_sma,
-            })));
-            ema200Series.setData(data.map(d => ({
-                time: d.time,
-                value: d.ema200,
-                color: d.ema200_color,
-            })));
-            biasRevSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.bias_reversion,
-                color: d.bias_reversion_color,
-            })));
-            atrUpperBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.atr_upperband,
-                color: d.atr_upperband_color,
-            })));
-            atrLowerBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.atr_lowerband,
-                color: d.atr_lowerband_color,
-            })));
-            neutralRevRsiSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.neutral_revrsi,
-                color: d.neutral_revrsi_color,
-            })));
-            bullishBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.bullish_revrsi,
-                color: d.bullish_revrsi_color,
-            })));
-            bearishBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.bearish_revrsi,
-                color: d.bearish_revrsi_color,
-            })));
-            structurePwrSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.structure_power,
-                color: d.structure_power_color,
-            })));
-            structurePwrSmaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.structure_power_sma,
-            })));
-            structurePwrDirSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.structure_power_direction,
-            })));
-            rssiSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi,
-                color: d.rssi_color,
-            })));
-            rssiMaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi_ma,
-            })));
-            rssiDirSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi_direction,
-            })));
-            atrRevSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.atr_reversion_percent,
-                color: d.atr_reversion_percent_color,
-            })));
-            sharpeSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.sharpe,
-                color: d.sharpe_color,
-            })));
-            const markers = data.filter(d => d.climax_signal != 0).map(d => ({
-                time: d.time,
-                position: d.climax_signal_pos,
-                color: d.climax_signal_color,
-                shape: d.climax_signal_shape,
-            }))
-            markersSeries.setMarkers(markers);
-            watermarkUpdate();
-        }
-        const onSizeUpdate = () => {
-            const tmpSeries = chart.panes()[0].getSeries()[0];
-            const len = tmpSeries.data().length;
-            chart.timeScale().setVisibleLogicalRange({ from: len - 128, to: len + 5 });
-            const containerHeight = document.getElementById("container").getClientRects()[0].height;
-            chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
-            watermarkUpdate();
-        }
-        const resizeObserver = new ResizeObserver((entries) => {
-            requestAnimationFrame(() => {
-                onSizeUpdate();
-            });
-        });
-        resizeObserver.observe(container);
-        tfs.forEach(tf => {
-            const tf_btn = document.createElement('sl-radio-button');
-            tf_btn.innerText = tf;
-            tf_btn.value = tf
-            tf_btn.addEventListener('click', () => {
-                requestAnimationFrame(() => {
-                    onIntervalUpdate(tf);
-                });
-            });
-            tf_btns.appendChild(tf_btn);
-        });
-        // Click default timeframe
-        requestAnimationFrame(() => {
-            [...tf_btns.children].find(b => b.textContent == container.dataset.tf)?.click();
-        })
-    </script>
-  </body>
-</html>
-"#;

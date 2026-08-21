@@ -29,10 +29,9 @@ pub const CHART_COLUMNS: &[&str] = &[
     "sharpe",
     "is_atr_gap",
     "body_ratio",
-    "biased_candle",
 ];
 
-/// OHLCV base columns — always present, not in the registry.
+#[allow(dead_code)]
 const BASE_COLUMNS: &[&str] = &["time", "open", "high", "low", "close", "volume"];
 
 // ─── Chart Rendering ─────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@
 
 ### Summary
 
-Stabilized the telegrambot and cryptobot Docker/CI deployment path for local and CI builds. Added the first research and TRD artifacts for decoupling dataframe consumers from Polars-specific engine APIs.
+Stabilized the telegrambot and cryptobot Docker/CI deployment path for local and CI builds. Added the first research and TRD artifacts for decoupling dataframe consumers from previous dataframe implementation-specific engine APIs.
 
 ### Changes
 
@@ -20,7 +20,7 @@ Stabilized the telegrambot and cryptobot Docker/CI deployment path for local and
 
 ### Decisions
 
-- Keep Polars as the current implementation and document an engine-boundary refactor before any DuckDB migration attempt.
+- Keep previous dataframe implementation as the current implementation and document an engine-boundary refactor before any DuckDB migration attempt.
 - Keep one shared Dockerfile path per service and express platform differences in CI/config rather than by forking Dockerfiles.
 
 ### Verification Status

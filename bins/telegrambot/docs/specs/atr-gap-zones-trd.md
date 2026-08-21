@@ -1,4 +1,4 @@
-# TRD: ATR Gap Zones — Lazy Polars Implementation
+# TRD: ATR Gap Zones — Lazy previous dataframe implementation Implementation
 
 > **Status**: draft
 > **Parent spec**: `docs/specs/atr-gap-zones.md` (BDD scenarios)
@@ -8,8 +8,8 @@
 
 The current `detect_gap_zones` eagerly iterates raw `&[f64]` slices — manually computing ATR via loops, scanning for gaps, and collecting structs. This violates the algotrap indicator convention where:
 
-- All indicators return `Expr` (lazy Polars expressions)
-- All computation runs through Polars' vectorized, SIMD-optimized engine
+- All indicators return `Expr` (lazy previous dataframe implementation expressions)
+- All computation runs through previous dataframe implementation' vectorized, SIMD-optimized engine
 - Callers apply indicators uniformly via `df.lazy().with_columns(indicators(...))`
 
 Additionally, the current trust score (`body_ratio` alone) only captures single-candle body quality. It ignores whether the gap move has relative strength behind it — a key factor in whether the zone acts as real support/resistance or is just noise.
@@ -68,9 +68,9 @@ Steps:
 
 This is acceptable eager code because:
 - It runs on **filtered output** (~10-50 rows from a 500-row DataFrame)
-- The expensive ATR computation already ran in Polars' vectorized engine
+- The expensive ATR computation already ran in previous dataframe implementation' vectorized engine
 - The momentum columns (`rssi`, `structure_power`) are already materialized — just reading, not computing
-- Overlap/summary are inherently cross-row aggregation — no Polars expression for "count zones containing price X"
+- Overlap/summary are inherently cross-row aggregation — no previous dataframe implementation expression for "count zones containing price X"
 
 #### Trust Composition
 
@@ -111,7 +111,7 @@ Rationale:
 
 Gap zones has its own tunable `atr_period` (default 42, range [14, 56]). The main pipeline also computes ATR with `ic.period("atr", 42)`.
 
-**If the periods are the same**, Polars' lazy engine _may_ deduplicate the computation. **If they diverge**, two separate ATR columns are computed. This is by design — the gap zone's ATR lookback serves a different purpose (defining "normal" range for gap detection) than the main ATR (used for stop placement, leverage, reversion bands).
+**If the periods are the same**, previous dataframe implementation' lazy engine _may_ deduplicate the computation. **If they diverge**, two separate ATR columns are computed. This is by design — the gap zone's ATR lookback serves a different purpose (defining "normal" range for gap detection) than the main ATR (used for stop placement, leverage, reversion bands).
 
 In `data.rs`, the gap zone ATR is embedded inside `is_atr_gap(ohlc, gap_atr_period)` — it's an intermediate computation within the expression, not a named output column.
 
@@ -125,7 +125,7 @@ Klines → DataFrame
       is_atr_gap(&ohlc, gap_period).alias("is_atr_gap"),
       body_ratio(&ohlc).alias("body_ratio"),
     ])
-  → .collect()                         // Polars: vectorized ATR + comparison + ratio
+  → .collect()                         // previous dataframe implementation: vectorized ATR + comparison + ratio
   → extract_gap_zones(&df, &params)    // filter, read rssi column, compute composite trust
   → gap_zone_summary(&zones, price)    // pure aggregation
   → format for LLM
@@ -157,7 +157,7 @@ Klines → DataFrame
 - All 9 existing gap zone test scenarios rewritten for expression API
 - All telegrambot tests pass
 - `cargo test -p algotrap -p telegrambot` green
-- Gap detection ATR runs inside Polars engine (no manual loop over full series)
+- Gap detection ATR runs inside previous dataframe implementation engine (no manual loop over full series)
 - Composite trust reflects momentum — gaps at extreme RSSI score higher than gaps at neutral RSSI
 
 ## Resolved Questions

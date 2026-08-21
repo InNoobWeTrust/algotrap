@@ -85,11 +85,11 @@ pub async fn execute_tool_call(
                     let last_rows = df.slice_last(3)?;
                     let mut summary = extract_indicator_summary(&*last_rows, &tf)?;
                     // Append gap zone context if active
-                    if ic.is_active("gap_zones") {
-                        if let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic) {
-                            summary.push_str("\n");
-                            summary.push_str(&gap_ctx);
-                        }
+                    if ic.is_active("gap_zones")
+                        && let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic)
+                    {
+                        summary.push('\n');
+                        summary.push_str(&gap_ctx);
                     }
                     Ok(summary)
                 }
@@ -137,9 +137,12 @@ pub async fn execute_tool_call(
             let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
             let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
             let gap_zones_json = if ic.is_active("gap_zones") {
-                let raw_df = df.as_dataframe();
                 let params = ic.gap_zone_params();
-                let zones = algotrap::ta::gap_zones::extract_gap_zones(raw_df, &params);
+                let zones =
+                    algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params)
+                        .map_err(|error| {
+                            std::io::Error::other(format!("Gap-zone extraction failed: {error}"))
+                        })?;
                 crate::chart::gap_zones_to_chart_json(&zones, 0.3)
             } else {
                 "[]".to_string()
@@ -331,10 +334,10 @@ fn build_multi_tf_overview(
             ));
 
             // Append gap zone summary per timeframe if active
-            if ic.is_active("gap_zones") {
-                if let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic) {
-                    lines.push(format!("    {gap_ctx}"));
-                }
+            if ic.is_active("gap_zones")
+                && let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic)
+            {
+                lines.push(format!("    {gap_ctx}"));
             }
         }
     }
@@ -357,7 +360,7 @@ fn compute_gap_zone_context(
     }
 
     let params = ic.gap_zone_params();
-    let zones = algotrap::ta::gap_zones::extract_gap_zones(df.as_dataframe(), &params);
+    let zones = algotrap::engine::gap_zones::extract_gap_zones_from_frame(df, &params).ok()?;
 
     if zones.is_empty() {
         return Some("Gap zones: none detected".to_string());
@@ -365,7 +368,7 @@ fn compute_gap_zone_context(
 
     let n = df.len();
     let current_price = df.f64_at("close", n - 1).ok()??;
-    let summary = algotrap::ta::gap_zones::gap_zone_summary(&zones, current_price);
+    let summary = algotrap::ta::gap_zones::gap_zone_summary(&zones, current_price).ok()?;
 
     let nearest_str = match summary.nearest_gap {
         Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})"),

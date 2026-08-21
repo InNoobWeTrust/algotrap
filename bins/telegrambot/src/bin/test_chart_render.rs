@@ -54,7 +54,8 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
             // Extract gap zones for this TF
             let params = ic.gap_zone_params();
-            let zones = algotrap::ta::gap_zones::extract_gap_zones(df.as_dataframe(), &params);
+            let zones =
+                algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params)?;
             let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(&zones, 0.3);
             println!(
                 "    gap zones: {} (of {} raw)",

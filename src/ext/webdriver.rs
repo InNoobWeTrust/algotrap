@@ -7,12 +7,11 @@ use fantoccini::{
     elements::Element,
     error::CmdError,
 };
-use polars::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use tracing::{debug, instrument, warn};
 
-use std::{fmt::Debug, io::Cursor, num::NonZeroUsize, path::PathBuf};
+use std::{fmt::Debug, path::PathBuf};
 use std::{
     fs::File,
     process::{Child, Command, Stdio},
@@ -24,7 +23,6 @@ unsafe extern "C" {
     // Minimal C bindings used to create a new session (setsid) and to send
     // signals to a process group (kill with a negative pid). This avoids
     // adding an external dependency just for a couple of libc calls.
-    fn setsid() -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
@@ -314,7 +312,12 @@ pub trait ClientActionExt {
         &self,
         elem: &Element,
         custom_script: Option<String>,
-    ) -> impl Future<Output = Result<DataFrame, Box<dyn Error + Send + Sync>>>;
+    ) -> impl Future<
+        Output = Result<
+            Vec<serde_json::Map<String, serde_json::Value>>,
+            Box<dyn Error + Send + Sync>,
+        >,
+    >;
 }
 
 impl ClientActionExt for Client {
@@ -360,12 +363,12 @@ impl ClientActionExt for Client {
         Ok(())
     }
 
-    /// Extract table as json from html
+    /// Extracts an HTML table as JSON records without coupling callers to a dataframe library.
     async fn extract_table(
         &self,
         elem: &Element,
         custom_script: Option<String>,
-    ) -> Result<DataFrame, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, Box<dyn Error + Send + Sync>> {
         const DEFAULT_SCRIPT: &str = r#"
 const table = arguments[0];
 const rows = table.rows;
@@ -389,20 +392,12 @@ for (let i = 1; i < rows.length; i++) {
 
 return jsonData
 "#;
-        let tb_json = self
+        let table_json = self
             .execute(
                 &custom_script.unwrap_or(DEFAULT_SCRIPT.to_string()),
                 vec![serde_json::to_value(elem)?],
             )
-            .await?
-            .to_string();
-        let file = Cursor::new(tb_json.to_string());
-        let df = JsonReader::new(file)
-            .with_json_format(JsonFormat::Json)
-            .infer_schema_len(None)
-            .with_batch_size(NonZeroUsize::new(3).unwrap())
-            .finish()
-            .unwrap();
-        Ok(df)
+            .await?;
+        serde_json::from_value(table_json).map_err(Into::into)
     }
 }

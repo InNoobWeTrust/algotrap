@@ -3,22 +3,18 @@ use core::time::Duration;
 use dotenv::dotenv;
 use futures::future::join_all;
 use minijinja::render;
-use polars::prelude::*;
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use algotrap::engine::error::MarketError;
-use algotrap::engine::polars_engine::PolarsEngine;
-use algotrap::engine::traits::{ComputedFrame, MarketFrameEngine};
+use algotrap::engine::traits::ComputedFrame;
 #[allow(unused_imports)]
 use algotrap::engine::validation::{ValidatedIndicator, ValidatedTicker};
+use algotrap::engine::{CryptoBatchRequest, DuckDBEngine};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
-use algotrap::ta::experimental::OhlcExperimental;
-use algotrap::ta::gap_zones::OhlcGapZones;
-use algotrap::ta::prelude::*;
 use algotrap::time_utils::next_close_across_tfs;
 
 // ─── Per-Ticker Config ───────────────────────────────────────────────────────
@@ -254,13 +250,17 @@ async fn process_ticker(
     client: &ext::bingx::BingXClient,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
     // Fetch all chart TFs concurrently
-    let chart_tfs_set: HashSet<Timeframe> = chart_tfs.iter().copied().collect();
+    let mut chart_tfs_ordered = Vec::with_capacity(chart_tfs.len());
+    for timeframe in chart_tfs {
+        if !chart_tfs_ordered.contains(timeframe) {
+            chart_tfs_ordered.push(*timeframe);
+        }
+    }
 
-    let all_dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = join_all(
-        chart_tfs_set
+    let fetched = join_all(
+        chart_tfs_ordered
             .iter()
             .map(|tf| {
-                let client = client;
                 let symbol = ticker.symbol.clone();
                 async move {
                     client
@@ -271,25 +271,18 @@ async fn process_ticker(
             })
             .collect::<Vec<_>>(),
     )
-    .await
-    .into_par_iter()
-    .filter_map(|res| match res {
-        Ok((tf, klines)) => match process_data(klines.as_slice(), ticker) {
-            Ok(df) => Some((tf, df)),
-            Err(e) => {
-                eprintln!(
-                    "  Error computing indicators for {} {}: {e:#}",
-                    ticker.symbol, tf
-                );
+    .await;
+    let fetched = fetched
+        .into_iter()
+        .filter_map(|res| match res {
+            Ok(frame) => Some(frame),
+            Err(err) => {
+                eprintln!("  Error fetching {}: {err:#?}", ticker.symbol);
                 None
             }
-        },
-        Err(err) => {
-            eprintln!("  Error fetching {}: {err:#?}", ticker.symbol);
-            None
-        }
-    })
-    .collect();
+        })
+        .collect();
+    let all_dfs = compute_crypto_frames(fetched, ticker);
 
     // Serialize all fetched TFs to JSON for the chart
     let chart_dfs_serialized: HashMap<String, Value> = all_dfs
@@ -307,178 +300,61 @@ async fn process_ticker(
     Ok(chart_json)
 }
 
-// ─── Indicators ──────────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-fn indicators(ticker: &TickerConf) -> Vec<Expr> {
-    let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
-
-    // Axis conversion
-    let time_to_date = col("time")
-        .cast(DataType::Datetime(
-            TimeUnit::Milliseconds,
-            Some(TimeZone::UTC),
-        ))
-        .alias("Date");
-
-    // Volume
-    let vol_color = when(col("close").gt_eq(col("open")))
-        .then(lit("rgba(76, 175, 80, 0.3)"))
-        .otherwise(lit("rgba(242, 54, 69, 0.3)"))
-        .alias("volume_color");
-    let vol_sma = col("volume").ema(20).alias("volume_sma");
-
-    // Moving thresholds
-    let bias_rev = ohlc.bias_reversion_smoothed(9).alias("bias_reversion");
-    let bias_rev_color = lit("rgba(178, 181, 190, 0.2)").alias("bias_reversion_color");
-    let ema200 = col("close").ema(200).alias("ema200");
-    let ema200_color = lit("rgba(156, 39, 176, 0.5)").alias("ema200_color");
-    let neutral_revrsi = (col("open") + ohlc.bar_bias())
-        .rev_rsi(14, 50.)
-        .alias("neutral_revrsi");
-    let neutral_revrsi_color = lit("rgba(178,181,190,0.2)").alias("neutral_revrsi_color");
-    let bullish_revrsi = col("high").rev_rsi(14, 70.).alias("bullish_revrsi");
-    let bullish_revrsi_color = lit("rgba(33,150,243,0.2)").alias("bullish_revrsi_color");
-    let bearish_revrsi = col("low").rev_rsi(14, 30.).alias("bearish_revrsi");
-    let bearish_revrsi_color = lit("rgba(255,152,0,0.2)").alias("bearish_revrsi_color");
-
-    // Oscillation band
-    let atr = ohlc.atr(42).alias("ATR");
-    let atr_osc = (atr.clone() * lit(1.618)).alias("atr_oscillation");
-    let atr_upperband = (col("open") + atr_osc.clone()).alias("atr_upperband");
-    let atr_upperband_color = lit("rgba(76, 175, 80, 0.2)").alias("atr_upperband_color");
-    let atr_lowerband = (col("open") - atr_osc.clone()).alias("atr_lowerband");
-    let atr_lowerband_color = lit("rgba(242, 54, 69, 0.2)").alias("atr_lowerband_color");
-    let atr_percent = (atr.clone() / col("open")).alias("atr_percent");
-
-    // Relative structure power
-    let structure_pwr = ohlc.bar_bias().rma(9).alias("structure_power");
-    let structure_pwr_color = when(structure_pwr.clone().gt_eq(lit(0)))
-        .then(lit("rgba(0, 137, 123, 1)"))
-        .otherwise(lit("rgba(136, 14, 79, 1)"))
-        .alias("structure_power_color");
-    let structure_pwr_sma = structure_pwr.clone().sma(16).alias("structure_power_sma");
-    let structure_pwr_dir = (lit(3) * structure_pwr.clone() - lit(2) * structure_pwr_sma.clone())
-        .alias("structure_power_direction");
-
-    // Relative structure strength index
-    let rssi = ohlc.rssi(14).alias("rssi");
-    let rssi_color = when(rssi.clone().gt(lit(59)))
-        .then(lit("rgba(76, 175, 79, 1)"))
-        .otherwise(
-            when(rssi.clone().lt(lit(41)))
-                .then(lit("rgba(242, 54, 70, 1)"))
-                .otherwise(lit("rgba(191, 54, 207, 0.7)")),
-        )
-        .alias("rssi_color");
-    let rssi_ma = rssi.clone().ema(9).alias("rssi_ma");
-    let rssi_dir = (lit(3) * rssi.clone() - lit(2) * rssi_ma.clone()).alias("rssi_direction");
-
-    // Stability indicator
-    let atr_rev_percent = ohlc
-        .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
-        .alias("atr_reversion_percent");
-    let atr_rev_percent_color = when(atr_rev_percent.clone().gt(lit(50)))
-        .then(lit("rgba(76, 175, 80, 0.5)"))
-        .otherwise(
-            when(atr_rev_percent.clone().lt(lit(-50)))
-                .then(lit("rgba(242, 54, 69, 0.5)"))
-                .otherwise(lit("rgba(41, 98, 255, 0.2)")),
-        )
-        .alias("atr_reversion_percent_color");
-
-    // Signals
-    let overbought = rssi
-        .clone()
-        .gt(lit(54))
-        .logical_and(atr_rev_percent.clone().lt(lit(-50)))
-        .alias("overbought");
-    let oversold = rssi
-        .clone()
-        .lt(lit(46))
-        .logical_and(atr_rev_percent.clone().gt(lit(50)))
-        .alias("oversold");
-    let climax_signal = when(overbought.clone().not().logical_and(oversold.clone().not()))
-        .then(lit(0))
-        .otherwise(when(overbought).then(lit(1)).otherwise(lit(-1)))
-        .alias("climax_signal");
-    let climax_signal_pos = when(climax_signal.clone().lt(lit(0)))
-        .then(lit("belowBar"))
-        .otherwise(lit("aboveBar"))
-        .alias("climax_signal_pos");
-    let climax_signal_color = when(climax_signal.clone().lt(lit(0)))
-        .then(lit("rgba(33, 150, 243, 1)"))
-        .otherwise(lit("rgba(233, 30, 99, 1)"))
-        .alias("climax_signal_color");
-    let climax_signal_shape = when(climax_signal.clone().lt(lit(0)))
-        .then(lit("arrowUp"))
-        .otherwise(lit("arrowDown"))
-        .alias("climax_signal_shape");
-
-    // Miscs
-    let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
-    let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
-    let sharpe_ratio = col("close").sharpe(200).alias("sharpe");
-    let sharpe_ratio_color = when(sharpe_ratio.clone().gt(lit(0)))
-        .then(lit("rgba(76, 175, 79, 0.5)"))
-        .otherwise(lit("rgba(242, 54, 70, 0.5)"))
-        .alias("sharpe_color");
-
-    // Gap zone detection columns
-    let is_atr_gap_col = ohlc.is_atr_gap(42).alias("is_atr_gap");
-    let body_ratio_col = ohlc.body_ratio().alias("body_ratio");
-
-    // Selected columns to export
-    vec![
-        time_to_date,
-        vol_color,
-        vol_sma,
-        bias_rev,
-        bias_rev_color,
-        ema200,
-        ema200_color,
-        neutral_revrsi,
-        neutral_revrsi_color,
-        bullish_revrsi,
-        bullish_revrsi_color,
-        bearish_revrsi,
-        bearish_revrsi_color,
-        atr_upperband,
-        atr_upperband_color,
-        atr_lowerband,
-        atr_lowerband_color,
-        rssi,
-        rssi_color,
-        rssi_ma,
-        rssi_dir,
-        structure_pwr,
-        structure_pwr_color,
-        structure_pwr_sma,
-        structure_pwr_dir,
-        atr_percent,
-        atr_rev_percent,
-        atr_rev_percent_color,
-        lvrg,
-        climax_signal,
-        climax_signal_pos,
-        climax_signal_color,
-        climax_signal_shape,
-        sharpe_ratio,
-        sharpe_ratio_color,
-        is_atr_gap_col,
-        body_ratio_col,
-    ]
-}
-
-fn process_data(
-    klines: &[Kline],
+fn compute_crypto_frames(
+    fetched: Vec<(Timeframe, Vec<Kline>)>,
     ticker: &TickerConf,
-) -> Result<Box<dyn ComputedFrame>, MarketError> {
-    let engine = PolarsEngine::new();
+) -> HashMap<Timeframe, Box<dyn ComputedFrame>> {
     let validated_ticker =
-        ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent)?;
+        match ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent) {
+            Ok(validated_ticker) => validated_ticker,
+            Err(err) => {
+                for (timeframe, _) in fetched {
+                    eprintln!(
+                        "  Error computing indicators for {} {}: {err:#}",
+                        ticker.symbol, timeframe
+                    );
+                }
+                return HashMap::new();
+            }
+        };
+    let timeframes = fetched
+        .iter()
+        .map(|(timeframe, _)| *timeframe)
+        .collect::<Vec<_>>();
+    let requests = fetched
+        .into_iter()
+        .map(|(_, klines)| CryptoBatchRequest {
+            klines,
+            ticker: validated_ticker.clone(),
+        })
+        .collect();
+    let results = match DuckDBEngine::new().compute_crypto_batch(requests, None) {
+        Ok(results) => results,
+        Err(err) => {
+            for timeframe in timeframes {
+                eprintln!(
+                    "  Error computing indicators for {} {}: {err:#}",
+                    ticker.symbol, timeframe
+                );
+            }
+            return HashMap::new();
+        }
+    };
 
-    engine.compute_crypto(klines, validated_ticker)
+    timeframes
+        .into_iter()
+        .zip(results)
+        .filter_map(|(timeframe, result)| match result.result {
+            Ok(frame) => Some((timeframe, Box::new(frame) as Box<dyn ComputedFrame>)),
+            Err(err) => {
+                eprintln!(
+                    "  Error computing indicators for {} {}: {err:#}",
+                    ticker.symbol, timeframe
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 // ─── Ticker metadata for HTML template ───────────────────────────────────────
@@ -1110,3 +986,68 @@ const TDV_HTML_TEMPLATE: &str = r#"
   </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use algotrap::engine::MarketFrameEngine;
+
+    fn ticker() -> TickerConf {
+        TickerConf {
+            symbol: "BTC-USDT".to_string(),
+            sl_percent: 0.02,
+            tol_percent: 0.01,
+            default_tf: Timeframe::H1,
+        }
+    }
+
+    fn klines(seed: f64) -> Vec<Kline> {
+        (0..240)
+            .map(|index| {
+                let open = seed + index as f64;
+                Kline {
+                    open,
+                    high: open + 4.0,
+                    low: open - 2.0,
+                    close: open + if index % 2 == 0 { 2.0 } else { -1.0 },
+                    volume: 1_000.0 + index as f64,
+                    time: 1_700_000_000_000 + index as i64 * 60_000,
+                    adjclose: None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn crypto_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
+        let ticker = ticker();
+        let valid_5m = klines(100.0);
+        let valid_1h = klines(200.0);
+        let mut invalid = klines(300.0);
+        invalid[0].open = f64::NAN;
+
+        let frames = compute_crypto_frames(
+            vec![
+                (Timeframe::H1, valid_1h.clone()),
+                (Timeframe::M1, invalid),
+                (Timeframe::M5, valid_5m.clone()),
+            ],
+            &ticker,
+        );
+
+        assert_eq!(frames.len(), 2);
+        assert!(!frames.contains_key(&Timeframe::M1));
+        let validated =
+            ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent).unwrap();
+        for (timeframe, klines) in [(Timeframe::H1, valid_1h), (Timeframe::M5, valid_5m)] {
+            let expected = DuckDBEngine::new()
+                .compute_crypto(&klines, validated.clone())
+                .unwrap();
+            assert_eq!(
+                frames[&timeframe].to_json_records().unwrap(),
+                expected.to_json_records().unwrap(),
+                "timeframe {timeframe} must retain its matching batch result"
+            );
+        }
+    }
+}

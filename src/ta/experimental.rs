@@ -1,86 +1,123 @@
-use polars::prelude::*;
-use tap::Pipe;
+//! Composite experimental technical-analysis kernels.
+use super::{TaError, TaResult, validate_finite_output, validate_finite_series};
+use super::{
+    ma::{ema, rma, sma},
+    ohlc::Ohlc,
+    rsi::rsi,
+};
 
-use super::prelude::*;
-
-/// Relative Structure Strength Index
-/// Experimental index of relative strength based on `open + bar_bias`
-pub fn rssi(ohlc: &Ohlc, len: usize) -> Expr {
-    let bias = bar_bias(ohlc);
-    let bar_pwr = ohlc[0].clone() + bias;
-
-    bar_pwr.rsi(len)
+/// Returns RSSI from `open + bar_bias`.
+pub fn rssi(ohlc: Ohlc<'_>, period: usize) -> TaResult<Vec<f64>> {
+    let result = rsi(
+        &ohlc
+            .open()
+            .iter()
+            .zip(ohlc.bar_bias()?)
+            .map(|(&open, bias)| open + bias)
+            .collect::<Vec<_>>(),
+        period,
+    )?;
+    validate_finite_output("RSSI", &result)?;
+    Ok(result)
 }
 
-/// Bias reversion
-/// Calculate the reversion value based on moving average of bias and open price
-pub fn bias_reversion(ohlc: &Ohlc, len: usize) -> Expr {
-    let bias = bar_bias(ohlc);
-    let bias_rma = rma(&bias, len);
-    // Reversion value
-    ohlc[0].clone() - bias_rma
+/// Returns the unsmoothed open-minus-bias-RMA reversion primitive.
+pub fn bias_reversion(ohlc: Ohlc<'_>, period: usize) -> TaResult<Vec<f64>> {
+    let result = ohlc
+        .open()
+        .iter()
+        .zip(rma(&ohlc.bar_bias()?, period)?)
+        .map(|(&open, bias)| open - bias)
+        .collect::<Vec<_>>();
+    validate_finite_output("bias reversion", &result)?;
+    Ok(result)
+}
+/// Returns bias reversion smoothed with an SMA of the same period.
+pub fn bias_reversion_smoothed(ohlc: Ohlc<'_>, period: usize) -> TaResult<Vec<f64>> {
+    sma(&bias_reversion(ohlc, period)?, period)
+}
+/// Returns signed distance of a signal from open-centered oscillation bands.
+pub fn band_reversion(ohlc: Ohlc<'_>, oscillation: &[f64], signal: &[f64]) -> TaResult<Vec<f64>> {
+    if oscillation.len() != ohlc.open().len() || signal.len() != ohlc.open().len() {
+        return Err(TaError::validation("band inputs must match OHLC length"));
+    }
+    validate_finite_series("band oscillation", oscillation)?;
+    validate_finite_series("band signal", signal)?;
+    let result = ohlc
+        .open()
+        .iter()
+        .zip(oscillation)
+        .zip(signal)
+        .map(|((&open, &oscillation), &signal)| {
+            let upper = open + oscillation;
+            let lower = open - oscillation;
+            if lower <= signal && upper >= signal {
+                0.0
+            } else if signal - upper > 0.0 {
+                signal - upper
+            } else {
+                (signal - lower).min(0.0)
+            }
+        })
+        .collect::<Vec<_>>();
+    validate_finite_output("band reversion", &result)?;
+    Ok(result)
+}
+/// Returns band reversion as a percentage of the oscillation.
+pub fn band_reversion_percent(
+    ohlc: Ohlc<'_>,
+    oscillation: &[f64],
+    signal: &[f64],
+) -> TaResult<Vec<f64>> {
+    validate_finite_series("band percentage oscillation", oscillation)?;
+    validate_finite_series("band percentage signal", signal)?;
+    let result = band_reversion(ohlc, oscillation, signal)?
+        .into_iter()
+        .zip(oscillation)
+        .map(|(value, &oscillation)| {
+            if oscillation == 0.0 {
+                0.0
+            } else {
+                100.0 * value / oscillation
+            }
+        })
+        .collect::<Vec<_>>();
+    validate_finite_output("band reversion percent", &result)?;
+    Ok(result)
+}
+/// Smooths RSSI with the frame's EMA convention.
+pub fn smooth_rssi(values: &[f64], period: usize) -> TaResult<Vec<f64>> {
+    ema(values, period)
 }
 
-/// Bias reversion smoothed
-/// Calculate the reversion value based on moving average of bias and open price
-/// The value is then smoothed using simple moving average of the same length
-pub fn bias_reversion_smoothed(ohlc: &Ohlc, len: usize) -> Expr {
-    bias_reversion(ohlc, len).pipe(|val| sma(&val, len))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Band Reversion
-/// Bands that tend to keep aligned with the signal line inside
-/// @returns the reversion distance from nearest band to signal line
-pub fn band_reversion(ohlc: &Ohlc, osc: &Expr, signal: &Expr) -> Expr {
-    let upper = ohlc[0].clone() + osc.clone();
-    let lower = ohlc[0].clone() - osc.clone();
-    let normal_lower = lower.clone().lt_eq(signal.clone());
-    let normal_upper = upper.clone().gt_eq(signal.clone());
-    // Dip value, lower cap at 0
-    let dip_val = signal.clone() - upper.clone();
-    let dip_val_clipped = dip_val.clip(lit(0), lit(f64::MAX));
-    // Surge value, upper cap at 0
-    let surge_val = signal.clone() - lower.clone();
-    let surge_val_clipped = surge_val.clip(lit(f64::MIN), lit(0));
+    #[test]
+    fn standalone_kernels_preserve_validation_and_band_behavior() {
+        let ohlc = Ohlc::new(&[10., 10., 10.], &[10.; 3], &[10.; 3], &[10.; 3]).unwrap();
+        assert_eq!(
+            band_reversion(ohlc, &[2., 2., 2.], &[11., 13., 7.]).unwrap(),
+            vec![0., 1., -1.]
+        );
+        assert!(band_reversion(ohlc, &[f64::NAN; 3], &[10.; 3]).is_err());
+        assert!(smooth_rssi(&[f64::NAN], 2).is_err());
+    }
 
-    // Reversion value, positive suggests reversing upward when negative suggests downward
-    when(normal_lower.logical_and(normal_upper))
-        .then(lit(0))
-        .otherwise(
-            when(dip_val_clipped.clone().gt(lit(0)))
-                .then(dip_val_clipped)
-                .otherwise(surge_val_clipped),
+    #[test]
+    fn bias_primitives_are_independent() {
+        let ohlc = Ohlc::new(
+            &[10., 11., 12.],
+            &[12., 14., 15.],
+            &[9., 10., 11.],
+            &[11., 13., 12.],
         )
-}
-
-/// Band Reversion as percentage of band's oscillation
-/// @returns the reversion distance as percentage of oscillation
-pub fn band_reversion_percent(ohlc: &Ohlc, osc: &Expr, signal: &Expr) -> Expr {
-    let rev_val = band_reversion(ohlc, osc, signal);
-    lit(100) * rev_val / osc.clone()
-}
-
-pub trait OhlcExperimental {
-    fn rssi(&self, len: usize) -> Expr;
-    fn bias_reversion(&self, len: usize) -> Expr;
-    fn bias_reversion_smoothed(&self, len: usize) -> Expr;
-    fn band_reversion(&self, osc: &Expr, signal: &Expr) -> Expr;
-    fn band_reversion_percent(&self, osc: &Expr, signal: &Expr) -> Expr;
-}
-impl OhlcExperimental for Ohlc {
-    fn rssi(&self, len: usize) -> Expr {
-        rssi(self, len)
-    }
-    fn bias_reversion(&self, len: usize) -> Expr {
-        bias_reversion(self, len)
-    }
-    fn bias_reversion_smoothed(&self, len: usize) -> Expr {
-        bias_reversion_smoothed(self, len)
-    }
-    fn band_reversion(&self, osc: &Expr, signal: &Expr) -> Expr {
-        band_reversion(self, osc, signal)
-    }
-    fn band_reversion_percent(&self, osc: &Expr, signal: &Expr) -> Expr {
-        band_reversion_percent(self, osc, signal)
+        .unwrap();
+        assert_eq!(bias_reversion(ohlc, 2).unwrap(), vec![8., 8., 9.5]);
+        assert_eq!(
+            bias_reversion_smoothed(ohlc, 2).unwrap(),
+            vec![8., 8., 8.75]
+        );
     }
 }

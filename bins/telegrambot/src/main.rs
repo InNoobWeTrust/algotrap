@@ -6,7 +6,6 @@ use async_openai::config::OpenAIConfig;
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
-use reqwest;
 use teloxide::prelude::*;
 use tracing::{error, info, warn};
 
@@ -447,8 +446,14 @@ async fn capture_ticker_charts(
         let last_rssi = telegrambot::chart::last_rssi_from_df(df.as_ref());
         let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
         let params = ic.gap_zone_params();
-        let raw_df = df.as_dataframe();
-        let zones = algotrap::ta::gap_zones::extract_gap_zones(raw_df, &params);
+        let zones =
+            match algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params) {
+                Ok(zones) => zones,
+                Err(error) => {
+                    error!(tf = %tf_label, "Gap-zone extraction failed: {error}");
+                    continue;
+                }
+            };
         let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(&zones, 0.3);
         let chart_html = match telegrambot::chart::render_single_tf_chart_html(
             tf,

@@ -3,8 +3,9 @@
 # to Cloudflare Pages on a candle-close-aligned schedule.
 #
 # Prerequisites:
-#   1. Build the image:
-#      docker build --build-context repo=. -f bins/cryptobot/deployment/Dockerfile -t algotrap-cryptobot:latest bins/cryptobot
+#   1. Build from the repository root. The Docker builder downloads, verifies, and compiles the
+#      pinned linux/amd64 glibc DuckDB source artifact:
+#      docker build -f bins/cryptobot/deployment/Dockerfile -t algotrap-cryptobot:latest .
 #   2. Create the config secret (strips shell quotes for Docker/K8s compatibility):
 #      sed "s/^TICKERS='\(.*\)'$/TICKERS=\1/" bins/cryptobot/.env | \
 #        kubectl create secret generic cryptobot-env --from-env-file=/dev/stdin --dry-run=client -o yaml | \
@@ -36,6 +37,9 @@ spec:
           envFrom:
             - secretRef:
                 name: cryptobot-env
+          env:
+            - name: DUCKDB_LIBRARY_PATH
+              value: /usr/local/lib/libduckdb.so
           resources:
             requests:
               cpu: "50m"

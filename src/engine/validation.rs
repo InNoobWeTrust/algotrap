@@ -57,6 +57,14 @@ impl ValidatedTicker {
         &self.value
     }
 
+    /// Returns the immutable stop-loss and tolerance percentages accepted at construction.
+    ///
+    /// Both values have already passed [`ValidatedTicker::new`] validation and are exposed
+    /// only for read-only calculations at the engine boundary.
+    pub fn risk_percentages(&self) -> (f64, f64) {
+        (self.sl_percent, self.tol_percent)
+    }
+
     fn into_inner(self) -> String {
         self.value
     }
@@ -203,6 +211,13 @@ mod tests {
         assert!(ValidatedTicker::new("BTCUSDT", 0.02, 0.01).is_ok());
         assert!(ValidatedTicker::new("BTCUSDT", -0.01, 0.01).is_err());
         assert!(ValidatedTicker::new("BTCUSDT", 0.02, 1.01).is_err());
+    }
+
+    #[test]
+    fn validated_ticker_exposes_its_validated_risk_percentages_read_only() {
+        let ticker = ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap();
+
+        assert_eq!(ticker.risk_percentages(), (0.02, 0.01));
     }
 
     #[test]

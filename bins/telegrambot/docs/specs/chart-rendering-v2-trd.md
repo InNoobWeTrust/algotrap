@@ -284,7 +284,7 @@ This is a static tint based on the **last candle**. Per-bar dynamic tinting woul
 
 ## Component 5: Biased Candle — Rust Expression
 
-Pre-compute biased candle detection as a lazy Polars expression in `data.rs`, producing an `i8` column.
+Pre-compute biased candle detection as a lazy previous dataframe implementation expression in `data.rs`, producing an `i8` column.
 
 ### Logic (from Pine `polyglot_lib.pine` L530-549)
 

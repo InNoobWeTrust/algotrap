@@ -120,6 +120,10 @@ pub async fn send_alert(
 /// Send a Watch-tier notification with summary + trade plans.
 ///
 /// Lighter than a full alert — no charts unless confidence ≥ 50.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The public notification boundary deliberately mirrors the complete Watch payload."
+)]
 pub async fn send_watch_notification(
     bot: &Bot,
     chat_id: ChatId,

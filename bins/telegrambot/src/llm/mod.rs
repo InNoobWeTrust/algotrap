@@ -303,84 +303,79 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
     }
 
     // Try to find a JSON block in the text
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            let json_str = &text[start..=end];
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let confidence = v["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
-                let direction = parse_direction(v["direction"].as_str().unwrap_or("NONE"));
-                let summary = v["summary"].as_str().unwrap_or(text).to_string();
+    if let Some(start) = text.find('{')
+        && let Some(end) = text.rfind('}')
+    {
+        let json_str = &text[start..=end];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+            let confidence = v["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
+            let direction = parse_direction(v["direction"].as_str().unwrap_or("NONE"));
+            let summary = v["summary"].as_str().unwrap_or(text).to_string();
 
-                // Parse trade plans if present
-                let trade_plans = v["trade_plans"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|plan| {
-                                Some(crate::memory::TradePlan {
-                                    label: plan["label"].as_str()?.to_string(),
-                                    direction: plan["direction"]
-                                        .as_str()
-                                        .unwrap_or("WAIT")
-                                        .to_string(),
-                                    entry: plan["entry"].as_f64(),
-                                    target: plan["target"].as_f64(),
-                                    stop: plan["stop"].as_f64(),
-                                    rationale: plan["rationale"].as_str().unwrap_or("").to_string(),
-                                })
+            // Parse trade plans if present
+            let trade_plans = v["trade_plans"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|plan| {
+                            Some(crate::memory::TradePlan {
+                                label: plan["label"].as_str()?.to_string(),
+                                direction: plan["direction"].as_str().unwrap_or("WAIT").to_string(),
+                                entry: plan["entry"].as_f64(),
+                                target: plan["target"].as_f64(),
+                                stop: plan["stop"].as_f64(),
+                                rationale: plan["rationale"].as_str().unwrap_or("").to_string(),
                             })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
 
-                // Parse proposed weights (if present)
-                let proposed_weights = v["weights"].as_object().map(|obj| {
-                    obj.iter()
-                        .filter_map(|(k, val)| val.as_f64().map(|v| (k.clone(), v)))
-                        .collect::<HashMap<String, f64>>()
-                });
-                if proposed_weights.is_none() {
-                    warn!("LLM response missing 'weights' — retaining previous cycle weights");
-                }
-
-                // Parse significance threshold (if present)
-                let significance_threshold = v["significance_threshold"].as_f64();
-                if significance_threshold.is_none() {
-                    warn!(
-                        "LLM response missing 'significance_threshold' — retaining previous value"
-                    );
-                }
-
-                // Parse indicator params (if present — absent = no-op)
-                let proposed_indicator_params = v["indicator_params"].as_object().map(|obj| {
-                    obj.iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<HashMap<String, serde_json::Value>>()
-                });
-
-                // Conviction check: do trade plans align with declared direction?
-                let conviction_aligned = check_conviction(direction, &trade_plans);
-                if !conviction_aligned {
-                    let plan_dirs: Vec<&str> =
-                        trade_plans.iter().map(|p| p.direction.as_str()).collect();
-                    warn!(
-                        direction = %direction,
-                        plans = ?plan_dirs,
-                        "Low conviction: trade plan directions don't align with declared direction"
-                    );
-                }
-
-                return AnalysisResult {
-                    text: summary,
-                    confidence,
-                    direction,
-                    trade_plans,
-                    proposed_weights,
-                    significance_threshold,
-                    conviction_aligned,
-                    proposed_indicator_params,
-                };
+            // Parse proposed weights (if present)
+            let proposed_weights = v["weights"].as_object().map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, val)| val.as_f64().map(|v| (k.clone(), v)))
+                    .collect::<HashMap<String, f64>>()
+            });
+            if proposed_weights.is_none() {
+                warn!("LLM response missing 'weights' — retaining previous cycle weights");
             }
+
+            // Parse significance threshold (if present)
+            let significance_threshold = v["significance_threshold"].as_f64();
+            if significance_threshold.is_none() {
+                warn!("LLM response missing 'significance_threshold' — retaining previous value");
+            }
+
+            // Parse indicator params (if present — absent = no-op)
+            let proposed_indicator_params = v["indicator_params"].as_object().map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<HashMap<String, serde_json::Value>>()
+            });
+
+            // Conviction check: do trade plans align with declared direction?
+            let conviction_aligned = check_conviction(direction, &trade_plans);
+            if !conviction_aligned {
+                let plan_dirs: Vec<&str> =
+                    trade_plans.iter().map(|p| p.direction.as_str()).collect();
+                warn!(
+                    direction = %direction,
+                    plans = ?plan_dirs,
+                    "Low conviction: trade plan directions don't align with declared direction"
+                );
+            }
+
+            return AnalysisResult {
+                text: summary,
+                confidence,
+                direction,
+                trade_plans,
+                proposed_weights,
+                significance_threshold,
+                conviction_aligned,
+                proposed_indicator_params,
+            };
         }
     }
 
@@ -1331,7 +1326,7 @@ That's all."#;
             ("BROWSERLESS_URL", "http://localhost:3000"),
         ].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
 
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         assert!(!conf.supports_reasoning);
         let trigger = cot_trigger_text(&conf);
         assert!(trigger.contains("step by step"));
@@ -1352,7 +1347,7 @@ That's all."#;
             ("SUPPORTS_REASONING", "true"),
         ].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
 
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         assert!(conf.supports_reasoning);
         let trigger = cot_trigger_text(&conf);
         assert!(trigger.is_empty());

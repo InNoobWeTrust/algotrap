@@ -198,7 +198,7 @@ This spec addresses both: a column registry with compile-time assertions prevent
 
 ### `src/data.rs`
 
-- **Add**: `biased_candle` lazy Polars expression to `indicators()` — produces `i8` column (1 = rising, -1 = falling, 0 = none)
+- **Add**: `biased_candle` lazy previous dataframe implementation expression to `indicators()` — produces `i8` column (1 = rising, -1 = falling, 0 = none)
 - **Add**: Optional `debug_assert!` for `CHART_COLUMNS` presence in DataFrame
 
 ## Traceability Matrix

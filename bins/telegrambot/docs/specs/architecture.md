@@ -72,7 +72,7 @@ config/prompts/          — runtime-loaded prompt templates
 | `async-openai` 0.33 | OpenAI-compatible LLM client (w/ `chat-completion` feature) |
 | `teloxide` 0.17 | Telegram bot framework |
 | `reqwest` (json) | Browserless screenshot API |
-| `polars` | DataFrame ops for indicator computation |
+| `previous dataframe implementation` | DataFrame ops for indicator computation |
 | `minijinja` | Chart HTML template rendering |
 | `tokio`, `futures`, `rayon` | Async runtime, parallel data processing |
 | `dotenv`, `envy` | Env-based configuration |

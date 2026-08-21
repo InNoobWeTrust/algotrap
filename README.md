@@ -38,6 +38,33 @@ This repository houses multiple algorithmic trading bits:
 
 ## Deployment
 
+### Shared DuckDB Runtime
+
+All market computation uses DuckDB through its dynamically loaded C library. Production images
+ship `/usr/local/lib/libduckdb.so` and set `DUCKDB_LIBRARY_PATH` to that absolute path. Local
+macOS development must point the same variable at an architecture-matched `libduckdb.dylib`.
+Docker images build DuckDB v1.5.5 from its checksum-verified source archive inside a dedicated
+`duckdb-builder` stage for the selected Linux glibc target (amd64 or arm64); no pre-built library
+is vendored. Every build stage uses `--platform=$TARGETPLATFORM`, so a plain `docker build` follows
+the host architecture. On Apple Silicon this produces `linux/arm64`; if `DOCKER_DEFAULT_PLATFORM=linux/amd64`
+is inherited from the shell environment it must be unset before building. Use `--platform linux/amd64`
+only when explicitly publishing the amd64 target; the Rust builder and `duckdb-builder` stages must
+target the same architecture.
+
+For a full architecture reference — component ownership, runtime data flow, execution strategy
+decision, and container build/deployment — see
+[`docs/architecture/duckdb-ta-execution.md`](docs/architecture/duckdb-ta-execution.md).
+
+Verify the installed library without starting a bot:
+
+```bash
+DUCKDB_LIBRARY_PATH=/opt/homebrew/lib/libduckdb.dylib \
+  cargo test -p algotrap duckdb_runtime_contract -- --ignored
+```
+
+The contract loads the C API, reads its version, opens an in-memory database, and validates a
+typed query. A missing or incompatible library fails explicitly; there is no alternate backend.
+
 ### Cryptobot (Serverless)
 
 `cryptobot` runs as a one-shot process and pushes rendered charts directly to Cloudflare R2 bucket. Heavy infrastructure is completely decoupled.
