@@ -111,7 +111,9 @@ impl BingXClient {
             .await?;
 
         if response["code"] != 0 {
-            eprintln!("Error: {response:#?}");
+            let msg = response["msg"].as_str().unwrap_or("unknown BingX error");
+            let code = &response["code"];
+            return Err(format!("BingX API error code {code}: {msg}").into());
         }
 
         deserialize_futures_klines(response["data"].clone()).map_err(Into::into)

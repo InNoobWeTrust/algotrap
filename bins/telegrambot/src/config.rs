@@ -53,7 +53,7 @@ pub struct EnvConf {
     // Browserless
     pub browserless_url: String,
 
-    // Prompt config directory (system.txt, user.txt, tools.json)
+    // Prompt config directory (system.txt, user.txt, system_adaptive.txt, user_adaptive.txt)
     #[serde(default = "default_prompts_dir")]
     pub prompts_dir: String,
 
@@ -108,7 +108,15 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    let s = s.trim();
+    let mut s = s.trim();
+    let is_shell_quoted = (s.starts_with('\'') && s.ends_with('\''))
+        || (s.starts_with('"')
+            && s.ends_with('"')
+            && !s.starts_with("\"[")
+            && !s.starts_with("[{"));
+    if is_shell_quoted && s.len() >= 2 {
+        s = s[1..s.len() - 1].trim();
+    }
     if s.is_empty() {
         return Err(serde::de::Error::custom(
             "TICKERS is required and must not be empty",
@@ -319,6 +327,18 @@ mod tests {
         env.insert("TICKERS".into(), "[]".into());
         let conf: EnvConf = envy::from_iter(env).unwrap();
         assert!(conf.tickers.is_empty());
+    }
+
+    #[test]
+    fn test_quoted_tickers_json() {
+        let mut env = base_env();
+        env.insert(
+            "TICKERS".into(),
+            "'[{\"symbol\":\"BTC-USDT\",\"sl_percent\":0.02,\"tol_percent\":0.01,\"tfs\":\"1h\",\"default_tf\":\"1h\"}]'".into(),
+        );
+        let conf: EnvConf = envy::from_iter(env).unwrap();
+        assert_eq!(conf.tickers.len(), 1);
+        assert_eq!(conf.tickers[0].symbol, "BTC-USDT");
     }
 
     #[test]
