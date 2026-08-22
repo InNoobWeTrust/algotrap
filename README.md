@@ -43,9 +43,10 @@ This repository houses multiple algorithmic trading bits:
 All market computation uses DuckDB through its dynamically loaded C library. Production images
 ship `/usr/local/lib/libduckdb.so` and set `DUCKDB_LIBRARY_PATH` to that absolute path. Local
 macOS development must point the same variable at an architecture-matched `libduckdb.dylib`.
-Docker images build DuckDB v1.5.5 from its checksum-verified source archive inside a dedicated
-`duckdb-builder` stage for the selected Linux glibc target (amd64 or arm64); no pre-built library
-is vendored. Every build stage uses `--platform=$TARGETPLATFORM`, so a plain `docker build` follows
+Docker images install DuckDB v1.5.5 from checksum-pinned official prebuilt `libduckdb` release
+assets inside a dedicated `duckdb-builder` stage for the selected Linux glibc target (amd64 or
+arm64); the asset SHA-256 and ELF machine are verified before install, and no library is vendored.
+Every build stage uses `--platform=$TARGETPLATFORM`, so a plain `docker build` follows
 the host architecture. On Apple Silicon this produces `linux/arm64`; if `DOCKER_DEFAULT_PLATFORM=linux/amd64`
 is inherited from the shell environment it must be unset before building. Use `--platform linux/amd64`
 only when explicitly publishing the amd64 target; the Rust builder and `duckdb-builder` stages must

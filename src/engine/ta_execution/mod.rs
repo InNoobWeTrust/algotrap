@@ -16,7 +16,7 @@ use crate::ta::plan::{
     IndicatorPlan, PlanCompiler, PlanOutput, SeriesExpr, SeriesNode, SourceField, standard_plan,
 };
 use crate::ta::rsi::{reverse_rsi, rsi};
-use crate::ta::{TaError, TaResult};
+use crate::ta::{TaError, TaErrorKind, TaResult};
 
 #[derive(Debug, Clone, Copy)]
 enum Backend {
@@ -113,6 +113,17 @@ fn validate_klines(klines: &[Kline]) -> TaResult<()> {
     Ok(())
 }
 
+/// Normalizes arithmetic-overflow failures from the ATR chain into the stable
+/// non-finite-output contract while preserving structural errors (invalid
+/// period, alignment, validation) verbatim.
+fn normalize_atr_overflow(error: TaError) -> TaError {
+    if error.kind == TaErrorKind::Computation {
+        TaError::non_finite_indicator_output(0, "atr")
+    } else {
+        error
+    }
+}
+
 fn evaluate(
     expr: &SeriesExpr,
     source: &Sources,
@@ -141,11 +152,8 @@ fn evaluate(
             backend,
         )?,
         SeriesNode::Atr(period) => {
-            let values = ohlc
-                .true_range()
-                .map_err(|_| TaError::non_finite_indicator_output(0, "atr"))?;
-            smooth(&values, *period, true, backend)
-                .map_err(|_| TaError::non_finite_indicator_output(0, "atr"))?
+            let values = ohlc.true_range().map_err(normalize_atr_overflow)?;
+            smooth(&values, *period, true, backend).map_err(normalize_atr_overflow)?
         }
         SeriesNode::Rsi(input, period) => compute_rsi(
             &evaluate(input, source, ohlc, memo, backend)?,
@@ -204,6 +212,9 @@ fn evaluate(
 }
 
 fn smooth(values: &[f64], period: usize, wilder: bool, backend: Backend) -> TaResult<Vec<f64>> {
+    if period == 0 {
+        return Err(TaError::invalid_period("period must be greater than zero"));
+    }
     match backend {
         Backend::Sequential => {
             if wilder {
@@ -212,15 +223,14 @@ fn smooth(values: &[f64], period: usize, wilder: bool, backend: Backend) -> TaRe
                 ema(values, period)
             }
         }
-        Backend::IntraSeries(workers) => smooth_with_workers(
-            values,
-            if wilder {
+        Backend::IntraSeries(workers) => {
+            let alpha = if wilder {
                 1.0 / period as f64
             } else {
                 2.0 / (period as f64 + 1.0)
-            },
-            workers.get(),
-        ),
+            };
+            smooth_with_workers(values, alpha, workers.get())
+        }
     }
 }
 
@@ -277,6 +287,9 @@ fn smooth_with_workers(values: &[f64], alpha: f64, workers: usize) -> TaResult<V
 }
 
 fn rsi_with_workers(values: &[f64], period: usize, workers: usize) -> TaResult<Vec<f64>> {
+    if period == 0 {
+        return Err(TaError::invalid_period("period must be greater than zero"));
+    }
     let (gains, losses) = changes(values);
     let gains = smooth_with_workers(&gains, 1.0 / period as f64, workers)?;
     let losses = smooth_with_workers(&losses, 1.0 / period as f64, workers)?;
@@ -289,6 +302,9 @@ fn reverse_rsi_with_workers(
     target: f64,
     workers: usize,
 ) -> TaResult<Vec<f64>> {
+    if period == 0 {
+        return Err(TaError::invalid_period("period must be greater than zero"));
+    }
     if !(0.0 < target && target < 100.0) {
         return Err(TaError::validation(
             "reverse RSI target must be strictly between 0 and 100",
@@ -480,6 +496,26 @@ mod tests {
                 actual.column_names().collect::<Vec<_>>(),
                 vec!["atr", "is_atr_gap", "rssi_ma"]
             );
+        }
+    }
+
+    #[test]
+    fn worker_backends_reject_zero_period_like_sequential() {
+        let values = vec![1.5_f64; 32];
+        let workers = NonZeroUsize::new(2).unwrap();
+        let failures = [
+            smooth(&values, 0, false, Backend::Sequential).unwrap_err(),
+            smooth(&values, 0, false, Backend::IntraSeries(workers)).unwrap_err(),
+            smooth(&values, 0, true, Backend::Sequential).unwrap_err(),
+            smooth(&values, 0, true, Backend::IntraSeries(workers)).unwrap_err(),
+            compute_rsi(&values, 0, Backend::Sequential).unwrap_err(),
+            compute_rsi(&values, 0, Backend::IntraSeries(workers)).unwrap_err(),
+            compute_reverse_rsi(&values, 0, 50.0, Backend::Sequential).unwrap_err(),
+            compute_reverse_rsi(&values, 0, 50.0, Backend::IntraSeries(workers)).unwrap_err(),
+        ];
+        for failure in failures {
+            assert_eq!(failure.kind, crate::ta::TaErrorKind::InvalidPeriod);
+            assert_eq!(failure.message, "period must be greater than zero");
         }
     }
 

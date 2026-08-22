@@ -21,7 +21,7 @@ impl std::fmt::Display for Ticker {
 
 /// Validated ticker that has been canonicalized.
 ///
-/// Created from raw user input via [`parse_validated_ticker`].
+/// Created from raw user input after ticker-symbol validation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedTicker {
     value: String,
@@ -143,7 +143,7 @@ impl ValidatedIndicator {
 ///
 /// # Errors
 /// Returns [`MarketError::validation`] if the ticker is invalid.
-pub fn parse_validated_ticker(raw: &str) -> Result<ValidatedTicker, MarketError> {
+fn parse_validated_ticker(raw: &str) -> Result<ValidatedTicker, MarketError> {
     let trimmed = raw.trim();
 
     if trimmed.is_empty() {

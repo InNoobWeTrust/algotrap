@@ -319,6 +319,17 @@ pub struct PlanExecutor {
     evaluations: std::cell::Cell<usize>,
 }
 
+/// Normalizes arithmetic-overflow failures from the ATR chain into the stable
+/// non-finite-output contract while preserving structural errors (invalid
+/// period, alignment, validation) verbatim.
+fn normalize_atr_overflow(error: TaError) -> TaError {
+    if error.kind == crate::ta::TaErrorKind::Computation {
+        TaError::non_finite_indicator_output(0, "atr")
+    } else {
+        error
+    }
+}
+
 impl PlanExecutor {
     /// Creates a sequential executor.
     pub fn new() -> Self {
@@ -379,10 +390,8 @@ impl PlanExecutor {
             SeriesNode::Ema(input, p) => ema(&self.evaluate(input, source, ohlc, memo)?, *p)?,
             SeriesNode::Rma(input, p) => rma(&self.evaluate(input, source, ohlc, memo)?, *p)?,
             SeriesNode::Atr(p) => {
-                let true_range = ohlc
-                    .true_range()
-                    .map_err(|_| TaError::non_finite_indicator_output(0, "atr"))?;
-                rma(&true_range, *p).map_err(|_| TaError::non_finite_indicator_output(0, "atr"))?
+                let true_range = ohlc.true_range().map_err(normalize_atr_overflow)?;
+                rma(&true_range, *p).map_err(normalize_atr_overflow)?
             }
             SeriesNode::Rsi(input, p) => rsi(&self.evaluate(input, source, ohlc, memo)?, *p)?,
             SeriesNode::ReverseRsi(input, p, target) => {

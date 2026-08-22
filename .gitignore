@@ -11,3 +11,6 @@ bins/cryptobot/deployment/envs/*.env
 .wrangler/
 bins/telegrambot/cluster_memory/
 bins/telegrambot/memory/
+
+# Kilo agent-harness local artifacts
+.kilo/
