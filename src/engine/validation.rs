@@ -93,42 +93,17 @@ pub enum ValidatedIndicator {
     StructurePower,
     IsAtrGap,
     BodyRatio,
-    BiasedCandle,
     Leverage,
     Date,
 }
 
 impl ValidatedIndicator {
     /// Returns the output column names for this indicator.
+    ///
+    /// Derived from the indicator binding registry, which is the single place
+    /// where indicators are wired to TA leaves and frame columns.
     pub fn output_columns(&self) -> Vec<String> {
-        match self {
-            ValidatedIndicator::SMA => vec!["volume_sma".to_string()],
-            ValidatedIndicator::EMA => vec!["ema200".to_string()],
-            ValidatedIndicator::RSI => vec!["rssi".to_string(), "rssi_ma".to_string()],
-            ValidatedIndicator::RevRsi => vec![
-                "neutral_revrsi".to_string(),
-                "bullish_revrsi".to_string(),
-                "bearish_revrsi".to_string(),
-            ],
-            ValidatedIndicator::ATR => vec![
-                "atr_upperband".to_string(),
-                "atr_lowerband".to_string(),
-                "atr_percent".to_string(),
-            ],
-            ValidatedIndicator::ATRRevPercent => vec!["atr_reversion_percent".to_string()],
-            ValidatedIndicator::BandReversion => vec!["band_reversion".to_string()],
-            ValidatedIndicator::BiasReversion => vec!["bias_reversion".to_string()],
-            ValidatedIndicator::Sharpe => vec!["sharpe".to_string()],
-            ValidatedIndicator::StructurePower => vec![
-                "structure_power".to_string(),
-                "structure_power_sma".to_string(),
-            ],
-            ValidatedIndicator::IsAtrGap => vec!["is_atr_gap".to_string()],
-            ValidatedIndicator::BodyRatio => vec!["body_ratio".to_string()],
-            ValidatedIndicator::BiasedCandle => vec!["biased_candle".to_string()],
-            ValidatedIndicator::Leverage => vec!["leverage".to_string()],
-            ValidatedIndicator::Date => vec!["Date".to_string()],
-        }
+        super::indicators::advertised_columns(self)
     }
 }
 

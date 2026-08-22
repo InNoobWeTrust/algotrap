@@ -14,6 +14,7 @@ mod duckdb_ta_table_function;
 pub mod error;
 pub mod execution_strategy;
 pub mod gap_zones;
+mod indicators;
 mod ta_execution;
 /// Creates the single shared DuckDB-backed compute engine.
 pub fn create_engine() -> Box<dyn traits::MarketFrameEngine> {

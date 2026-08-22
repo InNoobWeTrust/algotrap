@@ -8,7 +8,7 @@ use crate::engine::telegram_config::TelegramIndicatorConfig;
 use crate::engine::traits::{ComputedFrame, MarketFrameEngine};
 use crate::engine::validation::{ValidatedIndicator, ValidatedTicker};
 use crate::model::kline::Kline;
-use crate::ta::indicator::{IndicatorOutput, IndicatorProjection};
+use crate::ta::indicator::IndicatorProjection;
 use serde_json::{Map, Number, Value};
 use std::num::NonZeroUsize;
 use std::thread;
@@ -932,36 +932,8 @@ fn telegram_output_columns(indicators: &[ValidatedIndicator]) -> Vec<String> {
         .collect::<Vec<_>>();
 
     for indicator in dedup_indicators(indicators) {
-        match indicator {
-            ValidatedIndicator::SMA => push_unique(&mut columns, "volume_sma"),
-            ValidatedIndicator::EMA => push_unique(&mut columns, "ema200"),
-            ValidatedIndicator::RSI => {
-                push_unique(&mut columns, "rssi");
-                push_unique(&mut columns, "rssi_ma");
-            }
-            ValidatedIndicator::RevRsi => {
-                push_unique(&mut columns, "neutral_revrsi");
-                push_unique(&mut columns, "bullish_revrsi");
-                push_unique(&mut columns, "bearish_revrsi");
-            }
-            ValidatedIndicator::ATR => {
-                push_unique(&mut columns, "atr_upperband");
-                push_unique(&mut columns, "atr_lowerband");
-                push_unique(&mut columns, "atr_percent");
-            }
-            ValidatedIndicator::ATRRevPercent => push_unique(&mut columns, "atr_reversion_percent"),
-            ValidatedIndicator::BandReversion => push_unique(&mut columns, "band_reversion"),
-            ValidatedIndicator::BiasReversion => push_unique(&mut columns, "bias_reversion"),
-            ValidatedIndicator::Sharpe => push_unique(&mut columns, "sharpe"),
-            ValidatedIndicator::StructurePower => {
-                push_unique(&mut columns, "structure_power");
-                push_unique(&mut columns, "structure_power_sma");
-            }
-            ValidatedIndicator::IsAtrGap => push_unique(&mut columns, "is_atr_gap"),
-            ValidatedIndicator::BodyRatio => push_unique(&mut columns, "body_ratio"),
-            ValidatedIndicator::Date => push_unique(&mut columns, "Date"),
-            ValidatedIndicator::Leverage => push_unique(&mut columns, "leverage"),
-            ValidatedIndicator::BiasedCandle => {}
+        for column in super::indicators::advertised_columns(&indicator) {
+            push_unique(&mut columns, &column);
         }
     }
 
@@ -970,39 +942,12 @@ fn telegram_output_columns(indicators: &[ValidatedIndicator]) -> Vec<String> {
 
 /// Maps validated engine requests to typed TA leaves; SQL never crosses this boundary.
 ///
-/// `Leverage` is a presentation expression but requires the UDF to expose ATR.
+/// Leaf requirements come from the indicator binding registry. `Leverage` is a
+/// presentation expression but binds the ATR leaf so the UDF exposes ATR.
 fn telegram_indicator_projection(indicators: &[ValidatedIndicator]) -> IndicatorProjection {
     let mut outputs = Vec::new();
     for indicator in dedup_indicators(indicators) {
-        match indicator {
-            ValidatedIndicator::SMA => outputs.push(IndicatorOutput::VolumeSma),
-            ValidatedIndicator::EMA => outputs.push(IndicatorOutput::Ema200),
-            ValidatedIndicator::RSI => {
-                outputs.extend([IndicatorOutput::Rssi, IndicatorOutput::RssiMa])
-            }
-            ValidatedIndicator::RevRsi => outputs.extend([
-                IndicatorOutput::NeutralReverseRsi,
-                IndicatorOutput::BullishReverseRsi,
-                IndicatorOutput::BearishReverseRsi,
-            ]),
-            ValidatedIndicator::ATR => outputs.extend([
-                IndicatorOutput::AtrUpperBand,
-                IndicatorOutput::AtrLowerBand,
-                IndicatorOutput::AtrPercent,
-            ]),
-            ValidatedIndicator::ATRRevPercent => outputs.push(IndicatorOutput::AtrReversionPercent),
-            ValidatedIndicator::BandReversion => outputs.push(IndicatorOutput::BandReversion),
-            ValidatedIndicator::BiasReversion => outputs.push(IndicatorOutput::BiasReversion),
-            ValidatedIndicator::Sharpe => outputs.push(IndicatorOutput::Sharpe),
-            ValidatedIndicator::StructurePower => outputs.extend([
-                IndicatorOutput::StructurePower,
-                IndicatorOutput::StructurePowerSma,
-            ]),
-            ValidatedIndicator::IsAtrGap => outputs.push(IndicatorOutput::IsAtrGap),
-            ValidatedIndicator::BodyRatio => outputs.push(IndicatorOutput::BodyRatio),
-            ValidatedIndicator::Leverage => outputs.push(IndicatorOutput::Atr),
-            ValidatedIndicator::BiasedCandle | ValidatedIndicator::Date => {}
-        }
+        outputs.extend(super::indicators::leaves(&indicator).iter().copied());
     }
     IndicatorProjection::selected(outputs)
 }

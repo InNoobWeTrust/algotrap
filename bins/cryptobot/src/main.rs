@@ -10,8 +10,7 @@ use std::collections::HashMap;
 
 use algotrap::engine::error::MarketError;
 use algotrap::engine::traits::ComputedFrame;
-#[allow(unused_imports)]
-use algotrap::engine::validation::{ValidatedIndicator, ValidatedTicker};
+use algotrap::engine::validation::ValidatedTicker;
 use algotrap::engine::{CryptoBatchRequest, DuckDBEngine};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
