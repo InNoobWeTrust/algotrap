@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 
+use algotrap::engine::traits::ComputedFrame;
 use algotrap::prelude::*;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionTool, ChatCompletionTools, FunctionObjectArgs,
 };
-use llm_tool::{llm_tool, ToolError, ToolRegistry};
-use polars::prelude::*;
+use llm_tool::{ToolError, ToolRegistry, llm_tool};
 use tracing::warn;
 
 use crate::browserless::capture_chart_screenshot;
@@ -20,36 +20,45 @@ use crate::config::{EnvConf, TickerConf};
 
 use super::AnalysisMode;
 
+/// Format configured timeframes using their canonical display values for LLM-facing text.
+fn format_available_timeframes(timeframes: &[Timeframe]) -> String {
+    timeframes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ─── Tool Declarations (Schemas automatically derived via llm_tool) ─────────
 
 /// Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, gap zones.
 #[llm_tool]
 fn get_indicator_summary(
     /// The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')
-    timeframe: String,
+    timeframe: Timeframe,
 ) -> Result<String, ToolError> {
-    Ok(timeframe)
+    Ok(timeframe.to_string())
 }
 
 /// Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.
 #[llm_tool]
 fn get_price_action(
     /// The timeframe (e.g., '1h', '4h', '1d')
-    timeframe: String,
+    timeframe: Timeframe,
     /// Number of recent candles to return (max 20, default 5)
     num_candles: Option<usize>,
 ) -> Result<String, ToolError> {
     let _ = num_candles;
-    Ok(timeframe)
+    Ok(timeframe.to_string())
 }
 
 /// Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually. Call this when you need to see the chart patterns, support/resistance levels, or visual confirmation of indicators.
 #[llm_tool]
 fn capture_chart(
     /// Which timeframe to focus the chart on (e.g., '4h'). Defaults to ticker's default timeframe.
-    timeframe: Option<String>,
+    timeframe: Option<Timeframe>,
 ) -> Result<String, ToolError> {
-    Ok(timeframe.unwrap_or_default())
+    Ok(timeframe.map(|tf| tf.to_string()).unwrap_or_default())
 }
 
 /// Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.
@@ -150,7 +159,7 @@ pub fn build_tools(
 /// Execute a tool call and return the result as a string.
 pub async fn execute_tool_call(
     tool_call: &ChatCompletionMessageToolCall,
-    all_dfs: &HashMap<Timeframe, DataFrame>,
+    all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
     conf: &EnvConf,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
@@ -160,77 +169,75 @@ pub async fn execute_tool_call(
         "get_indicator_summary" => {
             let params: GetIndicatorSummaryParams =
                 serde_json::from_str(&tool_call.function.arguments)?;
-            let tf_str = &params.timeframe;
-            let tf: Timeframe = tf_str
-                .parse()
-                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
+            let tf = params.timeframe;
+            let tf_str = tf.to_string();
             match all_dfs.get(&tf) {
                 Some(df) => {
-                    let last_rows = df.slice(-3, 3);
-                    let mut summary = extract_indicator_summary(&last_rows, &tf)?;
+                    let last_rows = df.slice_last(3)?;
+                    let mut summary = extract_indicator_summary(&*last_rows, &tf)?;
                     // Append gap zone context if active
-                    if ic.is_active("gap_zones") {
-                        if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
-                            summary.push('\n');
-                            summary.push_str(&gap_ctx);
-                        }
+                    if ic.is_active("gap_zones")
+                        && let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic)
+                    {
+                        summary.push('\n');
+                        summary.push_str(&gap_ctx);
                     }
                     Ok(summary)
                 }
                 None => Ok(format!(
-                    "Timeframe {tf_str} not available. Available: {:?}",
-                    ticker.tfs
+                    "Timeframe {tf_str} not available. Available: {}",
+                    format_available_timeframes(&ticker.tfs)
                 )),
             }
         }
         "get_price_action" => {
-            let params: GetPriceActionParams =
-                serde_json::from_str(&tool_call.function.arguments)?;
-            let tf_str = &params.timeframe;
+            let params: GetPriceActionParams = serde_json::from_str(&tool_call.function.arguments)?;
+            let tf = params.timeframe;
+            let tf_str = tf.to_string();
             let num = params.num_candles.unwrap_or(5).min(20);
-            let tf: Timeframe = tf_str
-                .parse()
-                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
             match all_dfs.get(&tf) {
                 Some(df) => {
-                    let rows = df.slice(-(num as i64), num);
-                    let price_data = extract_price_action(&rows)?;
+                    let rows = df.slice_last(num)?;
+                    let price_data = extract_price_action(&*rows)?;
                     Ok(price_data)
                 }
                 None => Ok(format!(
-                    "Timeframe {tf_str} not available. Available: {:?}",
-                    ticker.tfs
+                    "Timeframe {tf_str} not available. Available: {}",
+                    format_available_timeframes(&ticker.tfs)
                 )),
             }
         }
         "capture_chart" => {
-            let params: CaptureChartParams =
-                serde_json::from_str(&tool_call.function.arguments).unwrap_or(CaptureChartParams {
-                    timeframe: None,
-                });
-            let default_tf_str = ticker.default_tf.to_string();
-            let tf_str = params.timeframe.as_deref().unwrap_or(&default_tf_str);
+            let params: CaptureChartParams = serde_json::from_str(&tool_call.function.arguments)
+                .unwrap_or(CaptureChartParams { timeframe: None });
+            let tf = params.timeframe.unwrap_or(ticker.default_tf);
+            let tf_str = tf.to_string();
 
-            // Parse timeframe and render per-TF chart HTML
-            let tf: Timeframe = tf_str
-                .parse()
-                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
+            // Render per-TF chart HTML
             let df = match all_dfs.get(&tf) {
                 Some(df) => df,
                 None => {
                     return Ok(format!(
-                        "Timeframe {tf_str} not available. Available: {:?}",
-                        ticker.tfs
+                        "Timeframe {tf_str} not available. Available: {}",
+                        format_available_timeframes(&ticker.tfs)
                     ));
                 }
             };
-            let last_rssi = crate::chart::last_rssi_from_df(df);
+            let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
             let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
-            let params = ic.gap_zone_params();
-            let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
-            let gap_zones_json = crate::chart::gap_zones_to_chart_json(&zones, 0.3);
+            let gap_zones_json = if ic.is_active("gap_zones") {
+                let params = ic.gap_zone_params();
+                let zones =
+                    algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params)
+                        .map_err(|error| {
+                            std::io::Error::other(format!("Gap-zone extraction failed: {error}"))
+                        })?;
+                crate::chart::gap_zones_to_chart_json(&zones, 0.3)
+            } else {
+                "[]".to_string()
+            };
             let chart_html =
-                render_single_tf_chart_html(&tf, df, ticker, &gap_zones_json, rssi_tint)?;
+                render_single_tf_chart_html(&tf, df.as_ref(), ticker, &gap_zones_json, rssi_tint)?;
 
             match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
                 Ok(_png) => Ok(format!(
@@ -270,10 +277,8 @@ pub async fn execute_tool_call(
             Ok("Noted.".to_string())
         }
         "read_notes" => {
-            let params: ReadNotesParams =
-                serde_json::from_str(&tool_call.function.arguments).unwrap_or(ReadNotesParams {
-                    key: None,
-                });
+            let params: ReadNotesParams = serde_json::from_str(&tool_call.function.arguments)
+                .unwrap_or(ReadNotesParams { key: None });
             match params.key.as_deref() {
                 Some(k) => match scratchpad.get(k) {
                     Some(content) => Ok(content.clone()),
@@ -301,7 +306,7 @@ pub async fn execute_tool_call(
 // ─── Data Extraction Helpers ─────────────────────────────────────────────────
 
 fn extract_indicator_summary(
-    df: &DataFrame,
+    df: &dyn ComputedFrame,
     tf: &Timeframe,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec![format!("=== {tf} Indicator Summary (last 3 candles) ===")];
@@ -319,20 +324,36 @@ fn extract_indicator_summary(
     ];
 
     for col_name in &cols {
-        if let Ok(series) = df.column(col_name) {
-            let values: Vec<String> = (0..series.len())
-                .map(|i| format!("{}", series.get(i).unwrap_or(AnyValue::Null)))
-                .collect();
+        if df.has_column(col_name) {
+            let rows = df.len();
+            let mut values = Vec::new();
+            for i in 0..rows {
+                if let Ok(Some(v)) = df.f64_at(col_name, i) {
+                    values.push(format!("{}", v));
+                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
+                    values.push(v);
+                } else {
+                    values.push("null".to_string());
+                }
+            }
             lines.push(format!("  {col_name}: [{}]", values.join(", ")));
         }
     }
 
     // Also include latest OHLC for context
     for col_name in ["open", "high", "low", "close", "volume"] {
-        if let Ok(series) = df.column(col_name) {
-            let values: Vec<String> = (0..series.len())
-                .map(|i| format!("{}", series.get(i).unwrap_or(AnyValue::Null)))
-                .collect();
+        if df.has_column(col_name) {
+            let rows = df.len();
+            let mut values = Vec::new();
+            for i in 0..rows {
+                if let Ok(Some(v)) = df.f64_at(col_name, i) {
+                    values.push(format!("{}", v));
+                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
+                    values.push(v);
+                } else {
+                    values.push("null".to_string());
+                }
+            }
             lines.push(format!("  {col_name}: [{}]", values.join(", ")));
         }
     }
@@ -341,27 +362,29 @@ fn extract_indicator_summary(
 }
 
 fn extract_price_action(
-    df: &DataFrame,
+    df: &dyn ComputedFrame,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec!["=== Price Action ===".to_string()];
 
-    for i in 0..df.height() {
-        let row: Vec<String> = ["time", "open", "high", "low", "close", "volume"]
-            .iter()
-            .filter_map(|col_name| {
-                df.column(col_name)
-                    .ok()
-                    .map(|c| format!("{col_name}={}", c.get(i).unwrap_or(AnyValue::Null)))
-            })
-            .collect();
-        lines.push(format!("  Candle {}: {}", i + 1, row.join(", ")));
+    for i in 0..df.len() {
+        let mut row_parts = Vec::new();
+        for col_name in ["time", "open", "high", "low", "close", "volume"] {
+            if df.has_column(col_name) {
+                if let Ok(Some(v)) = df.f64_at(col_name, i) {
+                    row_parts.push(format!("{col_name}={}", v));
+                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
+                    row_parts.push(format!("{col_name}={v}"));
+                }
+            }
+        }
+        lines.push(format!("  Candle {}: {}", i + 1, row_parts.join(", ")));
     }
 
     Ok(lines.join("\n"))
 }
 
 fn build_multi_tf_overview(
-    all_dfs: &HashMap<Timeframe, DataFrame>,
+    all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
@@ -375,13 +398,17 @@ fn build_multi_tf_overview(
 
     for tf in &tfs {
         if let Some(df) = all_dfs.get(tf) {
-            let last = df.slice(-1, 1);
+            let last = df.slice_last(1)?;
             let get_val = |name: &str| -> String {
-                last.column(name)
-                    .ok()
-                    .and_then(|c| c.get(0).ok())
-                    .map(|v| format!("{v}"))
-                    .unwrap_or_else(|| "N/A".to_string())
+                if last.has_column(name) {
+                    last.f64_at(name, 0)
+                        .ok()
+                        .flatten()
+                        .map(|v| format!("{v}"))
+                        .unwrap_or_else(|| "N/A".to_string())
+                } else {
+                    "N/A".to_string()
+                }
             };
 
             lines.push(format!(
@@ -395,10 +422,10 @@ fn build_multi_tf_overview(
             ));
 
             // Append gap zone summary per timeframe if active
-            if ic.is_active("gap_zones") {
-                if let Some(gap_ctx) = compute_gap_zone_context(df, ic) {
-                    lines.push(format!("    {gap_ctx}"));
-                }
+            if ic.is_active("gap_zones")
+                && let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic)
+            {
+                lines.push(format!("    {gap_ctx}"));
             }
         }
     }
@@ -406,40 +433,30 @@ fn build_multi_tf_overview(
     Ok(lines.join("\n"))
 }
 
-/// Extract OHLC columns from a DataFrame and compute gap zone summary.
-fn compute_gap_zone_context(df: &DataFrame, ic: &crate::memory::IndicatorConfig) -> Option<String> {
-    use algotrap::ta::gap_zones::{self, body_ratio, is_atr_gap};
-
-    if df.height() == 0 {
+fn compute_gap_zone_context(
+    df: &dyn ComputedFrame,
+    ic: &crate::memory::IndicatorConfig,
+) -> Option<String> {
+    if df.is_empty() {
         return None;
     }
 
+    for col in ["is_atr_gap", "body_ratio", "open", "close"] {
+        if !df.has_column(col) {
+            return None;
+        }
+    }
+
     let params = ic.gap_zone_params();
-
-    // Use pre-computed columns if available, fallback to on-the-fly
-    let working_df = if df.column("is_atr_gap").is_ok() && df.column("body_ratio").is_ok() {
-        df.clone()
-    } else {
-        let ohlc: algotrap::ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
-        df.clone()
-            .lazy()
-            .with_columns([
-                is_atr_gap(&ohlc, params.atr_period).alias("is_atr_gap"),
-                body_ratio(&ohlc).alias("body_ratio"),
-            ])
-            .collect()
-            .ok()?
-    };
-
-    let zones = gap_zones::extract_gap_zones(&working_df, &params);
+    let zones = algotrap::engine::gap_zones::extract_gap_zones_from_frame(df, &params).ok()?;
 
     if zones.is_empty() {
         return Some("Gap zones: none detected".to_string());
     }
 
-    let closes = df.column("close").ok()?.f64().ok()?;
-    let current_price = closes.get(closes.len() - 1)?;
-    let summary = gap_zones::gap_zone_summary(&zones, current_price);
+    let n = df.len();
+    let current_price = df.f64_at("close", n - 1).ok()??;
+    let summary = algotrap::ta::gap_zones::gap_zone_summary(&zones, current_price).ok()?;
 
     let nearest_str = match summary.nearest_gap {
         Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})"),
@@ -460,6 +477,7 @@ fn compute_gap_zone_context(df: &DataFrame, ic: &crate::memory::IndicatorConfig)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_openai::types::chat::ChatCompletionTools;
 
     fn dummy_env_conf() -> EnvConf {
         let env: HashMap<String, String> = [
@@ -519,6 +537,17 @@ mod tests {
     }
 
     #[test]
+    fn test_format_available_timeframes_uses_canonical_display_values() {
+        let timeframes = [Timeframe::M15, Timeframe::H1, Timeframe::H4];
+        let rendered = format_available_timeframes(&timeframes);
+
+        assert_eq!(rendered, "15m, 1h, 4h");
+        assert!(!rendered.contains("M15"));
+        assert!(!rendered.contains("H1"));
+        assert!(!rendered.contains("H4"));
+    }
+
+    #[test]
     fn test_tool_docstrings_and_schema_properties() {
         let registry = create_tool_registry();
         let defs = registry.definitions();
@@ -558,20 +587,26 @@ mod tests {
         // 4. read_kb
         let read_kb_def = defs.iter().find(|d| d.name == "read_kb").unwrap();
         assert!(read_kb_def.description.contains("knowledge base topic"));
-        assert!(read_kb_def.parameter_schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("topic")));
+        assert!(
+            read_kb_def.parameter_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("topic"))
+        );
 
         // 5. write_kb
         let write_kb_def = defs.iter().find(|d| d.name == "write_kb").unwrap();
-        let write_req = write_kb_def.parameter_schema["required"].as_array().unwrap();
+        let write_req = write_kb_def.parameter_schema["required"]
+            .as_array()
+            .unwrap();
         assert!(write_req.contains(&serde_json::json!("topic")));
         assert!(write_req.contains(&serde_json::json!("content")));
 
         // 6. write_notes
         let write_notes_def = defs.iter().find(|d| d.name == "write_notes").unwrap();
-        let notes_req = write_notes_def.parameter_schema["required"].as_array().unwrap();
+        let notes_req = write_notes_def.parameter_schema["required"]
+            .as_array()
+            .unwrap();
         assert!(notes_req.contains(&serde_json::json!("key")));
         assert!(notes_req.contains(&serde_json::json!("content")));
 
@@ -584,6 +619,58 @@ mod tests {
             .and_then(|r| r.as_array())
         {
             assert!(!req_array.contains(&serde_json::json!("key")));
+        }
+    }
+
+    #[test]
+    fn test_timeframe_params_bundled_with_canonical_enum_schema() {
+        let conf = dummy_env_conf();
+        let tools = build_tools(&conf, AnalysisMode::FullAnalysis).unwrap();
+
+        let canonical: Vec<serde_json::Value> = Timeframe::ALL_CANONICAL
+            .iter()
+            .map(|tf| serde_json::json!(tf))
+            .collect();
+
+        for tool in &tools {
+            let ChatCompletionTools::Function(func) = tool else {
+                continue;
+            };
+            if !["get_indicator_summary", "get_price_action", "capture_chart"]
+                .contains(&func.function.name.as_str())
+            {
+                continue;
+            }
+
+            // `capture_chart` accepts `Option<Timeframe>`, so schemars appends `null`.
+            let mut expected = canonical.clone();
+            if func.function.name == "capture_chart" {
+                expected.push(serde_json::Value::Null);
+            }
+            let expected = serde_json::Value::Array(expected);
+
+            let tf_schema = &func
+                .function
+                .parameters
+                .as_ref()
+                .expect("parameters should be set")["properties"]["timeframe"];
+            assert_eq!(
+                tf_schema.get("type").and_then(|t| t.as_str()),
+                Some("string"),
+                "timeframe type mismatch for {}",
+                func.function.name
+            );
+            let enum_values = tf_schema.get("enum").unwrap_or_else(|| {
+                panic!(
+                    "timeframe should carry the enum bundled from `Timeframe::JsonSchema` for {}",
+                    func.function.name
+                )
+            });
+            assert_eq!(
+                enum_values, &expected,
+                "timeframe enum mismatch for {}",
+                func.function.name
+            );
         }
     }
 }

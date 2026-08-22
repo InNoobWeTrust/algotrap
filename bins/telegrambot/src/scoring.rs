@@ -99,7 +99,7 @@ pub fn should_notify(
 
     // Tier change (or cold start) bypasses cooldown
     let tier_str = current_tier.to_string();
-    let tier_changed = previous_tier.map_or(true, |prev| prev != tier_str);
+    let tier_changed = previous_tier.is_none_or(|prev| prev != tier_str);
     if tier_changed {
         return true;
     }
@@ -155,14 +155,11 @@ pub fn compute_outcome_score(
     // NONE direction: scored conditionally against ATR
     if direction.is_none() {
         return match atr {
-            Some(atr_val) if atr_val > 0.0 => {
-                if abs_delta < 0.5 * atr_val {
-                    1.0 // Correctly identified no-trade
-                } else {
-                    0.0 // Missed a significant move
-                }
+            Some(atr_val) if atr_val > 0.0 && abs_delta < 0.5 * atr_val => {
+                1.0 // Correctly identified no-trade
             }
-            _ => 0.0, // Can't verify without ATR
+            Some(_) => 0.0, // Missed a significant move
+            _ => 0.0,       // Can't verify without ATR
         };
     }
 
@@ -249,17 +246,17 @@ pub fn reconstruct_atr(indicators: &HashMap<String, f64>) -> Option<f64> {
     }
 
     // Prefer atr_percent (ratio, always populated): ATR = atr_percent × close
-    if let Some(&atr_ratio) = indicators.get("atr_percent") {
-        if atr_ratio > 0.0 {
-            return Some(close * atr_ratio);
-        }
+    if let Some(&atr_ratio) = indicators.get("atr_percent")
+        && atr_ratio > 0.0
+    {
+        return Some(close * atr_ratio);
     }
 
     // Legacy fallback: atr_reversion_percent (often zero, less reliable)
-    if let Some(&atr_pct) = indicators.get("atr_reversion_percent") {
-        if atr_pct > 0.0 {
-            return Some(close * atr_pct / 100.0);
-        }
+    if let Some(&atr_pct) = indicators.get("atr_reversion_percent")
+        && atr_pct > 0.0
+    {
+        return Some(close * atr_pct / 100.0);
     }
 
     None

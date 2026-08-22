@@ -1,9 +1,8 @@
-use polars_row_derive::IterToDataFrame;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, Deserialize, IterToDataFrame)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Kline {
     #[serde(deserialize_with = "de_f64_or_string_as_f64")]
     pub open: f64,

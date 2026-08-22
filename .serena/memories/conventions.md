@@ -1,0 +1,10 @@
+- Code: Rust 2024 edition; explicit types where possible; avoid unsafe unless necessary
+- Modules: clear module boundaries; pub(crate) for internal scope
+- Error handling: Result<T, MarketError>, map_err as needed; propagate upwards
+- Tests: #[cfg(test)] mod tests; unit tests near modules
+- Doc comments: /// for public API; //! module docs when helpful
+- Naming: camelCase for types and functions; snake_case for vars and modules
+- Formatting: rustfmt style; trailing commas; use derive(Debug, Clone) as needed
+- Architecture: DuckDBEngine as core engine; separation between crypto/telegram flows
+- Performance: batch processing; avoid allocations in hot loops where possible
+- Safety: use thread_local or scoped threads; avoid global mutable state

@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM lukemathwalker/cargo-chef:latest-rust-bookworm AS chef
+# Build from the repository root: docker build -f bins/telegrambot/deployment/Dockerfile .
+FROM --platform=$TARGETPLATFORM lukemathwalker/cargo-chef:latest-rust-bookworm AS chef
 # ─── Planner: generate dependency recipe ──────────────────────────────────────
 FROM chef AS planner
 
@@ -13,6 +14,10 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ─── Cook: build ONLY dependencies (cached until Cargo.toml/lock change) ─────
 FROM chef AS cook
+
+# Default to 2 parallel build jobs to bound memory consumption
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
@@ -37,18 +42,31 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp /cargo-target/release/telegrambot /build/telegrambot && \
     strip /build/telegrambot
 
+# ─── Pinned DuckDB shared library ─────────────────────────────────────────────
+FROM --platform=$TARGETPLATFORM debian:bookworm AS duckdb-builder
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+COPY docker/duckdb/ /usr/local/src/duckdb/
+RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/install-libduckdb.sh
+
 # ─── Runtime ─────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
+    ca-certificates libgcc-s1 libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=builder /build/telegrambot .
+COPY --from=duckdb-builder /opt/duckdb/lib/libduckdb.so /usr/local/lib/libduckdb.so
+COPY --from=duckdb-builder /opt/duckdb/libexec/duckdb-smoke /usr/local/libexec/duckdb-smoke
+COPY --from=duckdb-builder /opt/duckdb-artifacts/ /usr/local/share/algotrap/
+RUN /usr/local/libexec/duckdb-smoke
 # Default prompt config (overridden by ConfigMap mount in K8s)
 COPY bins/telegrambot/config/prompts/ config/prompts/
-ENV PROMPTS_DIR=config/prompts
+ENV PROMPTS_DIR=config/prompts \
+    DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so
 
 ENTRYPOINT ["./telegrambot"]

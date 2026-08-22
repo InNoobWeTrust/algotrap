@@ -311,30 +311,30 @@ impl IndicatorConfig {
             }
 
             // Handle period tuning
-            if let Some(new_val) = value.get("period").and_then(|v| v.as_f64()) {
-                if let Some(ref mut spec) = params.period {
-                    let old = spec.value;
-                    let max_change = old * RATE_LIMIT;
-                    let delta = (new_val - old).clamp(-max_change, max_change);
-                    spec.value = (old + delta).clamp(spec.min, spec.max);
-                }
+            if let Some(new_val) = value.get("period").and_then(|v| v.as_f64())
+                && let Some(ref mut spec) = params.period
+            {
+                let old = spec.value;
+                let max_change = old * RATE_LIMIT;
+                let delta = (new_val - old).clamp(-max_change, max_change);
+                spec.value = (old + delta).clamp(spec.min, spec.max);
             }
 
             // Handle smooth tuning
-            if let Some(new_val) = value.get("smooth").and_then(|v| v.as_f64()) {
-                if let Some(ref mut spec) = params.smooth {
-                    let old = spec.value;
-                    let max_change = old * RATE_LIMIT;
-                    let delta = (new_val - old).clamp(-max_change, max_change);
-                    spec.value = (old + delta).clamp(spec.min, spec.max);
-                }
+            if let Some(new_val) = value.get("smooth").and_then(|v| v.as_f64())
+                && let Some(ref mut spec) = params.smooth
+            {
+                let old = spec.value;
+                let max_change = old * RATE_LIMIT;
+                let delta = (new_val - old).clamp(-max_change, max_change);
+                spec.value = (old + delta).clamp(spec.min, spec.max);
             }
 
             // Handle min_trust tuning (EXEMPT from rate limiting — quality filter)
-            if let Some(new_val) = value.get("min_trust").and_then(|v| v.as_f64()) {
-                if let Some(ref mut spec) = params.min_trust {
-                    spec.value = new_val.clamp(spec.min, spec.max);
-                }
+            if let Some(new_val) = value.get("min_trust").and_then(|v| v.as_f64())
+                && let Some(ref mut spec) = params.min_trust
+            {
+                spec.value = new_val.clamp(spec.min, spec.max);
             }
         }
     }

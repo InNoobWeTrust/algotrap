@@ -121,8 +121,6 @@ jobs:
           file: bins/cryptobot/deployment/Dockerfile
           push: true
           platforms: linux/amd64
-          build-contexts: |
-            repo=.
           tags: |
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:latest
             ghcr.io/${{ steps.repo_lowercase.outputs.repo }}-cryptobot:nightly-${{ github.run_id }}

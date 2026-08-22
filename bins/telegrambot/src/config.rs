@@ -109,12 +109,13 @@ where
 {
     let s = String::deserialize(deserializer)?;
     let mut s = s.trim();
-    if (s.starts_with('\'') && s.ends_with('\''))
-        || (s.starts_with('"') && s.ends_with('"') && !s.starts_with("\"[") && !s.starts_with("[{"))
-    {
-        if s.len() >= 2 {
-            s = s[1..s.len() - 1].trim();
-        }
+    let is_shell_quoted = (s.starts_with('\'') && s.ends_with('\''))
+        || (s.starts_with('"')
+            && s.ends_with('"')
+            && !s.starts_with("\"[")
+            && !s.starts_with("[{"));
+    if is_shell_quoted && s.len() >= 2 {
+        s = s[1..s.len() - 1].trim();
     }
     if s.is_empty() {
         return Err(serde::de::Error::custom(
@@ -236,7 +237,7 @@ mod tests {
     #[test]
     fn test_tickers_json_deserialization() {
         let env = base_env();
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
 
         assert_eq!(conf.tickers.len(), 2);
         assert_eq!(conf.tickers[0].symbol, "BTC-USDT");
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn test_ticker_conf_fields() {
         let env = base_env();
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
 
         let btc = &conf.tickers[0];
         assert!((btc.sl_percent - 0.1).abs() < f64::EPSILON);
@@ -263,7 +264,7 @@ mod tests {
     #[test]
     fn test_default_values() {
         let env = base_env();
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
 
         assert_eq!(conf.scan_interval_secs, 900);
         assert!((conf.tier_alert_threshold - 70.0).abs() < f64::EPSILON);
@@ -284,7 +285,7 @@ mod tests {
         let mut env = base_env();
         env.insert("SCAN_INTERVAL_SECS".into(), "300".into());
         env.insert("TIER_ALERT_THRESHOLD".into(), "85".into());
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
 
         assert_eq!(conf.scan_interval_secs, 300);
         assert!((conf.tier_alert_threshold - 85.0).abs() < f64::EPSILON);
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn test_find_ticker_case_insensitive() {
         let env = base_env();
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
 
         assert!(conf.find_ticker("BTC-USDT").is_some());
         assert!(conf.find_ticker("btc-usdt").is_some());
@@ -306,7 +307,7 @@ mod tests {
     fn test_invalid_tickers_json() {
         let mut env = base_env();
         env.insert("TICKERS".into(), "not-valid-json".into());
-        let result: Result<EnvConf, _> = envy::from_iter(env.into_iter());
+        let result: Result<EnvConf, _> = envy::from_iter(env);
         assert!(result.is_err());
     }
 
@@ -315,7 +316,7 @@ mod tests {
         let mut env = base_env();
         env.insert("TICKERS".into(), "   ".into());
 
-        let result: Result<EnvConf, _> = envy::from_iter(env.into_iter());
+        let result: Result<EnvConf, _> = envy::from_iter(env);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("TICKERS is required and must not be empty"));
     }
@@ -324,7 +325,7 @@ mod tests {
     fn test_empty_tickers_array() {
         let mut env = base_env();
         env.insert("TICKERS".into(), "[]".into());
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         assert!(conf.tickers.is_empty());
     }
 
@@ -335,7 +336,7 @@ mod tests {
             "TICKERS".into(),
             "'[{\"symbol\":\"BTC-USDT\",\"sl_percent\":0.02,\"tol_percent\":0.01,\"tfs\":\"1h\",\"default_tf\":\"1h\"}]'".into(),
         );
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         assert_eq!(conf.tickers.len(), 1);
         assert_eq!(conf.tickers[0].symbol, "BTC-USDT");
     }
@@ -345,7 +346,7 @@ mod tests {
         let mut env = base_env();
         env.insert("LLM_API_KEY".into(), "   ".into());
 
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         let err = conf.validate().unwrap_err().to_string();
         assert!(err.contains("LLM_API_KEY is required and must not be empty"));
     }
@@ -355,7 +356,7 @@ mod tests {
         let mut env = base_env();
         env.insert("TICKERS".into(), "[]".into());
 
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         let err = conf.validate().unwrap_err().to_string();
         assert!(err.contains("TICKERS must contain at least one ticker config"));
     }
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     fn test_supports_reasoning_default() {
         let env = base_env();
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         assert!(!conf.supports_reasoning); // defaults to false
     }
 
@@ -371,7 +372,7 @@ mod tests {
     fn test_supports_reasoning_enabled() {
         let mut env = base_env();
         env.insert("SUPPORTS_REASONING".into(), "true".into());
-        let conf: EnvConf = envy::from_iter(env.into_iter()).unwrap();
+        let conf: EnvConf = envy::from_iter(env).unwrap();
         assert!(conf.supports_reasoning);
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_openai::Client as OpenAIClient;
@@ -5,10 +6,10 @@ use async_openai::config::OpenAIConfig;
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
-use reqwest;
 use teloxide::prelude::*;
 use tracing::{error, info, warn};
 
+use algotrap::engine::traits::ComputedFrame;
 use telegrambot::commands::{self, HandlerState};
 use telegrambot::config::EnvConf;
 use telegrambot::{data, llm, telegram};
@@ -52,7 +53,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .timeout(Duration::from_secs(300))
         .build()
         .expect("Failed to build reqwest client for LLM");
-    let llm_client = Arc::new(OpenAIClient::build(llm_http_client, openai_config, Default::default()));
+    let llm_client = Arc::new(OpenAIClient::build(
+        llm_http_client,
+        openai_config,
+        Default::default(),
+    ));
     let conf = Arc::new(conf);
 
     // Shared state for command handlers
@@ -99,7 +104,10 @@ async fn run_alert_scan_loop(
 
     loop {
         let cycle_start = tokio::time::Instant::now();
-        info!("Starting alert scan cycle for {} tickers", conf.tickers.len());
+        info!(
+            "Starting alert scan cycle for {} tickers",
+            conf.tickers.len()
+        );
 
         // Spawn all tickers concurrently, bounded by semaphore
         let mut handles = Vec::new();
@@ -381,26 +389,28 @@ async fn scan_ticker(
 
 /// Get the latest close price from the market data for a given timeframe.
 fn get_latest_close(
-    all_dfs: &std::collections::HashMap<algotrap::prelude::Timeframe, polars::prelude::DataFrame>,
+    all_dfs: &HashMap<algotrap::prelude::Timeframe, Box<dyn ComputedFrame>>,
     tf: &algotrap::prelude::Timeframe,
 ) -> Option<f64> {
     all_dfs.get(tf).and_then(|df| {
-        df.column("close")
+        df.f64_at("close", df.len().saturating_sub(1))
             .ok()
-            .and_then(|c| c.get(c.len().saturating_sub(1)).ok())
-            .and_then(|v| v.try_extract::<f64>().ok())
+            .flatten()
     })
 }
 
 /// Extract indicator values from the latest candle for change detection.
 fn extract_indicator_snapshot(
-    all_dfs: &std::collections::HashMap<algotrap::prelude::Timeframe, polars::prelude::DataFrame>,
+    all_dfs: &HashMap<algotrap::prelude::Timeframe, Box<dyn ComputedFrame>>,
     default_tf: &algotrap::prelude::Timeframe,
 ) -> std::collections::HashMap<String, f64> {
     let mut snapshot = std::collections::HashMap::new();
 
     if let Some(df) = all_dfs.get(default_tf) {
-        let last = df.slice(-1, 1);
+        let last = match df.slice_last(1) {
+            Ok(last) => last,
+            Err(_) => return snapshot,
+        };
         for col_name in &[
             "rssi",
             "structure_power",
@@ -409,12 +419,8 @@ fn extract_indicator_snapshot(
             "sharpe",
             "close",
         ] {
-            if let Ok(series) = last.column(*col_name) {
-                if let Ok(val) = series.get(0) {
-                    if let Ok(f) = val.try_extract::<f64>() {
-                        snapshot.insert(col_name.to_string(), f);
-                    }
-                }
+            if let Ok(Some(f)) = last.f64_at(col_name, 0) {
+                snapshot.insert((*col_name).to_string(), f);
             }
         }
     }
@@ -426,7 +432,7 @@ fn extract_indicator_snapshot(
 async fn capture_ticker_charts(
     conf: &EnvConf,
     ticker: &telegrambot::config::TickerConf,
-    all_dfs: &std::collections::HashMap<algotrap::prelude::Timeframe, polars::prelude::DataFrame>,
+    all_dfs: &HashMap<algotrap::prelude::Timeframe, Box<dyn ComputedFrame>>,
     ic: &telegrambot::memory::IndicatorConfig,
 ) -> Vec<(String, Vec<u8>)> {
     let mut tf_charts = Vec::new();
@@ -437,13 +443,24 @@ async fn capture_ticker_charts(
             Some(df) => df,
             None => continue,
         };
-        let last_rssi = telegrambot::chart::last_rssi_from_df(df);
+        let last_rssi = telegrambot::chart::last_rssi_from_df(df.as_ref());
         let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
         let params = ic.gap_zone_params();
-        let zones = algotrap::ta::gap_zones::extract_gap_zones(df, &params);
+        let zones =
+            match algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params) {
+                Ok(zones) => zones,
+                Err(error) => {
+                    error!(tf = %tf_label, "Gap-zone extraction failed: {error}");
+                    continue;
+                }
+            };
         let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(&zones, 0.3);
         let chart_html = match telegrambot::chart::render_single_tf_chart_html(
-            tf, df, ticker, &gap_zones_json, rssi_tint,
+            tf,
+            df.as_ref(),
+            ticker,
+            &gap_zones_json,
+            rssi_tint,
         ) {
             Ok(html) => html,
             Err(e) => {
@@ -451,11 +468,8 @@ async fn capture_ticker_charts(
                 continue;
             }
         };
-        match telegrambot::browserless::capture_chart_screenshot(
-            &chart_html,
-            &conf.browserless_url,
-        )
-        .await
+        match telegrambot::browserless::capture_chart_screenshot(&chart_html, &conf.browserless_url)
+            .await
         {
             Ok(png) => {
                 info!(tf = %tf_label, "Captured chart screenshot");

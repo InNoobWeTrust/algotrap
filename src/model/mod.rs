@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 /// Direction of a trade or prediction.
 /// NONE/WAIT indicate no actionable directional trade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Direction {
     #[serde(rename = "LONG", alias = "long")]
     Long,
@@ -18,6 +18,7 @@ pub enum Direction {
     Short,
     /// No actionable trade — market is neutral or inconclusive.
     #[serde(rename = "NONE", alias = "none", alias = "WAIT", alias = "wait")]
+    #[default]
     None,
 }
 
@@ -30,12 +31,6 @@ impl Direction {
     /// Returns true if this direction means "no trade" (None or Wait).
     pub fn is_none(self) -> bool {
         matches!(self, Direction::None)
-    }
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::None
     }
 }
 

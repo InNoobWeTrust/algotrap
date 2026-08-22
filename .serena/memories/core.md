@@ -1,0 +1,9 @@
+- Project: algotrap
+- Repo root: /Volumes/SS850Evo/Developer/InNoobWeTrust/algotrap
+- Language: Rust
+- Build tool: Cargo (workspace at root with Cargo.toml and Cargo.lock)
+- Directory layout: src/, bins/, docker/, docs/, examples/, target/ (aux: .serena, .kilo, .agents)
+- Core compute path: src/engine/duckdb_engine.rs (DuckDBEngine, CryptoBatchRequest, TelegramBatchRequest)
+- Data flow summary: cryptobot and telegram batch paths flow through DuckDB sessions to DuckDBComputedFrame
+- Cross-memory references: `mem:tech_stack`, `mem:conventions`, `mem:suggested_commands`, `mem:task_completion`
+- Onboarding: not performed yet

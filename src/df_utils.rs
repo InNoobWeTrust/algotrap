@@ -1,18 +1,14 @@
+use crate::engine::traits::ComputedFrame;
 use core::error::Error;
-use polars::prelude::*;
 use serde_json::Value;
-use std::{io::Cursor, ops::Deref};
+use std::ops::Deref;
 
 #[inline]
-pub fn df_to_json(df: &mut DataFrame) -> Result<Value, Box<dyn Error + Send + Sync>> {
-    let mut file = Cursor::new(Vec::new());
-    JsonWriter::new(&mut file)
-        .with_json_format(JsonFormat::Json)
-        .finish(df)
-        .unwrap();
-    //let df_json = String::from_utf8(file.into_inner()).unwrap();
-    let df_json = serde_json::from_slice(&file.into_inner())?;
-    Ok(df_json)
+pub fn df_to_json(df: &dyn ComputedFrame) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    let records = df.to_json_records()?;
+    Ok(Value::Array(
+        records.into_iter().map(Value::Object).collect(),
+    ))
 }
 
 /// Transitive type to make syntastic sugar for converting Dataframe to JSON
@@ -26,20 +22,22 @@ impl Deref for JsonDataframe {
     }
 }
 
-impl TryFrom<&DataFrame> for JsonDataframe {
+impl TryFrom<&dyn ComputedFrame> for JsonDataframe {
     type Error = Box<dyn Error + Send + Sync>;
 
-    fn try_from(value: &DataFrame) -> Result<Self, Self::Error> {
-        let df_json = df_to_json(&mut value.clone())?;
+    fn try_from(value: &dyn ComputedFrame) -> Result<Self, Self::Error> {
+        let records = value.to_json_records()?;
+        let df_json = Value::Array(records.into_iter().map(Value::Object).collect());
         Ok(JsonDataframe(df_json))
     }
 }
 
-impl TryFrom<DataFrame> for JsonDataframe {
+impl TryFrom<Box<dyn ComputedFrame>> for JsonDataframe {
     type Error = Box<dyn Error + Send + Sync>;
 
-    fn try_from(mut value: DataFrame) -> Result<Self, Self::Error> {
-        let df_json = df_to_json(&mut value)?;
+    fn try_from(value: Box<dyn ComputedFrame>) -> Result<Self, Self::Error> {
+        let records = value.to_json_records()?;
+        let df_json = Value::Array(records.into_iter().map(Value::Object).collect());
         Ok(JsonDataframe(df_json))
     }
 }

@@ -1,30 +1,99 @@
 use std::collections::HashMap;
 
+use algotrap::engine::error::MarketError;
+use algotrap::engine::telegram_config::{IndicatorParamSpec, TelegramIndicatorConfig};
+use algotrap::engine::traits::{ComputedFrame, MarketFrameEngine};
+use algotrap::engine::validation::{ValidatedIndicator, ValidatedTicker};
+use algotrap::engine::{DuckDBEngine, TelegramBatchRequest};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
-use algotrap::ta::experimental::OhlcExperimental;
-use algotrap::ta::gap_zones::OhlcGapZones;
-use algotrap::ta::prelude::*;
 use futures::future::join_all;
-use polars::prelude::*;
-use rayon::prelude::*;
 use tracing::error;
 
 use crate::config::TickerConf;
 
 // ─── Data Fetching ───────────────────────────────────────────────────────────
 
+fn validated_ticker(ticker: &TickerConf) -> Result<ValidatedTicker, MarketError> {
+    ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent)
+}
+
+fn telegram_indicator_config(ic: &crate::memory::IndicatorConfig) -> TelegramIndicatorConfig {
+    let indicators = ic
+        .indicators
+        .iter()
+        .map(|(name, params)| {
+            (
+                name.clone(),
+                IndicatorParamSpec {
+                    period: params.period.as_ref().map(|spec| spec.clamped() as usize),
+                    smooth: params.smooth.as_ref().map(|spec| spec.clamped() as usize),
+                },
+            )
+        })
+        .collect();
+
+    TelegramIndicatorConfig { indicators }
+}
+
+fn push_unique(indicators: &mut Vec<ValidatedIndicator>, indicator: ValidatedIndicator) {
+    if !indicators.iter().any(|existing| existing == &indicator) {
+        indicators.push(indicator);
+    }
+}
+
+fn validated_indicators(ic: &crate::memory::IndicatorConfig) -> Vec<ValidatedIndicator> {
+    let mut indicators = vec![
+        ValidatedIndicator::Date,
+        ValidatedIndicator::SMA,
+        ValidatedIndicator::EMA,
+        ValidatedIndicator::RSI,
+        ValidatedIndicator::RevRsi,
+        ValidatedIndicator::ATR,
+        ValidatedIndicator::ATRRevPercent,
+        ValidatedIndicator::BandReversion,
+        ValidatedIndicator::BiasReversion,
+        ValidatedIndicator::Sharpe,
+        ValidatedIndicator::StructurePower,
+        ValidatedIndicator::IsAtrGap,
+        ValidatedIndicator::BodyRatio,
+        ValidatedIndicator::Leverage,
+    ];
+
+    for (name, params) in &ic.indicators {
+        if !params.active {
+            continue;
+        }
+
+        match name.as_str() {
+            "ema200" => push_unique(&mut indicators, ValidatedIndicator::EMA),
+            "rssi" => push_unique(&mut indicators, ValidatedIndicator::RSI),
+            "revrsi" => push_unique(&mut indicators, ValidatedIndicator::RevRsi),
+            "atr" => push_unique(&mut indicators, ValidatedIndicator::ATR),
+            "structure_power" => push_unique(&mut indicators, ValidatedIndicator::StructurePower),
+            "sharpe" => push_unique(&mut indicators, ValidatedIndicator::Sharpe),
+            "bias_reversion" => push_unique(&mut indicators, ValidatedIndicator::BiasReversion),
+            "gap_zones" => {
+                push_unique(&mut indicators, ValidatedIndicator::IsAtrGap);
+                push_unique(&mut indicators, ValidatedIndicator::BodyRatio);
+            }
+            _ => {}
+        }
+    }
+
+    indicators
+}
+
 pub async fn fetch_all_data(
     client: &ext::bingx::BingXClient,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
-) -> Result<HashMap<Timeframe, DataFrame>, Box<dyn core::error::Error + Send + Sync>> {
-    let all_dfs = join_all(
+) -> Result<HashMap<Timeframe, Box<dyn ComputedFrame>>, Box<dyn core::error::Error + Send + Sync>> {
+    let fetched = join_all(
         ticker
             .tfs
             .iter()
             .map(|tf| {
-                let client = client;
                 let symbol = ticker.symbol.clone();
                 async move {
                     client
@@ -35,157 +104,145 @@ pub async fn fetch_all_data(
             })
             .collect::<Vec<_>>(),
     )
-    .await
-    .into_par_iter()
-    .filter_map(|res| match res {
-        Ok((tf, klines)) => {
-            let df = process_data(klines.as_slice(), ticker, ic).expect("Failed to process data");
-            Some((tf, df))
-        }
-        Err(err) => {
-            error!("Error fetching klines: {err:#?}");
-            None
-        }
-    })
-    .collect::<HashMap<Timeframe, DataFrame>>();
+    .await;
+    let fetched = fetched
+        .into_iter()
+        .filter_map(|res| match res {
+            Ok(frame) => Some(frame),
+            Err(err) => {
+                error!("Error fetching klines: {err:#?}");
+                None
+            }
+        })
+        .collect();
+    let all_dfs = compute_telegram_frames(fetched, ticker, ic);
 
     Ok(all_dfs)
-}
-
-// ─── Indicators ──────────────────────────────────────────────────────────────
-
-pub fn indicators(ticker: &TickerConf, ic: &crate::memory::IndicatorConfig) -> Vec<Expr> {
-    let ohlc: ta::Ohlc = [col("open"), col("high"), col("low"), col("close")];
-
-    let time_to_date = col("time")
-        .cast(DataType::Datetime(
-            TimeUnit::Milliseconds,
-            Some(TimeZone::UTC),
-        ))
-        .alias("Date");
-
-    let vol_sma = col("volume").ema(20).alias("volume_sma");
-
-    let bias_smooth = ic.smooth("bias_reversion", 9);
-    let bias_rev = ohlc
-        .bias_reversion_smoothed(bias_smooth)
-        .alias("bias_reversion");
-
-    let ema_period = ic.period("ema200", 200);
-    let ema200 = col("close").ema(ema_period).alias("ema200");
-
-    let revrsi_period = ic.period("revrsi", 14);
-    let neutral_revrsi = (col("open") + ohlc.bar_bias())
-        .rev_rsi(revrsi_period, 50.)
-        .alias("neutral_revrsi");
-    let bullish_revrsi = col("high")
-        .rev_rsi(revrsi_period, 70.)
-        .alias("bullish_revrsi");
-    let bearish_revrsi = col("low")
-        .rev_rsi(revrsi_period, 30.)
-        .alias("bearish_revrsi");
-
-    let atr_period = ic.period("atr", 42);
-    let atr = ohlc.atr(atr_period).alias("ATR");
-    let atr_osc = (atr.clone() * lit(1.618)).alias("atr_oscillation");
-    let atr_upperband = (col("open") + atr_osc.clone()).alias("atr_upperband");
-    let atr_lowerband = (col("open") - atr_osc.clone()).alias("atr_lowerband");
-    let atr_percent = (atr.clone() / col("open")).alias("atr_percent");
-
-    let sp_smooth = ic.smooth("structure_power", 9);
-    let structure_pwr = ohlc.bar_bias().rma(sp_smooth).alias("structure_power");
-    let structure_pwr_sma = structure_pwr.clone().sma(16).alias("structure_power_sma");
-
-    let rssi_period = ic.period("rssi", 14);
-    let rssi_smooth = ic.smooth("rssi", 9);
-    let rssi = ohlc.rssi(rssi_period).alias("rssi");
-    let rssi_ma = rssi.clone().ema(rssi_smooth).alias("rssi_ma");
-
-    let atr_rev_percent = ohlc
-        .band_reversion_percent(&atr_osc.clone(), &bias_rev.clone())
-        .alias("atr_reversion_percent");
-
-    // Raw band reversion value (absolute price distance from ATR band).
-    // This is what the LLM sees — more interpretable than the percent form
-    // which was designed as a human buy/sell trigger.
-    let band_rev = ohlc
-        .band_reversion(&atr_osc.clone(), &bias_rev.clone())
-        .alias("band_reversion");
-
-    let lvrg_adjust = ticker.sl_percent / (1. + ticker.tol_percent);
-    let lvrg = (lit(lvrg_adjust) * ohlc[0].clone() / atr.clone()).alias("leverage");
-
-    let sharpe_period = ic.period("sharpe", 200);
-    let sharpe_ratio = col("close").sharpe(sharpe_period).alias("sharpe");
-
-    let gap_zone_period = ic.period("gap_zones", 42);
-    let is_atr_gap = ohlc.is_atr_gap(gap_zone_period).alias("is_atr_gap");
-    let body_ratio = ohlc.body_ratio().alias("body_ratio");
-
-    // Biased candle detection (Pine polyglot_lib L530-549 equivalent)
-    // Detects strong reversal candles with wick confirmation + momentum context
-    let spread = col("high") - col("low");
-    let body_top = max_horizontal([col("open"), col("close")]).unwrap();
-    let body_bot = min_horizontal([col("open"), col("close")]).unwrap();
-    let top_wick = (col("high") - body_top) / spread.clone();
-    let bottom_wick = (body_bot - col("low")) / spread.clone();
-    let hlc3 = (col("high") + col("low") + col("close")) / lit(3.0);
-    let candle_bias = (hlc3.clone() - col("low")) / spread.clone();
-    let prev_hlc3_falling = hlc3.clone().shift(lit(1)).gt(hlc3.clone().shift(lit(2)));
-    let prev_hlc3_rising = hlc3.clone().shift(lit(1)).lt(hlc3.clone().shift(lit(2)));
-    let stronger = spread.clone().gt(spread.clone().shift(lit(1)) * lit(1.5));
-
-    let strictly_rising = bottom_wick
-        .gt_eq(lit(0.236))
-        .and(candle_bias.clone().gt_eq(lit(0.5)))
-        .and(prev_hlc3_falling)
-        .and(stronger.clone());
-    let strictly_falling = top_wick
-        .gt_eq(lit(0.236))
-        .and(candle_bias.lt(lit(0.5)))
-        .and(prev_hlc3_rising)
-        .and(stronger);
-
-    let biased_candle = when(strictly_rising)
-        .then(lit(1i32))
-        .otherwise(when(strictly_falling).then(lit(-1i32)).otherwise(lit(0i32)))
-        .alias("biased_candle");
-
-    vec![
-        time_to_date,
-        vol_sma,
-        bias_rev,
-        ema200,
-        neutral_revrsi,
-        bullish_revrsi,
-        bearish_revrsi,
-        atr_upperband,
-        atr_lowerband,
-        rssi,
-        rssi_ma,
-        structure_pwr,
-        structure_pwr_sma,
-        atr_percent,
-        atr_rev_percent,
-        band_rev,
-        lvrg,
-        sharpe_ratio,
-        is_atr_gap,
-        body_ratio,
-        biased_candle,
-    ]
 }
 
 pub fn process_data(
     klines: &[Kline],
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
-) -> Result<DataFrame, Box<dyn core::error::Error>> {
-    let df = klines.iter().rev().cloned().to_dataframe().unwrap();
-    let df_with_indicators = df
-        .lazy()
-        .with_columns(indicators(ticker, ic))
+) -> Result<Box<dyn ComputedFrame>, MarketError> {
+    let validated_ticker = validated_ticker(ticker)?;
+    let indicators = validated_indicators(ic);
+    let config = telegram_indicator_config(ic);
+
+    DuckDBEngine::new().compute_telegram(klines, validated_ticker, indicators, &config)
+}
+
+fn compute_telegram_frames(
+    fetched: Vec<(Timeframe, Vec<Kline>)>,
+    ticker: &TickerConf,
+    ic: &crate::memory::IndicatorConfig,
+) -> HashMap<Timeframe, Box<dyn ComputedFrame>> {
+    let validated_ticker = match validated_ticker(ticker) {
+        Ok(validated_ticker) => validated_ticker,
+        Err(err) => {
+            for (timeframe, _) in fetched {
+                error!(timeframe = %timeframe, "Invalid ticker config: {err}");
+            }
+            return HashMap::new();
+        }
+    };
+    let indicators = validated_indicators(ic);
+    let config = telegram_indicator_config(ic);
+    let timeframes = fetched
+        .iter()
+        .map(|(timeframe, _)| *timeframe)
+        .collect::<Vec<_>>();
+    let requests = fetched
+        .into_iter()
+        .map(|(_, klines)| TelegramBatchRequest {
+            klines,
+            ticker: validated_ticker.clone(),
+            indicators: indicators.clone(),
+            config: config.clone(),
+        })
+        .collect();
+    let results = match DuckDBEngine::new().compute_telegram_batch(requests, None) {
+        Ok(results) => results,
+        Err(err) => {
+            for timeframe in timeframes {
+                error!(timeframe = %timeframe, "Error processing klines: {err}");
+            }
+            return HashMap::new();
+        }
+    };
+
+    timeframes
+        .into_iter()
+        .zip(results)
+        .filter_map(|(timeframe, result)| match result.result {
+            Ok(frame) => Some((timeframe, Box::new(frame) as Box<dyn ComputedFrame>)),
+            Err(err) => {
+                error!(timeframe = %timeframe, "Error processing klines: {err}");
+                None
+            }
+        })
         .collect()
-        .unwrap();
-    Ok(df_with_indicators)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ticker() -> TickerConf {
+        TickerConf {
+            symbol: "BTC-USDT".to_string(),
+            sl_percent: 0.02,
+            tol_percent: 0.01,
+            tfs: vec![Timeframe::M5, Timeframe::H1],
+            default_tf: Timeframe::H1,
+        }
+    }
+
+    fn klines(seed: f64) -> Vec<Kline> {
+        (0..240)
+            .map(|index| {
+                let open = seed + index as f64;
+                Kline {
+                    open,
+                    high: open + 4.0,
+                    low: open - 2.0,
+                    close: open + if index % 2 == 0 { 2.0 } else { -1.0 },
+                    volume: 1_000.0 + index as f64,
+                    time: 1_700_000_000_000 + index as i64 * 60_000,
+                    adjclose: None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn telegram_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
+        let ticker = ticker();
+        let indicators = crate::memory::IndicatorConfig::default();
+        let valid_5m = klines(100.0);
+        let valid_1h = klines(200.0);
+        let mut invalid = klines(300.0);
+        invalid[0].open = f64::NAN;
+
+        let frames = compute_telegram_frames(
+            vec![
+                (Timeframe::H1, valid_1h.clone()),
+                (Timeframe::M1, invalid),
+                (Timeframe::M5, valid_5m.clone()),
+            ],
+            &ticker,
+            &indicators,
+        );
+
+        assert_eq!(frames.len(), 2);
+        assert!(!frames.contains_key(&Timeframe::M1));
+        for (timeframe, klines) in [(Timeframe::H1, valid_1h), (Timeframe::M5, valid_5m)] {
+            let expected = process_data(&klines, &ticker, &indicators).unwrap();
+            assert_eq!(
+                frames[&timeframe].to_json_records().unwrap(),
+                expected.to_json_records().unwrap(),
+                "timeframe {timeframe} must retain its matching batch result"
+            );
+        }
+    }
 }
