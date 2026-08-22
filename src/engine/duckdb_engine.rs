@@ -809,7 +809,7 @@ fn telegram_select_expressions(
         .into_iter()
         .map(|column| match column.as_str() {
             "leverage" => format!(
-                "CASE WHEN atr IS NULL OR NOT isfinite(atr) OR atr = 0.0 THEN NULL ELSE {risk_adjustment} * open / atr END AS leverage"
+                "CASE WHEN atr - atr = 0 AND atr <> 0.0 THEN {risk_adjustment} * open / atr ELSE NULL END AS leverage"
             ),
             _ => quote_ident(&column),
         })
@@ -913,7 +913,7 @@ fn crypto_select_expressions(risk_adjustment: &str) -> Vec<String> {
         "atr_percent".into(),
         "atr_reversion_percent".into(),
         "CASE WHEN atr_reversion_percent > 50.0 THEN 'rgba(76, 175, 80, 0.5)' WHEN atr_reversion_percent < -50.0 THEN 'rgba(242, 54, 69, 0.5)' ELSE 'rgba(41, 98, 255, 0.2)' END AS atr_reversion_percent_color".into(),
-        format!("CASE WHEN atr IS NULL OR NOT isfinite(atr) OR atr = 0.0 THEN NULL ELSE {risk_adjustment} * open / atr END AS leverage"),
+        format!("CASE WHEN atr - atr = 0 AND atr <> 0.0 THEN {risk_adjustment} * open / atr ELSE NULL END AS leverage"),
         "CASE WHEN rssi > 54.0 AND atr_reversion_percent < -50.0 THEN 1 WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN -1 ELSE 0 END AS climax_signal".into(),
         "CASE WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN 'belowBar' ELSE 'aboveBar' END AS climax_signal_pos".into(),
         "CASE WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN 'rgba(33, 150, 243, 1)' ELSE 'rgba(233, 30, 99, 1)' END AS climax_signal_color".into(),
@@ -2031,6 +2031,27 @@ mod tests {
         // No raw numeric OHLC literal or list array may appear in production SQL.
         assert!(!text.contains("[1.0]"));
         assert!(!text.contains("1700000000000"));
+    }
+
+    #[test]
+    fn generated_leverage_sql_uses_dependency_free_finite_nonzero_atr_guard() {
+        let guard = "atr - atr = 0 AND atr <> 0.0";
+        let crypto_sql = build_crypto_sql(0.02, 0.01).unwrap();
+        let telegram_with_leverage = build_telegram_sql(
+            &[ValidatedIndicator::Date, ValidatedIndicator::Leverage],
+            0.02,
+            0.01,
+        )
+        .unwrap();
+        let telegram_without_leverage =
+            build_telegram_sql(&[ValidatedIndicator::Date], 0.02, 0.01).unwrap();
+
+        assert!(crypto_sql.sql().contains(guard));
+        assert!(telegram_with_leverage.sql().contains(guard));
+        assert!(!crypto_sql.sql().contains("isfinite"));
+        assert!(!telegram_with_leverage.sql().contains("isfinite"));
+        assert!(!telegram_without_leverage.sql().contains("AS leverage"));
+        assert!(!telegram_without_leverage.sql().contains(guard));
     }
 
     #[test]

@@ -310,21 +310,21 @@ Both `compute_crypto_batch` and `compute_telegram_batch` use the same `execute_b
 flowchart TD
     subgraph BuildCtx["Build Context (developer machine)"]
         RepoSrc["Rust source<br/>(Cargo.toml + src/ + bins/)"]
-        DuckDBScripts["docker/duckdb/<br/>(build-libduckdb.sh + duckdb-build.env)"]
+        DuckDBScripts["docker/duckdb/<br/>(install-libduckdb.sh + duckdb-release.conf)"]
     end
 
     subgraph TelegramBuild["bins/telegrambot/deployment/Dockerfile"]
         Chef1["cargo-chef planner<br/>(recipe.json)"]
         Cook1["cargo-chef cook<br/>(deps cached)"]
         Builder1["cargo build --release -p telegrambot<br/>+ strip"]
-        DuckDBBuild1["duckdb-builder stage<br/>(downloads + compiles libduckdb.so)"]
+        DuckDBBuild1["duckdb-builder stage<br/>(downloads + installs prebuilt libduckdb.so)"]
     end
 
     subgraph CryptoBuild["bins/cryptobot/deployment/Dockerfile"]
         Chef2["cargo-chef planner<br/>(recipe.json)"]
         Cook2["cargo-chef cook<br/>(deps cached)"]
         Builder2["cargo build --release -p cryptobot<br/>+ strip"]
-        DuckDBBuild2["duckdb-builder stage<br/>(downloads + compiles libduckdb.so)"]
+        DuckDBBuild2["duckdb-builder stage<br/>(downloads + installs prebuilt libduckdb.so)"]
     end
 
     subgraph TelegramRuntime["Runtime: debian:bookworm-slim"]
@@ -360,13 +360,13 @@ flowchart TD
 
 | Property | Value |
 |----------|-------|
-| Library source | Built from checksum-verified source archive inside `duckdb-builder` stage (`docker/duckdb/build-libduckdb.sh`); no pre-built `.so` vendored in the repository |
-| Build-time path | Compiled in `duckdb-builder` stage; installed into the runtime image via `COPY --from=duckdb-builder /opt/duckdb/lib/libduckdb.so` |
+| Library source | Official prebuilt DuckDB release asset, checksum-verified inside the `duckdb-builder` stage (`docker/duckdb/install-libduckdb.sh`); no `.so` vendored in the repository and no source compilation |
+| Build-time path | Installed in `duckdb-builder` stage; copied into the runtime image via `COPY --from=duckdb-builder /opt/duckdb/lib/libduckdb.so` |
 | Runtime path | `/usr/local/lib/libduckdb.so` |
 | Environment variable | `DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so` |
-| Target ABI | Linux amd64 or arm64, glibc (Debian bookworm); musl explicitly rejected by `build-libduckdb.sh` |
+| Target ABI | Linux amd64 or arm64, glibc (Debian bookworm); musl explicitly rejected by `install-libduckdb.sh` |
 | Fallback | None — `DataAccessError` on missing or incompatible library, no alternate compute path |
-| Source download | DuckDB source archive downloaded by `curl` inside `duckdb-builder` stage; SHA-256 verified before compilation; runtime image performs no downloads |
+| Library download | Official `libduckdb-linux-<arch>.zip` release asset downloaded by `curl` inside the `duckdb-builder` stage; SHA-256 verified (pinned in `duckdb-release.conf`) and ELF machine validated before install; runtime image performs no downloads |
 
 **Docker platform selection**: Every stage uses `--platform=$TARGETPLATFORM`. A plain `docker build` follows the host architecture. On Apple Silicon, if `DOCKER_DEFAULT_PLATFORM=linux/amd64` is set in the shell environment it must be unset before building to produce a `linux/arm64` image. Publishing an amd64 target requires an explicit `--platform linux/amd64` flag on a native amd64 builder; the Rust builder and `duckdb-builder` stages must both target the same architecture.
 
@@ -393,7 +393,7 @@ flowchart TD
 > **Decision marker**: Items below marked ⚠️ are constraints verified in code but not yet externally validated.
 
 - **Single DuckDB version per process**: The `Lazy` singleton loads one library at startup. Different library versions in the same process are not supported.
-- **Linux amd64 and arm64 / glibc for container targets**: `build-libduckdb.sh` supports `TARGETARCH=amd64` or `arm64` and explicitly rejects musl. The runtime images are `debian:bookworm-slim` and `node:20-slim` (both Debian/glibc).
+- **Linux amd64 and arm64 / glibc for container targets**: `install-libduckdb.sh` supports `TARGETARCH=amd64` or `arm64` and explicitly rejects musl. The runtime images are `debian:bookworm-slim` and `node:20-slim` (both Debian/glibc).
 - **In-memory database per session scope**: No persistent DuckDB file is used. Each `with_thread_session_scope` opens a fresh in-memory database. There is no connection pool or shared persistent state between requests.
 - **No DuckDB extension loading**: The engine registers only one table function (`ta_indicator_frame`). No DuckDB extensions (httpfs, json, etc.) are loaded.
 - ⚠️ **`IntraSeries` numerical equivalence**: Block-parallel EMA/RMA is algebraically equivalent to sequential but floating-point order differs. Tests assert ≤ 1e-12 tolerance. Exact bit-for-bit reproducibility across backends is not guaranteed.

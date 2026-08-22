@@ -1,0 +1,17 @@
+- Language: Rust (edition 2024)
+- Build system: Cargo (Rust workspace at repository root)
+- Crates:
+  - root workspace with crates: bins/cryptobot, bins/etf_dashboard, bins/telegrambot
+- Data layer: DuckDB-backed engine via FFI wrappers (src/engine/duckdb_ffi.rs and related modules)
+- Core engine: src/engine/duckdb_engine.rs (DuckDBEngine, CryptoBatchRequest, TelegramBatchRequest, batch execution)
+- Serialization: serde, serde_json
+- Networking: reqwest (cookies, json)
+- Time: chrono
+- Observability: tracing
+- Randomness: rand
+- Utilities: humantime, url (optional), hex, hmac, sha2
+- Misc:
+  - libloading (for dynamic libraries)
+  - libc
+- Tests and parallelism: thread::scope based parallel batch execution; multi-crate workspace
+- Optional test and browser automation: fantoccini (optional feature)

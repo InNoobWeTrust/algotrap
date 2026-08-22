@@ -45,7 +45,7 @@ analysis mode selection, output schema contract, and chat history compression.
 - **When** the system renders `system_adaptive.txt`
 - **Then** `{{symbol}}` → `BTC-USDT`
 - **And** `{{time}}` → current UTC timestamp
-- **And** `{{tfs}}` → Debug-formatted timeframe list (e.g., `[M15, H1, H4]`)
+- **And** `{{tfs}}` → comma-separated canonical timeframe list (e.g., `15m, 1h, 4h`)
 - **And** `{{weight_min}}` → `0.05` (from `EnvConf`)
 - **And** `{{weight_max}}` → `0.50` (from `EnvConf`)
 - **And** `{{weight_rate_limit}}` → `0.05` (from `EnvConf`)
@@ -206,4 +206,3 @@ analysis mode selection, output schema contract, and chat history compression.
 - **Challenger victories**: 0
 - **Escalated**: 0
 - **Overall verdict**: ACCEPTED
-

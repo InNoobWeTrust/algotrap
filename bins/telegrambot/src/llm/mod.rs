@@ -411,9 +411,10 @@ fn render_prompt(
         .map_err(|e| format!("Failed to read prompt file {}: {e}", path.display()))?;
 
     // Base placeholders (shared by all modes)
+    let timeframes = format_timeframes(&ticker.tfs);
     let mut rendered = template
         .replace("{{symbol}}", &ticker.symbol)
-        .replace("{{tfs}}", &format!("{:?}", ticker.tfs))
+        .replace("{{tfs}}", &timeframes)
         .replace("{{default_tf}}", &ticker.default_tf.to_string())
         .replace(
             "{{time}}",
@@ -511,6 +512,15 @@ fn render_prompt(
     }
 
     Ok(rendered)
+}
+
+/// Format configured timeframes using their canonical display values for LLM-facing text.
+fn format_timeframes(timeframes: &[Timeframe]) -> String {
+    timeframes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ─── Memory Context Formatting ───────────────────────────────────────────────
@@ -1263,6 +1273,17 @@ That's all."#;
         let text = r#"{"confidence": 80, "direction": "long", "summary": "Go long"}"#;
         let result = parse_alert_json(text);
         assert_eq!(result.direction, algotrap::prelude::Direction::Long);
+    }
+
+    #[test]
+    fn test_format_timeframes_uses_canonical_display_values() {
+        let timeframes = [Timeframe::M15, Timeframe::H1, Timeframe::H4];
+        let rendered = format_timeframes(&timeframes);
+
+        assert_eq!(rendered, "15m, 1h, 4h");
+        assert!(!rendered.contains("M15"));
+        assert!(!rendered.contains("H1"));
+        assert!(!rendered.contains("H4"));
     }
 
     #[test]

@@ -15,6 +15,10 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ─── Cook: build ONLY dependencies (cached until Cargo.toml/lock change) ─────
 FROM chef AS cook
 
+# Default to 2 parallel build jobs to bound memory consumption
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -44,7 +48,7 @@ ARG TARGETPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
 COPY docker/duckdb/ /usr/local/src/duckdb/
-RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/build-libduckdb.sh
+RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/install-libduckdb.sh
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim

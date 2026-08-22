@@ -1,0 +1,11 @@
+- cargo build -p algotrap
+- cargo test
+- cargo run -p algotrap-bin-name --bin cryptobot
+- cargo fmt
+- cargo clippy
+- cargo test --workspace --all-features
+- cargo check
+- cargo update
+- cargo doc --open
+- cargo test --doc
+- cargo bench (optional)

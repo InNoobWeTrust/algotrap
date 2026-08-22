@@ -20,36 +20,45 @@ use crate::config::{EnvConf, TickerConf};
 
 use super::AnalysisMode;
 
+/// Format configured timeframes using their canonical display values for LLM-facing text.
+fn format_available_timeframes(timeframes: &[Timeframe]) -> String {
+    timeframes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ─── Tool Declarations (Schemas automatically derived via llm_tool) ─────────
 
 /// Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, gap zones.
 #[llm_tool]
 fn get_indicator_summary(
     /// The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')
-    timeframe: String,
+    timeframe: Timeframe,
 ) -> Result<String, ToolError> {
-    Ok(timeframe)
+    Ok(timeframe.to_string())
 }
 
 /// Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.
 #[llm_tool]
 fn get_price_action(
     /// The timeframe (e.g., '1h', '4h', '1d')
-    timeframe: String,
+    timeframe: Timeframe,
     /// Number of recent candles to return (max 20, default 5)
     num_candles: Option<usize>,
 ) -> Result<String, ToolError> {
     let _ = num_candles;
-    Ok(timeframe)
+    Ok(timeframe.to_string())
 }
 
 /// Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually. Call this when you need to see the chart patterns, support/resistance levels, or visual confirmation of indicators.
 #[llm_tool]
 fn capture_chart(
     /// Which timeframe to focus the chart on (e.g., '4h'). Defaults to ticker's default timeframe.
-    timeframe: Option<String>,
+    timeframe: Option<Timeframe>,
 ) -> Result<String, ToolError> {
-    Ok(timeframe.unwrap_or_default())
+    Ok(timeframe.map(|tf| tf.to_string()).unwrap_or_default())
 }
 
 /// Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.
@@ -160,10 +169,8 @@ pub async fn execute_tool_call(
         "get_indicator_summary" => {
             let params: GetIndicatorSummaryParams =
                 serde_json::from_str(&tool_call.function.arguments)?;
-            let tf_str = &params.timeframe;
-            let tf: Timeframe = tf_str
-                .parse()
-                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
+            let tf = params.timeframe;
+            let tf_str = tf.to_string();
             match all_dfs.get(&tf) {
                 Some(df) => {
                     let last_rows = df.slice_last(3)?;
@@ -178,18 +185,16 @@ pub async fn execute_tool_call(
                     Ok(summary)
                 }
                 None => Ok(format!(
-                    "Timeframe {tf_str} not available. Available: {:?}",
-                    ticker.tfs
+                    "Timeframe {tf_str} not available. Available: {}",
+                    format_available_timeframes(&ticker.tfs)
                 )),
             }
         }
         "get_price_action" => {
             let params: GetPriceActionParams = serde_json::from_str(&tool_call.function.arguments)?;
-            let tf_str = &params.timeframe;
+            let tf = params.timeframe;
+            let tf_str = tf.to_string();
             let num = params.num_candles.unwrap_or(5).min(20);
-            let tf: Timeframe = tf_str
-                .parse()
-                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
             match all_dfs.get(&tf) {
                 Some(df) => {
                     let rows = df.slice_last(num)?;
@@ -197,27 +202,24 @@ pub async fn execute_tool_call(
                     Ok(price_data)
                 }
                 None => Ok(format!(
-                    "Timeframe {tf_str} not available. Available: {:?}",
-                    ticker.tfs
+                    "Timeframe {tf_str} not available. Available: {}",
+                    format_available_timeframes(&ticker.tfs)
                 )),
             }
         }
         "capture_chart" => {
             let params: CaptureChartParams = serde_json::from_str(&tool_call.function.arguments)
                 .unwrap_or(CaptureChartParams { timeframe: None });
-            let default_tf_str = ticker.default_tf.to_string();
-            let tf_str = params.timeframe.as_deref().unwrap_or(&default_tf_str);
+            let tf = params.timeframe.unwrap_or(ticker.default_tf);
+            let tf_str = tf.to_string();
 
-            // Parse timeframe and render per-TF chart HTML
-            let tf: Timeframe = tf_str
-                .parse()
-                .map_err(|e: String| -> Box<dyn core::error::Error + Send + Sync> { e.into() })?;
+            // Render per-TF chart HTML
             let df = match all_dfs.get(&tf) {
                 Some(df) => df,
                 None => {
                     return Ok(format!(
-                        "Timeframe {tf_str} not available. Available: {:?}",
-                        ticker.tfs
+                        "Timeframe {tf_str} not available. Available: {}",
+                        format_available_timeframes(&ticker.tfs)
                     ));
                 }
             };
@@ -475,6 +477,7 @@ fn compute_gap_zone_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_openai::types::chat::ChatCompletionTools;
 
     fn dummy_env_conf() -> EnvConf {
         let env: HashMap<String, String> = [
@@ -531,6 +534,17 @@ mod tests {
                 assert_ne!(func.function.name, "capture_chart");
             }
         }
+    }
+
+    #[test]
+    fn test_format_available_timeframes_uses_canonical_display_values() {
+        let timeframes = [Timeframe::M15, Timeframe::H1, Timeframe::H4];
+        let rendered = format_available_timeframes(&timeframes);
+
+        assert_eq!(rendered, "15m, 1h, 4h");
+        assert!(!rendered.contains("M15"));
+        assert!(!rendered.contains("H1"));
+        assert!(!rendered.contains("H4"));
     }
 
     #[test]
@@ -605,6 +619,58 @@ mod tests {
             .and_then(|r| r.as_array())
         {
             assert!(!req_array.contains(&serde_json::json!("key")));
+        }
+    }
+
+    #[test]
+    fn test_timeframe_params_bundled_with_canonical_enum_schema() {
+        let conf = dummy_env_conf();
+        let tools = build_tools(&conf, AnalysisMode::FullAnalysis).unwrap();
+
+        let canonical: Vec<serde_json::Value> = Timeframe::ALL_CANONICAL
+            .iter()
+            .map(|tf| serde_json::json!(tf))
+            .collect();
+
+        for tool in &tools {
+            let ChatCompletionTools::Function(func) = tool else {
+                continue;
+            };
+            if !["get_indicator_summary", "get_price_action", "capture_chart"]
+                .contains(&func.function.name.as_str())
+            {
+                continue;
+            }
+
+            // `capture_chart` accepts `Option<Timeframe>`, so schemars appends `null`.
+            let mut expected = canonical.clone();
+            if func.function.name == "capture_chart" {
+                expected.push(serde_json::Value::Null);
+            }
+            let expected = serde_json::Value::Array(expected);
+
+            let tf_schema = &func
+                .function
+                .parameters
+                .as_ref()
+                .expect("parameters should be set")["properties"]["timeframe"];
+            assert_eq!(
+                tf_schema.get("type").and_then(|t| t.as_str()),
+                Some("string"),
+                "timeframe type mismatch for {}",
+                func.function.name
+            );
+            let enum_values = tf_schema.get("enum").unwrap_or_else(|| {
+                panic!(
+                    "timeframe should carry the enum bundled from `Timeframe::JsonSchema` for {}",
+                    func.function.name
+                )
+            });
+            assert_eq!(
+                enum_values, &expected,
+                "timeframe enum mismatch for {}",
+                func.function.name
+            );
         }
     }
 }

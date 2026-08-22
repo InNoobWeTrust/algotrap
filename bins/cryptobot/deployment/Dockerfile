@@ -54,7 +54,7 @@ ARG TARGETPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
 COPY docker/duckdb/ /usr/local/src/duckdb/
-RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/build-libduckdb.sh
+RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/install-libduckdb.sh
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
 FROM --platform=$TARGETPLATFORM node:20-slim

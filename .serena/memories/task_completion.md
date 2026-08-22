@@ -1,0 +1,7 @@
+- cargo fmt
+- cargo clippy
+- cargo test
+- cargo build
+- cargo test --workspace
+- cargo run -p algotrap --bin cryptobot (or appropriate binary)
+- ensure unit tests pass; integration tests as applicable
