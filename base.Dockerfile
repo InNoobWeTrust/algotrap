@@ -4,6 +4,10 @@ FROM --platform=$TARGETPLATFORM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a48678
 
 WORKDIR /app
 
+# Use the official DuckDB prebuilt shared library, downloaded at compile time.
+ENV DUCKDB_DOWNLOAD_LIB=1
+ENV CARGO_TARGET_DIR=/cargo-target
+
 # Copy manifests from the project root
 COPY Cargo.toml Cargo.lock ./
 
@@ -31,7 +35,11 @@ if [ -n "${RUST_TARGETS:-}" ]; then
     rustup target add "$TARGET"
 
     cargo install --locked --target "$TARGET" --path ./bins/cryptobot --root /
+    # Capture the official release-profile DuckDB shared library for the runtime.
+    mkdir -p /build-artifacts
+    cp "/cargo-target/$TARGET/release/deps/libduckdb.so" /build-artifacts/libduckdb.so
     cargo install --locked --target "$TARGET" --path ./bins/etf_dashboard --root /
+    cmp --silent "/cargo-target/$TARGET/release/deps/libduckdb.so" /build-artifacts/libduckdb.so
 
     # Rename output binaries for multi-arch
     case "$TARGET" in
@@ -46,8 +54,13 @@ if [ -n "${RUST_TARGETS:-}" ]; then
     esac
   done
 else
-  cargo install --locked --path ./bins/cryptobot --root / &&
-  cargo install --locked --path ./bins/etf_dashboard --root / &&
+  cargo install --locked --path ./bins/cryptobot --root /
+  # Capture the official release-profile DuckDB shared library for the runtime.
+  mkdir -p /build-artifacts
+  cp /cargo-target/release/deps/libduckdb.so /build-artifacts/libduckdb.so
+  cargo install --locked --path ./bins/etf_dashboard --root /
+  cmp --silent /cargo-target/release/deps/libduckdb.so /build-artifacts/libduckdb.so
+
   cp /bin/cryptobot /app/cryptobot &&
   cp /bin/etf_dashboard /app/etf_dashboard
 fi
@@ -55,26 +68,16 @@ EOF
 # # Strip binaries to reduce size (optional; present because binutils was installed above)
 # RUN strip /bin/cryptobot || true && strip /bin/etf_dashboard || true
 
-# Stage 2: acquire and build the pinned DuckDB shared library only during this Docker build.
-FROM --platform=$TARGETPLATFORM debian:bookworm AS duckdb-builder
-ARG TARGETPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
-COPY docker/duckdb/ /usr/local/src/duckdb/
-RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/install-libduckdb.sh
-
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgcc-s1 libstdc++6 \
+    libgcc-s1 libstdc++6 libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=builder /app/cryptobot* ./
 COPY --from=builder /app/etf_dashboard* ./
-COPY --from=duckdb-builder /opt/duckdb/lib/libduckdb.so /usr/local/lib/libduckdb.so
-COPY --from=duckdb-builder /opt/duckdb/libexec/duckdb-smoke /usr/local/libexec/duckdb-smoke
-COPY --from=duckdb-builder /opt/duckdb-artifacts/ /usr/local/share/algotrap/
-RUN /usr/local/libexec/duckdb-smoke
+COPY --from=builder /build-artifacts/libduckdb.so /usr/local/lib/libduckdb.so
+RUN ldconfig
 ENV DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so

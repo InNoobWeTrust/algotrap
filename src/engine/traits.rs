@@ -1,41 +1,6 @@
-//! Core traits for the engine abstraction layer.
+//! Engine-neutral result-frame access contract.
 
 use crate::engine::error::MarketError;
-use crate::engine::telegram_config::TelegramIndicatorConfig;
-use crate::engine::validation::{ValidatedIndicator, ValidatedTicker};
-use crate::model::kline::Kline;
-
-/// Engine trait for compute backends.
-///
-/// All implementations must be Send + Sync to ensure thread-safety
-/// when used across async tasks.
-pub trait MarketFrameEngine: Send + Sync {
-    /// Returns the compute backend identity for logging and diagnostics.
-    /// Used for logging, error context, and debugging.
-    fn engine_identity(&self) -> &str;
-
-    /// Compute indicators for telegram bot flow.
-    ///
-    /// Takes a slice of klines, validated ticker config, and indicator specs.
-    /// Returns a computed frame with all derived columns.
-    fn compute_telegram(
-        &self,
-        klines: &[Kline],
-        ticker: ValidatedTicker,
-        indicators: Vec<ValidatedIndicator>,
-        config: &TelegramIndicatorConfig,
-    ) -> Result<Box<dyn ComputedFrame>, MarketError>;
-
-    /// Compute indicators for cryptobot flow.
-    ///
-    /// Takes a slice of klines and validated ticker config.
-    /// Returns a computed frame with all derived columns.
-    fn compute_crypto(
-        &self,
-        klines: &[Kline],
-        ticker: ValidatedTicker,
-    ) -> Result<Box<dyn ComputedFrame>, MarketError>;
-}
 
 /// Engine-neutral table access trait.
 ///

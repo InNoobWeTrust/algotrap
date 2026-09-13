@@ -9,3 +9,4 @@
 - cargo doc --open
 - cargo test --doc
 - cargo bench (optional)
+- DUCKDB_DOWNLOAD_LIB=1 cargo test --workspace --locked

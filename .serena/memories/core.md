@@ -2,8 +2,16 @@
 - Repo root: /Volumes/SS850Evo/Developer/InNoobWeTrust/algotrap
 - Language: Rust
 - Build tool: Cargo (workspace at root with Cargo.toml and Cargo.lock)
-- Directory layout: src/, bins/, docker/, docs/, examples/, target/ (aux: .serena, .kilo, .agents)
-- Core compute path: src/engine/duckdb_engine.rs (DuckDBEngine, CryptoBatchRequest, TelegramBatchRequest)
-- Data flow summary: cryptobot and telegram batch paths flow through DuckDB sessions to DuckDBComputedFrame
-- Cross-memory references: `mem:tech_stack`, `mem:conventions`, `mem:suggested_commands`, `mem:task_completion`
+- Directory layout: src/, bins/, docs/, tests/, target/ (aux: .serena, .kilo)
+- Final typed ownership model:
+  - `src/ta` — synchronous, runtime-independent TA domain. Owns `Kernel`, `PriorState`, `KernelStep` (`src/ta/kernel.rs`), the `Processor<K>` state owner (`src/ta/processor.rs`), indicator operator families under `src/ta/ops/**`, pure scalar gap-candidate detection (`src/ta/ops/gap_candidate.rs`), and `TaError`/`TaErrorKind`/`TaResult` (`src/ta/error.rs`). Candidate detection emits scalar facts only; it does not own prior-zone lists. Re-exports only TA errors at the `ta` module root; `src/ta/prelude.rs` exports the approved Kernel/Processor/error/indicator/state/named-input/factory/ATR-multiplier surface. `src/ta/**` imports no futures, Tokio, async, runtime, broadcast, channel, spawn, JoinError, Pin, or Stream token.
+  - `src/adapter` — the only root module owning futures/Tokio stream concerns (`kernel_stream`, `kernel_stream_pipeline`, `broadcast_source`, `Stamped`, `StreamPipelineError`). `src/ta/**` remains synchronous and runtime-independent.
+  - `src/engine` — owns the result frame: `ColumnData`, `OutputFrame`, `OwnedFrame` (all in `src/engine/frame.rs`), `ComputedFrame` (`src/engine/traits.rs`), `ErrorKind`/`MarketError` (`src/engine/error.rs`), and `Ticker`/`ValidatedTicker` (`src/engine/validation.rs`).
+  - `src/query` — owns raw bounded prior-zone materialization from source frame data (`src/query/gap_zones.rs`) and optional DuckDB SQL projection over already-computed frames (`DuckDBQuery`, `FrameQuery`, `RawQuery`, session/invocation/vtab). Never compiles or executes TA computation.
+  - `src/model` — leaf DTOs: `Kline`, `Timeframe`, `Direction`.
+  - `src/ext` — outbound I/O adapters (bingx, yfinance, ntfy, webdriver).
+  - `src/time_utils` — candle-timing helpers.
+  - Application aggregates (`bins/cryptobot`, `bins/telegrambot`) own exactly one aggregate Kernel, aggregate state, 19-field row DTO, and explicit projector in `src/presentation.rs`; they are the producers of `OutputFrame`.
+- Data flow: applications build the aggregate Kernel + typed state, feed `Kline` rows through the adapter-owned `Processor<K>`, collect stamped typed rows, project an explicitly ordered application-owned `OutputFrame`, and optionally run `DuckDBQuery::project` (source-controlled SQL) into `OwnedFrame`.
+- Cross-memory references: `mem:conventions`, `mem:suggested_commands`, `mem:task_completion`, `mem:memory_maintenance`
 - Onboarding: not performed yet

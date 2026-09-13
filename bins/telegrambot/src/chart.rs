@@ -9,7 +9,7 @@ use crate::config::TickerConf;
 /// Canonical list of derived indicator columns available to the chart template.
 ///
 /// OHLCV base columns (time, open, high, low, close, volume) are implicit.
-/// Update this list whenever `data.rs:indicators()` changes column aliases.
+/// Update this list whenever the Telegram presentation output contract changes.
 pub const CHART_COLUMNS: &[&str] = &[
     "volume_sma",
     "bias_reversion",
@@ -82,22 +82,25 @@ pub fn last_rssi_from_df(df: &dyn ComputedFrame) -> f64 {
 }
 
 /// Convert gap zones to chart-level JSON for band rendering.
-/// Takes at most 10 most recent zones above min_trust.
+///
+/// Takes pre-budgeted [`algotrap::query::gap_zones::GapZoneRecord`]s and emits
+/// `{top, bottom, direction}` per zone with no trust weighting, filtering, or
+/// truncation — the caller already budgeted via `recent_gap_zones`.
 pub fn gap_zones_to_chart_json(
-    zones: &[algotrap::ta::gap_zones::GapZone],
-    min_trust: f64,
+    zones: &[algotrap::query::gap_zones::GapZoneRecord],
 ) -> String {
     let chart_zones: Vec<serde_json::Value> = zones
         .iter()
-        .filter(|z| z.trust >= min_trust)
-        .take(10) // hardcoded cap for visual clarity
         .map(|z| {
-            let direction = if z.bullish { "bullish" } else { "bearish" };
+            let direction = match z.direction {
+                algotrap::query::gap_zones::GapZoneDirection::Bullish => "bullish",
+                algotrap::query::gap_zones::GapZoneDirection::Bearish => "bearish",
+                algotrap::query::gap_zones::GapZoneDirection::Flat => "flat",
+            };
             serde_json::json!({
-                "top": z.top,
-                "bottom": z.bottom,
+                "top": z.body_top,
+                "bottom": z.body_bottom,
                 "direction": direction,
-                "trust": z.trust
             })
         })
         .collect();
@@ -149,5 +152,52 @@ mod chart_tests {
         assert_eq!(rssi_tint_class(50.0), "neutral");
         assert_eq!(rssi_tint_class(59.9), "neutral");
         assert_eq!(rssi_tint_class(40.1), "neutral");
+    }
+
+    #[test]
+    fn gap_zones_to_chart_json_emits_top_bottom_direction_without_trust() {
+        use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
+
+        fn record(direction: GapZoneDirection, bottom: f64, top: f64) -> GapZoneRecord {
+            GapZoneRecord {
+                time_ms: 1_700_000_000_000,
+                open: 100.0,
+                high: 115.0,
+                low: 95.0,
+                close: 110.0,
+                volume: 1_000.0,
+                body_bottom: bottom,
+                body_top: top,
+                direction,
+                body_ratio: Some(0.8),
+            }
+        }
+
+        let zones = vec![
+            record(GapZoneDirection::Bullish, 100.0, 110.0),
+            record(GapZoneDirection::Bearish, 90.0, 100.0),
+            record(GapZoneDirection::Flat, 100.0, 100.0),
+        ];
+        let json = gap_zones_to_chart_json(&zones);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["top"], serde_json::json!(110.0));
+        assert_eq!(arr[0]["bottom"], serde_json::json!(100.0));
+        assert_eq!(arr[0]["direction"], serde_json::json!("bullish"));
+        assert_eq!(arr[1]["direction"], serde_json::json!("bearish"));
+        assert_eq!(arr[2]["direction"], serde_json::json!("flat"));
+        for entry in arr {
+            let obj = entry.as_object().unwrap();
+            assert!(obj.contains_key("top"));
+            assert!(obj.contains_key("bottom"));
+            assert!(obj.contains_key("direction"));
+            assert!(
+                !obj.contains_key("trust"),
+                "chart JSON must not carry trust: {obj:?}"
+            );
+            assert_eq!(obj.len(), 3);
+        }
+        assert_eq!(gap_zones_to_chart_json(&[]), "[]");
     }
 }

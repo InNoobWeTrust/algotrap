@@ -55,7 +55,53 @@ pub async fn send_analysis(
     Ok(())
 }
 
+/// Format the entry-alert body with direction + confidence badge.
+///
+/// Renders the same canonical plan lines as Watch (`format_trade_plan_line`:
+/// exact timeframe, entry/target/stop, status) so Alert and Watch stay
+/// consistent. Charts are handled by the caller.
+fn format_entry_alert_text(
+    symbol: &str,
+    direction: algotrap::prelude::Direction,
+    confidence: f64,
+    summary: &str,
+    trade_plans: &[crate::memory::TradePlan],
+) -> String {
+    let direction_emoji = match direction {
+        algotrap::prelude::Direction::Long => "🟢 LONG",
+        algotrap::prelude::Direction::Short => "🔴 SHORT",
+        algotrap::prelude::Direction::None => "⚪ NONE",
+    };
+
+    let bold_symbol = to_bold_sans(symbol);
+    let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    let mut alert_text = format!(
+        "━━━ 🎯 ENTRY ALERT ━━━\n\
+         📊 {bold_symbol}\n\
+         {direction_emoji} | Confidence: {confidence:.0}%\n\
+         🕐 {ts}\n\
+         \n\
+         {summary}"
+    );
+
+    if !trade_plans.is_empty() {
+        alert_text.push_str("\n\n📋 Trade Plans:");
+        for plan in trade_plans {
+            alert_text.push_str(&format!("\n{}", format_trade_plan_line(plan)));
+            if !plan.rationale.is_empty() {
+                alert_text.push_str(&format!("\n    {}", plan.rationale));
+            }
+        }
+    }
+
+    alert_text
+}
+
 /// Send a compact entry alert with direction + confidence badge.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The public notification boundary deliberately mirrors the complete Alert payload."
+)]
 pub async fn send_alert(
     bot: &Bot,
     chat_id: ChatId,
@@ -63,6 +109,7 @@ pub async fn send_alert(
     direction: algotrap::prelude::Direction,
     confidence: f64,
     summary: &str,
+    trade_plans: &[crate::memory::TradePlan],
     tf_charts: &[(String, Vec<u8>)],
 ) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     // Send charts if available
@@ -90,23 +137,8 @@ pub async fn send_alert(
         }
     }
 
-    // Format alert text
-    let direction_emoji = match direction {
-        algotrap::prelude::Direction::Long => "🟢 LONG",
-        algotrap::prelude::Direction::Short => "🔴 SHORT",
-        algotrap::prelude::Direction::None => "⚪ NONE",
-    };
-
-    let bold_symbol = to_bold_sans(symbol);
-    let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
-    let alert_text = format!(
-        "━━━ 🎯 ENTRY ALERT ━━━\n\
-         📊 {bold_symbol}\n\
-         {direction_emoji} | Confidence: {confidence:.0}%\n\
-         🕐 {ts}\n\
-         \n\
-         {summary}"
-    );
+    // Format alert text (same canonical plan lines as Watch)
+    let alert_text = format_entry_alert_text(symbol, direction, confidence, summary, trade_plans);
 
     for chunk in split_message(&alert_text, 4000) {
         if let Err(e) = bot.send_message(chat_id, &chunk).await {
@@ -115,6 +147,65 @@ pub async fn send_alert(
     }
 
     Ok(())
+}
+
+// ─── Trade-plan presentation (U5) ────────────────────────────────────────────
+//
+// Every displayed directional (LONG/SHORT) plan includes its exact timeframe
+// (`tf=4h`, `tf=n/a` when missing so the gap is explicit). Settled plans show
+// `status=take_profit|stop_loss|ambiguous`; unresolved plans show
+// `status=pending`. WAIT plans show `tf=` only when a timeframe is present but
+// always show `status=` so pending is distinguished everywhere.
+
+/// True for actionable directional plans (LONG/SHORT). WAIT/NONE never settle.
+fn is_directional_plan(plan: &crate::memory::TradePlan) -> bool {
+    plan.direction
+        .parse::<algotrap::prelude::Direction>()
+        .is_ok_and(|d| d.is_actionable())
+}
+
+/// Snake-case settlement status, or `pending` when unresolved.
+fn plan_status_str(plan: &crate::memory::TradePlan) -> &'static str {
+    match plan.outcome.as_ref().map(|o| o.kind) {
+        Some(crate::memory::TradePlanOutcomeKind::TakeProfit) => "take_profit",
+        Some(crate::memory::TradePlanOutcomeKind::StopLoss) => "stop_loss",
+        Some(crate::memory::TradePlanOutcomeKind::Ambiguous) => "ambiguous",
+        None => "pending",
+    }
+}
+
+/// Timeframe token for a plan line.
+///
+/// Directional plans always return `Some` (`tf=n/a` when missing). WAIT plans
+/// return `Some` only when a timeframe is present.
+fn plan_timeframe_token(plan: &crate::memory::TradePlan) -> Option<String> {
+    match plan.timeframe {
+        Some(tf) => Some(format!("tf={tf}")),
+        None if is_directional_plan(plan) => Some("tf=n/a".to_string()),
+        None => None,
+    }
+}
+
+/// Single-line plan rendering: label, direction, timeframe, levels, status.
+///
+/// Preserves the existing `entry=/target=/stop=` contract and appends the U5
+/// `tf=` + `status=` tokens. Rationale is rendered by the caller.
+fn format_trade_plan_line(plan: &crate::memory::TradePlan) -> String {
+    let mut line = format!("  {} {}", plan.label, plan.direction);
+    if let Some(tf_token) = plan_timeframe_token(plan) {
+        line.push_str(&format!(" {tf_token}"));
+    }
+    if let Some(e) = plan.entry {
+        line.push_str(&format!(" entry={e:.2}"));
+    }
+    if let Some(t) = plan.target {
+        line.push_str(&format!(" target={t:.2}"));
+    }
+    if let Some(s) = plan.stop {
+        line.push_str(&format!(" stop={s:.2}"));
+    }
+    line.push_str(&format!(" status={}", plan_status_str(plan)));
+    line
 }
 
 /// Send a Watch-tier notification with summary + trade plans.
@@ -177,20 +268,11 @@ pub async fn send_watch_notification(
          {summary}"
     );
 
-    // Append trade plans
+    // Append trade plans (U5: directional tf + settled/pending status)
     if !trade_plans.is_empty() {
         text.push_str("\n\n📋 Trade Plans:");
         for plan in trade_plans {
-            text.push_str(&format!("\n  {} {} ", plan.label, plan.direction));
-            if let Some(e) = plan.entry {
-                text.push_str(&format!("entry={e:.2} "));
-            }
-            if let Some(t) = plan.target {
-                text.push_str(&format!("target={t:.2} "));
-            }
-            if let Some(s) = plan.stop {
-                text.push_str(&format!("stop={s:.2}"));
-            }
+            text.push_str(&format!("\n{}", format_trade_plan_line(plan)));
             if !plan.rationale.is_empty() {
                 text.push_str(&format!("\n    {}", plan.rationale));
             }
@@ -394,5 +476,177 @@ mod tests {
         assert!(msg.contains("Configured tickers"));
         // Should still have the settings line
         assert!(msg.contains("Scan:"));
+    }
+
+    // ─── U5 trade-plan presentation ──────────────────────────────────────
+
+    fn u5_plan(
+        label: &str,
+        direction: &str,
+        timeframe: Option<algotrap::prelude::Timeframe>,
+        outcome: Option<crate::memory::TradePlanOutcomeKind>,
+    ) -> crate::memory::TradePlan {
+        crate::memory::TradePlan {
+            label: label.to_string(),
+            direction: direction.to_string(),
+            entry: Some(100.0),
+            target: Some(110.0),
+            stop: Some(95.0),
+            rationale: String::new(),
+            timeframe,
+            outcome: outcome.map(|kind| crate::memory::TradePlanOutcome {
+                kind,
+                entry_hit_at: None,
+                resolved_at: chrono::Utc::now(),
+                resolution_timeframe: algotrap::prelude::Timeframe::H4,
+                lowest_reached: 95.0,
+                highest_reached: 110.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_u5_directional_plan_includes_exact_timeframe_and_pending() {
+        let plan = u5_plan("A", "LONG", Some(algotrap::prelude::Timeframe::H4), None);
+        let line = format_trade_plan_line(&plan);
+        assert!(line.contains("A LONG"), "label+direction preserved: {line}");
+        assert!(line.contains("tf=4h"), "exact timeframe required: {line}");
+        assert!(
+            line.contains("status=pending"),
+            "pending distinguished: {line}"
+        );
+        assert!(line.contains("entry=100.00"), "levels preserved: {line}");
+    }
+
+    #[test]
+    fn test_u5_directional_missing_timeframe_is_explicit() {
+        let plan = u5_plan("B", "SHORT", None, None);
+        let line = format_trade_plan_line(&plan);
+        assert!(
+            line.contains("tf=n/a"),
+            "missing tf must stay explicit: {line}"
+        );
+        assert!(line.contains("status=pending"), "{line}");
+    }
+
+    #[test]
+    fn test_u5_settled_statuses_use_snake_case() {
+        for (kind, expected) in [
+            (
+                crate::memory::TradePlanOutcomeKind::TakeProfit,
+                "status=take_profit",
+            ),
+            (
+                crate::memory::TradePlanOutcomeKind::StopLoss,
+                "status=stop_loss",
+            ),
+            (
+                crate::memory::TradePlanOutcomeKind::Ambiguous,
+                "status=ambiguous",
+            ),
+        ] {
+            let plan = u5_plan(
+                "A",
+                "LONG",
+                Some(algotrap::prelude::Timeframe::H4),
+                Some(kind),
+            );
+            let line = format_trade_plan_line(&plan);
+            assert!(line.contains(expected), "expected {expected}: {line}");
+            assert!(
+                !line.contains("status=pending"),
+                "settled must not read pending: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_u5_wait_without_timeframe_omits_tf_but_keeps_status() {
+        let mut plan = u5_plan("C", "WAIT", None, None);
+        plan.entry = None;
+        plan.target = None;
+        plan.stop = None;
+        let line = format_trade_plan_line(&plan);
+        assert!(!line.contains("tf="), "WAIT without tf omits token: {line}");
+        assert!(line.contains("status=pending"), "{line}");
+    }
+
+    #[test]
+    fn test_u5_wait_with_timeframe_shows_tf() {
+        let mut plan = u5_plan("C", "WAIT", Some(algotrap::prelude::Timeframe::H4), None);
+        plan.entry = None;
+        plan.target = None;
+        plan.stop = None;
+        let line = format_trade_plan_line(&plan);
+        assert!(line.contains("tf=4h"), "{line}");
+    }
+
+    // ─── Entry-alert plan rendering (reviewer finding #4) ────────────────
+
+    fn alert_plan(
+        label: &str,
+        direction: &str,
+        timeframe: Option<algotrap::prelude::Timeframe>,
+    ) -> crate::memory::TradePlan {
+        crate::memory::TradePlan {
+            label: label.to_string(),
+            direction: direction.to_string(),
+            entry: Some(100.0),
+            target: Some(110.0),
+            stop: Some(95.0),
+            rationale: format!("rationale {label}"),
+            timeframe,
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn test_entry_alert_renders_canonical_plan_lines() {
+        let plans = vec![
+            alert_plan("A", "LONG", Some(algotrap::prelude::Timeframe::H4)),
+            alert_plan("B", "LONG", Some(algotrap::prelude::Timeframe::H4)),
+        ];
+        let text = format_entry_alert_text(
+            "BTC-USDT",
+            algotrap::prelude::Direction::Long,
+            82.0,
+            "summary",
+            &plans,
+        );
+
+        assert!(text.contains("ENTRY ALERT"), "{text}");
+        assert!(text.contains("🟢 LONG"), "{text}");
+        assert!(text.contains("82%"), "{text}");
+        assert!(text.contains("summary"), "{text}");
+        assert!(text.contains("📋 Trade Plans:"), "{text}");
+        for plan in &plans {
+            let expected = format_trade_plan_line(plan);
+            assert!(
+                text.contains(&expected),
+                "alert must reuse canonical Watch line: {expected}\n{text}"
+            );
+            assert!(text.contains(&plan.rationale), "{text}");
+        }
+        assert!(text.contains("tf=4h"), "{text}");
+        assert!(text.contains("entry=100.00"), "{text}");
+        assert!(text.contains("target=110.00"), "{text}");
+        assert!(text.contains("stop=95.00"), "{text}");
+        assert!(text.contains("status=pending"), "{text}");
+    }
+
+    #[test]
+    fn test_entry_alert_without_plans_omits_trade_plan_section() {
+        let text = format_entry_alert_text(
+            "BTC-USDT",
+            algotrap::prelude::Direction::Short,
+            75.0,
+            "summary",
+            &[],
+        );
+
+        assert!(text.contains("ENTRY ALERT"), "{text}");
+        assert!(text.contains("🔴 SHORT"), "{text}");
+        assert!(!text.contains("📋 Trade Plans:"), "{text}");
+        assert!(!text.contains("tf="), "{text}");
     }
 }

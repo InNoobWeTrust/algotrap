@@ -15,7 +15,9 @@ use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use crate::config::{EnvConf, TickerConf};
-use crate::memory::{IndicatorConfig, TickerMemory};
+use crate::memory::{
+    IndicatorConfig, IndicatorProposal, PeriodName, TelegramOutputName, TickerMemory,
+};
 use algotrap::engine::traits::ComputedFrame;
 
 pub use tools::{build_tools, execute_tool_call};
@@ -50,7 +52,7 @@ pub struct AnalysisResult {
     /// NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
     pub conviction_aligned: bool,
     /// LLM-proposed indicator parameter tuning (optional, absent = no-op).
-    pub proposed_indicator_params: Option<HashMap<String, serde_json::Value>>,
+    pub proposed_indicator_params: Option<Vec<IndicatorProposal>>,
 }
 
 // ─── Agent Entry Point ───────────────────────────────────────────────────────
@@ -65,10 +67,14 @@ pub async fn run_agent(
     conf: &EnvConf,
     ticker: &TickerConf,
     all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
+    gap_zones: &HashMap<Timeframe, Vec<algotrap::query::gap_zones::GapZoneRecord>>,
     mode: AnalysisMode,
     memory: Option<&TickerMemory>,
 ) -> Result<AnalysisResult, Box<dyn core::error::Error + Send + Sync>> {
     let tools = build_tools(conf, mode)?;
+
+    let mut available_timeframes: Vec<Timeframe> = all_dfs.keys().copied().collect::<Vec<_>>();
+    available_timeframes.sort_by_key(|tf| tf.weight());
 
     let (system_file, user_file) = match mode {
         AnalysisMode::FullAnalysis => ("system.txt", "user.txt"),
@@ -92,8 +98,10 @@ pub async fn run_agent(
     // Session-scoped scratchpad for LLM working memory (Scenario 10: empty at start)
     let mut session_scratchpad: HashMap<String, String> = HashMap::new();
     let mut handoff_attempts: u8 = 0;
+    let mut empty_response_retries: u8 = 0;
 
     const MAX_TURNS: usize = 10;
+    const MAX_EMPTY_RETRIES: u8 = 2;
 
     for turn in 0..MAX_TURNS {
         info!(turn, "LLM agent turn");
@@ -195,6 +203,7 @@ pub async fn run_agent(
                     let result = execute_tool_call(
                         tool_call,
                         all_dfs,
+                        gap_zones,
                         conf,
                         ticker,
                         ic,
@@ -219,14 +228,36 @@ pub async fn run_agent(
                 }
             }
             _ => {
-                // No tool calls — LLM has finished
-                let final_text = assistant_msg
-                    .content
-                    .as_deref()
-                    .unwrap_or("Analysis complete.")
-                    .to_string();
+                // No tool calls — check for empty content before treating as finished
+                let content_deref = assistant_msg.content.as_deref();
 
-                return Ok(parse_analysis_result(final_text, mode));
+                if is_empty_final_response(content_deref)
+                    && empty_response_retries < MAX_EMPTY_RETRIES
+                {
+                    warn!(
+                        turn,
+                        empty_response_retries,
+                        "LLM returned empty content with no tool calls — injecting correction"
+                    );
+                    empty_response_retries += 1;
+                    messages.push(
+                        ChatCompletionRequestUserMessageArgs::default()
+                            .content(empty_response_correction_message(mode))
+                            .build()?
+                            .into(),
+                    );
+                    continue;
+                }
+
+                // Content is non-empty, or retry budget exhausted — return result.
+                // If still empty after retries, parse_analysis_result returns confidence=0
+                // (fail-safe; no false alert).
+                let final_text = content_deref.unwrap_or("").to_string();
+                return Ok(parse_analysis_result(
+                    final_text,
+                    mode,
+                    &available_timeframes,
+                ));
             }
         }
     }
@@ -246,12 +277,48 @@ pub async fn run_agent(
 
 // ─── Result Parsing ──────────────────────────────────────────────────────────
 
+// ─── Empty-Response Helpers ──────────────────────────────────────────────────
+
+/// Returns `true` when the assistant content is absent or entirely whitespace.
+///
+/// Used to detect the transient "empty final response" failure mode where the
+/// upstream model returns a 200 OK with no useful text and no tool calls.
+fn is_empty_final_response(content: Option<&str>) -> bool {
+    content.is_none_or(|s| s.trim().is_empty())
+}
+
+/// Correction message injected as a user turn when an empty final response is
+/// detected. Mode-specific so the LLM knows exactly what format is required.
+fn empty_response_correction_message(mode: AnalysisMode) -> &'static str {
+    match mode {
+        AnalysisMode::AlertScan => {
+            "Your previous response was empty. You MUST respond NOW with ONLY a JSON object — \
+             no prose, no function calls:\n\
+             {\"confidence\": <0-100>, \"direction\": \"LONG\"|\"SHORT\"|\"NONE\", \
+             \"summary\": \"<2-4 sentence summary>\", \
+             \"trade_plans\": [{\"label\": \"A\", \"direction\": \"...\", \
+             \"entry\": null, \"target\": null, \"stop\": null, \"timeframe\": \"4h\", \"rationale\": \"...\"}], \
+             \"weights\": {}, \"significance_threshold\": <number>}. \
+             Each trade_plans entry MUST include timeframe. Directional entries require canonical \
+             timeframe >=4h with valid entry/target/stop and reward>=risk, \
+             else use direction WAIT with null entry/target/stop/timeframe/outcome."
+        }
+        AnalysisMode::FullAnalysis => {
+            "Your previous response was empty. Please provide your full analysis text now."
+        }
+    }
+}
+
 /// Parse the LLM's final text into an `AnalysisResult`.
 ///
 /// In `FullAnalysis` mode, confidence is always 100 and direction is "NONE".
 /// In `AlertScan` mode, the text is expected to contain a JSON block with
 /// `confidence`, `direction`, and `summary` fields.
-fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
+fn parse_analysis_result(
+    text: String,
+    mode: AnalysisMode,
+    available_timeframes: &[Timeframe],
+) -> AnalysisResult {
     match mode {
         AnalysisMode::FullAnalysis => AnalysisResult {
             text,
@@ -263,7 +330,7 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
             conviction_aligned: true, // Full analysis has no direction constraint
             proposed_indicator_params: None,
         },
-        AnalysisMode::AlertScan => parse_alert_json(&text),
+        AnalysisMode::AlertScan => parse_alert_json(&text, available_timeframes),
     }
 }
 
@@ -271,9 +338,22 @@ fn parse_analysis_result(text: String, mode: AnalysisMode) -> AnalysisResult {
 ///
 /// Looks for a JSON object anywhere in the text (between `{` and `}`).
 /// Falls back to confidence=0 on any parse failure (safe — no false alerts).
-fn parse_alert_json(text: &str) -> AnalysisResult {
+/// Directional trade plans are normalized against `available_timeframes`:
+/// timeframe must be canonical, >=4h, and successfully fetched; levels must be
+/// finite positive with correct ordering and reward >= risk. Invalid
+/// directional plans become WAIT with levels/timeframe/outcome None. When no
+/// available timeframe is >=4h, direction is forced to NONE with confidence 0
+/// and all plans become WAIT.
+/// Fail-closed conviction: a parsed top-level LONG/SHORT is retained only when
+/// at least 2 normalized valid directional plans match the top direction
+/// (each with available canonical timeframe >=4h and valid levels/RR).
+/// Empty, fewer than 2, WAIT-normalized, or mismatched plans force top
+/// direction NONE with confidence 0 and normalize all plans to WAIT with null
+/// levels/timeframe/outcome.
+fn parse_alert_json(text: &str, available_timeframes: &[Timeframe]) -> AnalysisResult {
     // Inline helper: check if trade plans are aligned with declared direction.
     // NONE direction is always aligned. LONG/SHORT requires ≥2 matching plans.
+    // Empty plans never satisfy conviction for LONG/SHORT.
     fn check_conviction(
         direction: algotrap::prelude::Direction,
         plans: &[crate::memory::TradePlan],
@@ -282,7 +362,7 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
             return true; // NONE is inherently neutral
         }
         if plans.is_empty() {
-            return true; // No plans to check against
+            return false; // No plans cannot support LONG/SHORT conviction
         }
         let matching = plans
             .iter()
@@ -302,34 +382,203 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
             .unwrap_or_default()
     }
 
+    // Inline helper: parse a canonical timeframe string; non-canonical => None.
+    fn parse_plan_timeframe(raw: Option<&str>) -> Option<Timeframe> {
+        raw?.parse::<Timeframe>().ok()
+    }
+
+    // Inline helper: a plan timeframe qualifies only when >=4h and fetched.
+    fn is_qualifying_timeframe(tf: Timeframe, available: &[Timeframe]) -> bool {
+        tf.weight() >= Timeframe::H4.weight() && available.contains(&tf)
+    }
+
+    // Inline helper: normalize one raw plan into a validated TradePlan.
+    #[allow(clippy::too_many_arguments)]
+    fn normalize_plan(
+        label: String,
+        direction_raw: &str,
+        entry: Option<f64>,
+        target: Option<f64>,
+        stop: Option<f64>,
+        timeframe: Option<Timeframe>,
+        rationale: String,
+        available: &[Timeframe],
+    ) -> crate::memory::TradePlan {
+        let parsed_direction = direction_raw
+            .parse::<algotrap::prelude::Direction>()
+            .unwrap_or_default();
+        match parsed_direction {
+            algotrap::prelude::Direction::Long | algotrap::prelude::Direction::Short => {
+                let is_long = parsed_direction == algotrap::prelude::Direction::Long;
+                let levels_valid = [entry, target, stop]
+                    .iter()
+                    .all(|v| matches!(v, Some(x) if x.is_finite() && *x > 0.0));
+                let timeframe_valid =
+                    timeframe.is_some_and(|tf| is_qualifying_timeframe(tf, available));
+                let ordering_valid = match (entry, target, stop) {
+                    (Some(e), Some(t), Some(s)) if levels_valid => {
+                        if is_long {
+                            s < e && e < t
+                        } else {
+                            t < e && e < s
+                        }
+                    }
+                    _ => false,
+                };
+                let rr_valid = match (entry, target, stop) {
+                    (Some(e), Some(t), Some(s)) if ordering_valid => {
+                        if is_long {
+                            (t - e) >= (e - s)
+                        } else {
+                            (e - t) >= (s - e)
+                        }
+                    }
+                    _ => false,
+                };
+                if timeframe_valid && levels_valid && ordering_valid && rr_valid {
+                    crate::memory::TradePlan {
+                        label,
+                        direction: parsed_direction.to_string(),
+                        entry,
+                        target,
+                        stop,
+                        rationale,
+                        timeframe,
+                        outcome: None,
+                    }
+                } else {
+                    crate::memory::TradePlan {
+                        label,
+                        direction: "WAIT".to_string(),
+                        entry: None,
+                        target: None,
+                        stop: None,
+                        rationale,
+                        timeframe: None,
+                        outcome: None,
+                    }
+                }
+            }
+            _ => {
+                let kept_timeframe = timeframe.filter(|tf| is_qualifying_timeframe(*tf, available));
+                crate::memory::TradePlan {
+                    label,
+                    direction: "WAIT".to_string(),
+                    entry,
+                    target,
+                    stop,
+                    rationale,
+                    timeframe: kept_timeframe,
+                    outcome: None,
+                }
+            }
+        }
+    }
+
     // Try to find a JSON block in the text
     if let Some(start) = text.find('{')
         && let Some(end) = text.rfind('}')
     {
         let json_str = &text[start..=end];
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-            let confidence = v["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
-            let direction = parse_direction(v["direction"].as_str().unwrap_or("NONE"));
+            let mut confidence = v["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
+            let mut direction = parse_direction(v["direction"].as_str().unwrap_or("NONE"));
             let summary = v["summary"].as_str().unwrap_or(text).to_string();
 
-            // Parse trade plans if present
-            let trade_plans = v["trade_plans"]
+            let mut trade_plans = v["trade_plans"]
                 .as_array()
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|plan| {
-                            Some(crate::memory::TradePlan {
-                                label: plan["label"].as_str()?.to_string(),
-                                direction: plan["direction"].as_str().unwrap_or("WAIT").to_string(),
-                                entry: plan["entry"].as_f64(),
-                                target: plan["target"].as_f64(),
-                                stop: plan["stop"].as_f64(),
-                                rationale: plan["rationale"].as_str().unwrap_or("").to_string(),
-                            })
+                            let label = plan["label"].as_str()?.to_string();
+                            let direction_raw = plan["direction"].as_str().unwrap_or("WAIT");
+                            let entry = plan["entry"].as_f64();
+                            let target = plan["target"].as_f64();
+                            let stop = plan["stop"].as_f64();
+                            let timeframe = parse_plan_timeframe(plan["timeframe"].as_str());
+                            let rationale = plan["rationale"].as_str().unwrap_or("").to_string();
+                            Some(normalize_plan(
+                                label,
+                                direction_raw,
+                                entry,
+                                target,
+                                stop,
+                                timeframe,
+                                rationale,
+                                available_timeframes,
+                            ))
                         })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+
+            // If no successfully fetched timeframe is >=4h, no directional
+            // result is notification-capable: force NONE/0 with all-WAIT plans.
+            let has_eligible_timeframe = available_timeframes
+                .iter()
+                .any(|tf| tf.weight() >= Timeframe::H4.weight());
+            if !has_eligible_timeframe {
+                direction = algotrap::prelude::Direction::None;
+                confidence = 0.0;
+                trade_plans = trade_plans
+                    .into_iter()
+                    .map(|p| crate::memory::TradePlan {
+                        label: p.label,
+                        direction: "WAIT".to_string(),
+                        entry: None,
+                        target: None,
+                        stop: None,
+                        rationale: p.rationale,
+                        timeframe: None,
+                        outcome: None,
+                    })
+                    .collect();
+            }
+
+            // Fail-closed conviction: LONG/SHORT requires >=2 normalized valid
+            // directional plans matching the top direction. Normalized survivors
+            // already guarantee available canonical timeframe >=4h plus valid
+            // levels/RR, so counting direction matches enforces the full rule.
+            // Empty, fewer than 2, WAIT-normalized, or mismatched plans force
+            // NONE/0 with all plans normalized to WAIT with null
+            // levels/timeframe/outcome (fail-closed, prefer null over keeping a
+            // qualifying WAIT timeframe).
+            if direction.is_actionable() {
+                let matching = trade_plans
+                    .iter()
+                    .filter(|p| {
+                        p.direction
+                            .parse::<algotrap::prelude::Direction>()
+                            .map(|d| d == direction)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                if matching < 2 {
+                    let plan_dirs: Vec<&str> =
+                        trade_plans.iter().map(|p| p.direction.as_str()).collect();
+                    warn!(
+                        direction = %direction,
+                        plans = ?plan_dirs,
+                        matching,
+                        "Fail-closed conviction: fewer than 2 valid directional plans match top direction — forcing NONE/0"
+                    );
+                    direction = algotrap::prelude::Direction::None;
+                    confidence = 0.0;
+                    trade_plans = trade_plans
+                        .into_iter()
+                        .map(|p| crate::memory::TradePlan {
+                            label: p.label,
+                            direction: "WAIT".to_string(),
+                            entry: None,
+                            target: None,
+                            stop: None,
+                            rationale: p.rationale,
+                            timeframe: None,
+                            outcome: None,
+                        })
+                        .collect();
+                }
+            }
 
             // Parse proposed weights (if present)
             let proposed_weights = v["weights"].as_object().map(|obj| {
@@ -347,12 +596,19 @@ fn parse_alert_json(text: &str) -> AnalysisResult {
                 warn!("LLM response missing 'significance_threshold' — retaining previous value");
             }
 
-            // Parse indicator params (if present — absent = no-op)
-            let proposed_indicator_params = v["indicator_params"].as_object().map(|obj| {
-                obj.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<HashMap<String, serde_json::Value>>()
-            });
+            // Parse indicator params (if present — absent or malformed = no-op)
+            let proposed_indicator_params = match v.get("indicator_params") {
+                None => None,
+                Some(value) => {
+                    match serde_json::from_value::<Vec<IndicatorProposal>>(value.clone()) {
+                        Ok(proposals) => Some(proposals),
+                        Err(error) => {
+                            warn!(error = %error, "Malformed indicator_params proposals — ignoring indicator tuning");
+                            None
+                        }
+                    }
+                }
+            };
 
             // Conviction check: do trade plans align with declared direction?
             let conviction_aligned = check_conviction(direction, &trade_plans);
@@ -524,10 +780,82 @@ fn format_timeframes(timeframes: &[Timeframe]) -> String {
 }
 
 // ─── Memory Context Formatting ───────────────────────────────────────────────
+//
+// U5: plan outcome status is display-only. Every directional (LONG/SHORT) plan
+// token includes its exact timeframe (`@4h`, `@n/a` when missing); settled
+// plans show `take_profit|stop_loss|ambiguous`, unresolved show `pending`.
+// Numeric accuracy always derives from `Prediction.outcome_score` only and
+// ambiguous-only outcomes remain excluded from scoring.
+
+/// True for actionable directional plans (LONG/SHORT). WAIT/NONE never settle.
+fn is_directional_trade_plan(plan: &crate::memory::TradePlan) -> bool {
+    plan.direction
+        .parse::<algotrap::prelude::Direction>()
+        .is_ok_and(|d| d.is_actionable())
+}
+
+/// Snake-case settlement status, or `pending` when unresolved.
+fn trade_plan_status_str(plan: &crate::memory::TradePlan) -> &'static str {
+    match plan.outcome.as_ref().map(|o| o.kind) {
+        Some(crate::memory::TradePlanOutcomeKind::TakeProfit) => "take_profit",
+        Some(crate::memory::TradePlanOutcomeKind::StopLoss) => "stop_loss",
+        Some(crate::memory::TradePlanOutcomeKind::Ambiguous) => "ambiguous",
+        None => "pending",
+    }
+}
+
+/// Compact per-plan token with direction, exact timeframe, and status.
+///
+/// Directional: `A:LONG@4h:pending` (`@n/a` when missing). WAIT with timeframe:
+/// `C:WAIT@4h:pending`; without: `C:WAIT:pending`.
+fn format_trade_plan_token(plan: &crate::memory::TradePlan) -> String {
+    let status = trade_plan_status_str(plan);
+    match plan.timeframe {
+        Some(tf) => format!("{}:{}@{tf}:{status}", plan.label, plan.direction),
+        None if is_directional_trade_plan(plan) => {
+            format!("{}:{}@n/a:{status}", plan.label, plan.direction)
+        }
+        None => format!("{}:{}:{status}", plan.label, plan.direction),
+    }
+}
+
+/// Count plan outcomes: (take_profit, stop_loss, ambiguous, pending).
+fn count_trade_plan_outcomes(plans: &[crate::memory::TradePlan]) -> (usize, usize, usize, usize) {
+    let mut tp = 0usize;
+    let mut sl = 0usize;
+    let mut amb = 0usize;
+    let mut pending = 0usize;
+    for plan in plans {
+        match plan.outcome.as_ref().map(|o| o.kind) {
+            Some(crate::memory::TradePlanOutcomeKind::TakeProfit) => tp += 1,
+            Some(crate::memory::TradePlanOutcomeKind::StopLoss) => sl += 1,
+            Some(crate::memory::TradePlanOutcomeKind::Ambiguous) => amb += 1,
+            None => pending += 1,
+        }
+    }
+    (tp, sl, amb, pending)
+}
+
+fn all_trade_plans(mem: &TickerMemory) -> Vec<crate::memory::TradePlan> {
+    mem.predictions
+        .iter()
+        .flat_map(|p| p.trade_plans.iter().cloned())
+        .collect()
+}
+
+/// Display-only plan tally. Ambiguous is always marked excluded; numeric
+/// accuracy still uses `Prediction.outcome_score` only.
+fn format_trade_plan_tally(plans: &[crate::memory::TradePlan]) -> String {
+    if plans.is_empty() {
+        return "No trade plans recorded yet.".to_string();
+    }
+    let (tp, sl, amb, pending) = count_trade_plan_outcomes(plans);
+    format!("{tp} take_profit, {sl} stop_loss, {amb} ambiguous (excluded), {pending} pending")
+}
 
 /// Format memory into a compact text block for prompt injection (≤1600 chars).
 ///
-/// Each prediction is one line: `[timestamp] conf=X dir=DIR outcome=SCORE dir=✓|✗|pending`
+/// Each prediction is one line: `[timestamp] conf=X dir=DIR outcome=SCORE dir=✓|✗|pending plans=...`
 fn format_memory_context(mem: &TickerMemory) -> String {
     if mem.predictions.is_empty() {
         return "No previous predictions. This is a cold start.".to_string();
@@ -543,8 +871,18 @@ fn format_memory_context(mem: &TickerMemory) -> String {
             }
             None => "outcome=pending".to_string(),
         };
+        let plans = if pred.trade_plans.is_empty() {
+            "plans=none".to_string()
+        } else {
+            let tokens: Vec<String> = pred
+                .trade_plans
+                .iter()
+                .map(format_trade_plan_token)
+                .collect();
+            format!("plans={}", tokens.join(","))
+        };
         lines.push(format!(
-            "[{ts}] conf={:.0} dir={} {outcome}",
+            "[{ts}] conf={:.0} dir={} {outcome} {plans}",
             pred.confidence, pred.direction
         ));
     }
@@ -578,7 +916,10 @@ fn format_weights_context(mem: &TickerMemory) -> String {
     lines.join("\n")
 }
 
-/// Format outcome summary — direction accuracy + composite score.
+/// Format outcome summary — direction accuracy + composite score + plan tally.
+///
+/// Numeric accuracy uses `Prediction.outcome_score` only; the plan tally is
+/// display-only and ambiguous outcomes remain excluded from scoring.
 fn format_outcome_summary(mem: &TickerMemory) -> String {
     let total = mem.predictions.len();
     if total == 0 {
@@ -587,9 +928,15 @@ fn format_outcome_summary(mem: &TickerMemory) -> String {
 
     let (correct, scored_count, accuracy) =
         crate::scoring::compute_direction_accuracy(&mem.predictions);
+    let plans = all_trade_plans(mem);
+    let tally = format_trade_plan_tally(&plans);
 
     if scored_count == 0 {
-        return format!("Your past {total} predictions have not been validated yet.");
+        return format!(
+            "Your past {total} predictions have not been validated yet. \
+             Plans: {tally}. \
+             Accuracy uses Prediction.outcome_score only."
+        );
     }
 
     let scored: Vec<f64> = mem
@@ -603,6 +950,8 @@ fn format_outcome_summary(mem: &TickerMemory) -> String {
         "Your past {total} predictions: {scored_count} validated. \
          Direction: {correct}/{scored_count} correct ({accuracy:.0}%). \
          Composite avg: {avg_composite:.2}. \
+         Plans: {tally}. \
+         Accuracy uses Prediction.outcome_score only; ambiguous plans excluded. \
          High accuracy means your direction calls are reliable. \
          Low accuracy suggests re-evaluating which indicators carry the signal."
     )
@@ -797,6 +1146,14 @@ fn format_memory_patterns(mem: &TickerMemory) -> String {
         parts.push(format!(
             "Validated accuracy: {correct}/{scored_count} ({accuracy:.0}%)."
         ));
+        // Display-only plan tally; numeric accuracy still uses outcome_score only.
+        let plans = all_trade_plans(mem);
+        if !plans.is_empty() {
+            parts.push(format!(
+                "Plan outcomes: {}. Accuracy uses Prediction.outcome_score only.",
+                format_trade_plan_tally(&plans)
+            ));
+        }
 
         // Check for low accuracy streak
         let low_streak = crate::scoring::is_low_accuracy_streak(&mem.predictions, 5, 0.4);
@@ -844,6 +1201,13 @@ fn format_memory_patterns(mem: &TickerMemory) -> String {
         parts.push(format!(
             "{total} predictions recorded but none validated yet."
         ));
+        let plans = all_trade_plans(mem);
+        if !plans.is_empty() {
+            parts.push(format!(
+                "Plan outcomes: {}. Accuracy uses Prediction.outcome_score only.",
+                format_trade_plan_tally(&plans)
+            ));
+        }
     }
 
     parts.join(" ")
@@ -874,40 +1238,67 @@ fn format_indicator_config_context(mem: &TickerMemory, low_accuracy_streak: bool
     let ic = &mem.indicator_config;
     let mut lines = vec!["Current indicator settings:".to_string()];
 
-    // Sort indicator names for stable output
-    let mut names: Vec<&String> = ic.indicators.keys().collect();
-    names.sort();
-
-    for name in names {
-        let params = &ic.indicators[name];
-        let status = if params.active { "✅" } else { "❌" };
-        let mut parts = vec![format!("  {status} {name}")];
-
-        if let Some(ref spec) = params.period {
-            parts.push(format!(
-                "period={:.0} [{:.0}-{:.0}]",
-                spec.value, spec.min, spec.max
-            ));
-        }
-        if let Some(ref spec) = params.smooth {
-            parts.push(format!(
-                "smooth={:.0} [{:.0}-{:.0}]",
-                spec.value, spec.min, spec.max
-            ));
-        }
-        lines.push(parts.join(" "));
+    lines.push("Periods:".to_string());
+    for name in PeriodName::ALL {
+        let spec = name.spec(&ic.periods);
+        lines.push(format!(
+            "  {}: {:.0} [{:.0}-{:.0}]",
+            name.persisted_name(),
+            spec.value,
+            spec.min,
+            spec.max
+        ));
     }
+
+    lines.push("Outputs:".to_string());
+    for name in TelegramOutputName::ALL {
+        let state = name.state(&ic.outputs);
+        let status = if state.active { "✅" } else { "❌" };
+        lines.push(format!(
+            "  {status} {} inactive_cycles={}",
+            name.persisted_name(),
+            state.inactive_cycles
+        ));
+    }
+
+    lines.push("Gap zones (per-timeframe recent gap-zone budget, 1..32):".to_string());
+    lines.push(format!(
+        "  max_zones: {:.0} [{:.0}-{:.0}]",
+        ic.gap_zones.max_zones.value, ic.gap_zones.max_zones.min, ic.gap_zones.max_zones.max
+    ));
+    lines.push(format!(
+        "  body_ratio_threshold: {:.3} [{:.1}-{:.1}] (candidate qualification threshold)",
+        ic.gap_zones.body_ratio_threshold.value,
+        ic.gap_zones.body_ratio_threshold.min,
+        ic.gap_zones.body_ratio_threshold.max
+    ));
+    lines.push(format!(
+        "  atr_band_multiplier: {:.3} [{:.1}-{:.1}] (ATR band width multiplier)",
+        ic.gap_zones.atr_band_multiplier.value,
+        ic.gap_zones.atr_band_multiplier.min,
+        ic.gap_zones.atr_band_multiplier.max
+    ));
+    lines.push(format!(
+        "  atr_gap_multiplier: {:.3} [{:.1}-{:.1}] (ATR gap qualification multiplier)",
+        ic.gap_zones.atr_gap_multiplier.value,
+        ic.gap_zones.atr_gap_multiplier.min,
+        ic.gap_zones.atr_gap_multiplier.max
+    ));
+    lines.push(
+        "Proposal schema: indicator_params must be an array of typed objects with target=period|output|gap_zones; gap_zones accepts optional max_zones, body_ratio_threshold, atr_band_multiplier and atr_gap_multiplier."
+            .to_string(),
+    );
 
     let dormant = ic.dormant_roster();
     if !dormant.is_empty() {
-        lines.push("\nDormant indicators (consider reactivating):".to_string());
+        lines.push("\nDormant outputs (consider reactivating):".to_string());
         for (name, cycles) in &dormant {
             lines.push(format!("  {name}: inactive for {cycles} cycles"));
         }
 
         // Scenario 13: regime change nudge when accuracy is critically low
         if low_accuracy_streak {
-            lines.push("Your accuracy has dropped. Consider re-enabling dormant indicators to see if they carry signal in the current regime.".to_string());
+            lines.push("Your accuracy has dropped. Consider re-enabling dormant outputs to see if they carry signal in the current regime.".to_string());
         }
     }
 
@@ -1199,11 +1590,13 @@ mod tests {
 
     #[test]
     fn test_parse_alert_json_valid() {
+        // Fail-closed conviction: LONG without >=2 valid plans forces NONE/0.
         let text =
             r#"{"confidence": 85.5, "direction": "LONG", "summary": "Strong bullish setup"}"#;
-        let result = parse_alert_json(text);
-        assert!((result.confidence - 85.5).abs() < f64::EPSILON);
-        assert_eq!(result.direction, algotrap::prelude::Direction::Long);
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
         assert_eq!(result.text, "Strong bullish setup");
     }
 
@@ -1212,7 +1605,8 @@ mod tests {
         let text = r#"Here is my analysis:
 {"confidence": 42, "direction": "NONE", "summary": "No clear setup at this time."}
 That's all."#;
-        let result = parse_alert_json(text);
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
         assert!((result.confidence - 42.0).abs() < f64::EPSILON);
         assert_eq!(result.direction, algotrap::prelude::Direction::None);
         assert_eq!(result.text, "No clear setup at this time.");
@@ -1221,7 +1615,8 @@ That's all."#;
     #[test]
     fn test_parse_alert_json_missing_fields() {
         let text = r#"{"confidence": 75}"#;
-        let result = parse_alert_json(text);
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
         assert!((result.confidence - 75.0).abs() < f64::EPSILON);
         assert_eq!(result.direction, algotrap::prelude::Direction::None); // default
     }
@@ -1229,7 +1624,8 @@ That's all."#;
     #[test]
     fn test_parse_alert_json_invalid_falls_back() {
         let text = "This is not JSON at all";
-        let result = parse_alert_json(text);
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
         assert!((result.confidence - 0.0).abs() < f64::EPSILON);
         assert_eq!(result.direction, algotrap::prelude::Direction::None);
         assert_eq!(result.text, text);
@@ -1237,22 +1633,27 @@ That's all."#;
 
     #[test]
     fn test_parse_alert_json_confidence_clamped() {
+        // Clamped 150->100, then fail-closed conviction (no plans) forces 0/NONE.
         let text = r#"{"confidence": 150, "direction": "SHORT", "summary": "Way too confident"}"#;
-        let result = parse_alert_json(text);
-        assert!((result.confidence - 100.0).abs() < f64::EPSILON);
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
     }
 
     #[test]
     fn test_parse_alert_json_negative_confidence_clamped() {
         let text = r#"{"confidence": -20, "direction": "LONG", "summary": "Negative"}"#;
-        let result = parse_alert_json(text);
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
         assert!((result.confidence - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_parse_analysis_result_full_mode() {
         let text = "Full analysis here".to_string();
-        let result = parse_analysis_result(text.clone(), AnalysisMode::FullAnalysis);
+        let available: [Timeframe; 0] = [];
+        let result = parse_analysis_result(text.clone(), AnalysisMode::FullAnalysis, &available);
         assert_eq!(result.text, text);
         assert!((result.confidence - 100.0).abs() < f64::EPSILON);
         assert_eq!(result.direction, algotrap::prelude::Direction::None);
@@ -1260,19 +1661,125 @@ That's all."#;
 
     #[test]
     fn test_parse_analysis_result_alert_mode() {
+        // Fail-closed conviction: SHORT without plans forces NONE/0.
         let text = r#"{"confidence": 90, "direction": "SHORT", "summary": "Bearish reversal"}"#
             .to_string();
-        let result = parse_analysis_result(text, AnalysisMode::AlertScan);
-        assert!((result.confidence - 90.0).abs() < f64::EPSILON);
-        assert_eq!(result.direction, algotrap::prelude::Direction::Short);
+        let available = [Timeframe::H4];
+        let result = parse_analysis_result(text, AnalysisMode::AlertScan, &available);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
         assert_eq!(result.text, "Bearish reversal");
     }
 
     #[test]
     fn test_parse_alert_json_direction_case_insensitive() {
-        let text = r#"{"confidence": 80, "direction": "long", "summary": "Go long"}"#;
-        let result = parse_alert_json(text);
+        // Case-insensitive "long" retained only with >=2 valid matching plans.
+        let text = r#"{"confidence": 80, "direction": "long", "summary": "Go long", "trade_plans": [
+            {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "a"},
+            {"label": "B", "direction": "LONG", "entry": 100.0, "target": 112.0, "stop": 96.0, "timeframe": "1d", "rationale": "b"}
+        ]}"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
         assert_eq!(result.direction, algotrap::prelude::Direction::Long);
+    }
+
+    #[test]
+    fn test_parse_alert_json_typed_indicator_proposals() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Go long",
+            "indicator_params": [
+                {"target": "period", "name": "rsi", "value": 18.0},
+                {"target": "output", "name": "rssi", "active": false},
+                {"target": "gap_zones", "max_zones": 20.0}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(
+            result.proposed_indicator_params,
+            Some(vec![
+                IndicatorProposal::Period {
+                    name: PeriodName::Rsi,
+                    value: 18.0,
+                },
+                IndicatorProposal::Output {
+                    name: TelegramOutputName::Rssi,
+                    active: false,
+                },
+                IndicatorProposal::GapZones {
+                    max_zones: Some(20.0),
+                    body_ratio_threshold: None,
+                    atr_band_multiplier: None,
+                    atr_gap_multiplier: None,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_alert_json_gap_zones_body_ratio_threshold_proposal() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "NONE",
+            "summary": "Tune gap threshold",
+            "indicator_params": [
+                {"target": "gap_zones", "body_ratio_threshold": 0.7}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(
+            result.proposed_indicator_params,
+            Some(vec![IndicatorProposal::GapZones {
+                max_zones: None,
+                body_ratio_threshold: Some(0.7),
+                atr_band_multiplier: None,
+                atr_gap_multiplier: None,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_parse_alert_json_gap_zones_both_fields_proposal() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "NONE",
+            "summary": "Tune both gap fields",
+            "indicator_params": [
+                {"target": "gap_zones", "max_zones": 20.0, "body_ratio_threshold": 0.7}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(
+            result.proposed_indicator_params,
+            Some(vec![IndicatorProposal::GapZones {
+                max_zones: Some(20.0),
+                body_ratio_threshold: Some(0.7),
+                atr_band_multiplier: None,
+                atr_gap_multiplier: None,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_parse_alert_json_malformed_indicator_proposals_fail_safe() {
+        // Fail-closed conviction forces NONE/0; indicator tuning still ignored safely.
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Go long",
+            "indicator_params": [
+                {"target": "period", "name": "not_a_period", "value": 18.0}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
+        assert_eq!(result.proposed_indicator_params, None);
     }
 
     #[test]
@@ -1565,5 +2072,816 @@ That's all."#;
         // Truncation is by char count; byte length may exceed 1600 due to Unicode markers
         assert!(result.chars().count() <= 1600);
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_format_memory_context_handles_unavailable_snapshot_values() {
+        use chrono::Utc;
+
+        let mut mem = TickerMemory::new("BTC-USDT");
+        mem.predictions.push(crate::memory::Prediction {
+            timestamp: Utc::now(),
+            confidence: 62.0,
+            direction: algotrap::prelude::Direction::Long,
+            summary: "snapshot unavailable".into(),
+            trade_plans: vec![],
+            indicators: HashMap::from([("rssi".into(), None), ("close".into(), Some(100.0))]),
+            outcome_score: None,
+        });
+
+        let result = format_memory_context(&mem);
+        assert!(result.contains("outcome=pending"));
+    }
+
+    #[test]
+    fn test_format_indicator_config_context_uses_typed_sections() {
+        let mut mem = TickerMemory::new("BTC-USDT");
+        mem.indicator_config.periods.rsi.value = 18.0;
+        mem.indicator_config.outputs.rssi.active = false;
+        mem.indicator_config.outputs.rssi.inactive_cycles = 3;
+        mem.indicator_config.gap_zones.max_zones.value = 20.0;
+        mem.indicator_config.gap_zones.body_ratio_threshold.value = 0.7;
+        mem.indicator_config.gap_zones.atr_band_multiplier.value = 2.0;
+        mem.indicator_config.gap_zones.atr_gap_multiplier.value = 1.5;
+
+        let result = format_indicator_config_context(&mem, true);
+
+        assert!(result.contains("Periods:"));
+        assert!(result.contains("rsi: 18"));
+        assert!(result.contains("Outputs:"));
+        assert!(result.contains("❌ rssi inactive_cycles=3"));
+        assert!(result.contains("Gap zones (per-timeframe recent gap-zone budget, 1..32):"));
+        assert!(result.contains("max_zones: 20"));
+        assert!(result.contains("body_ratio_threshold: 0.700 [0.0-1.0]"));
+        assert!(result.contains("candidate qualification threshold"));
+        assert!(result.contains("atr_band_multiplier: 2.000 [0.5-5.0]"));
+        assert!(result.contains("ATR band width multiplier"));
+        assert!(result.contains("atr_gap_multiplier: 1.500 [0.5-5.0]"));
+        assert!(result.contains("ATR gap qualification multiplier"));
+        assert!(!result.contains("min_trust"));
+        assert!(result.contains("target=period|output|gap_zones"));
+        assert!(result.contains("body_ratio_threshold"));
+        assert!(result.contains("atr_band_multiplier"));
+        assert!(result.contains("atr_gap_multiplier"));
+        assert!(!result.contains("Current indicator settings:\n  ✅ rssi period="));
+    }
+
+    #[test]
+    fn test_parse_alert_json_gap_zones_atr_multipliers_proposal() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "NONE",
+            "summary": "Tune ATR multipliers",
+            "indicator_params": [
+                {"target": "gap_zones", "atr_band_multiplier": 2.0, "atr_gap_multiplier": 1.5}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(
+            result.proposed_indicator_params,
+            Some(vec![IndicatorProposal::GapZones {
+                max_zones: None,
+                body_ratio_threshold: None,
+                atr_band_multiplier: Some(2.0),
+                atr_gap_multiplier: Some(1.5),
+            }])
+        );
+    }
+
+    #[test]
+    fn test_parse_alert_json_gap_zones_all_fields_proposal() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "NONE",
+            "summary": "Tune all gap fields",
+            "indicator_params": [
+                {"target": "gap_zones", "max_zones": 20.0, "body_ratio_threshold": 0.7, "atr_band_multiplier": 2.0, "atr_gap_multiplier": 1.5}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(
+            result.proposed_indicator_params,
+            Some(vec![IndicatorProposal::GapZones {
+                max_zones: Some(20.0),
+                body_ratio_threshold: Some(0.7),
+                atr_band_multiplier: Some(2.0),
+                atr_gap_multiplier: Some(1.5),
+            }])
+        );
+    }
+
+    // ─── Empty-Response Helper Tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_is_empty_final_response_none() {
+        assert!(is_empty_final_response(None));
+    }
+
+    #[test]
+    fn test_is_empty_final_response_empty_string() {
+        assert!(is_empty_final_response(Some("")));
+    }
+
+    #[test]
+    fn test_is_empty_final_response_whitespace_only() {
+        assert!(is_empty_final_response(Some("   \n\t  ")));
+    }
+
+    #[test]
+    fn test_is_empty_final_response_non_empty() {
+        assert!(!is_empty_final_response(Some("{\"confidence\": 80}")));
+    }
+
+    #[test]
+    fn test_is_empty_final_response_non_empty_prose() {
+        assert!(!is_empty_final_response(Some("Analysis complete.")));
+    }
+
+    #[test]
+    fn test_empty_response_correction_message_alert_scan_contains_json_schema() {
+        let msg = empty_response_correction_message(AnalysisMode::AlertScan);
+        assert!(msg.contains("confidence"));
+        assert!(msg.contains("direction"));
+        assert!(msg.contains("summary"));
+        assert!(msg.contains("trade_plans"));
+        assert!(msg.contains("weights"));
+        assert!(msg.contains("significance_threshold"));
+        // Must not ask for tool calls
+        assert!(!msg.contains("tool"));
+    }
+
+    #[test]
+    fn test_empty_response_correction_message_full_analysis_is_brief() {
+        let msg = empty_response_correction_message(AnalysisMode::FullAnalysis);
+        assert!(!msg.is_empty());
+        // Full-analysis correction should not include JSON schema
+        assert!(!msg.contains("confidence"));
+    }
+
+    /// Demonstrates that repeated empty responses exhaust retry budget and
+    /// fall through to the fail-safe confidence=0 path via parse_alert_json.
+    #[test]
+    fn test_empty_response_fallback_after_retries_yields_confidence_zero() {
+        // Simulate: retry budget exhausted — content is still empty
+        let content: Option<&str> = Some("");
+        let max_retries: u8 = 2;
+        let current_retries: u8 = max_retries; // budget spent
+
+        // Should NOT retry again
+        let should_retry = is_empty_final_response(content) && current_retries < max_retries;
+        assert!(!should_retry, "must not retry when budget exhausted");
+
+        // The fall-through path calls parse_analysis_result("", AlertScan)
+        // which delegates to parse_alert_json("", available) → confidence=0
+        let available = [Timeframe::H4];
+        let result = parse_alert_json("", &available);
+        assert!(
+            (result.confidence - 0.0).abs() < f64::EPSILON,
+            "empty fallback must yield confidence=0"
+        );
+        assert_eq!(
+            result.direction,
+            algotrap::prelude::Direction::None,
+            "empty fallback must yield direction=None"
+        );
+    }
+
+    /// Demonstrates that a non-empty response is never retried, even on first occurrence.
+    #[test]
+    fn test_non_empty_response_never_retried() {
+        let content: Option<&str> =
+            Some(r#"{"confidence": 75, "direction": "LONG", "summary": "ok"}"#);
+        let should_retry = is_empty_final_response(content) && 0 < 2u8;
+        assert!(!should_retry, "non-empty response must never trigger retry");
+    }
+
+    // ─── U2 Timeframe Normalization Tests ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_alert_json_valid_long_4h_plan_preserved() {
+        // Fail-closed conviction requires >=2 matching valid plans; both preserved.
+        let text = r#"{
+            "confidence": 82,
+            "direction": "LONG",
+            "summary": "4h breakout",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "breakout"},
+                {"label": "B", "direction": "LONG", "entry": 100.0, "target": 112.0, "stop": 96.0, "timeframe": "1d", "rationale": "trend"}
+            ]
+        }"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::Long);
+        assert!((result.confidence - 82.0).abs() < f64::EPSILON);
+        assert_eq!(result.trade_plans.len(), 2);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "LONG");
+        assert_eq!(plan.entry, Some(100.0));
+        assert_eq!(plan.target, Some(110.0));
+        assert_eq!(plan.stop, Some(95.0));
+        assert_eq!(plan.timeframe, Some(Timeframe::H4));
+        assert_eq!(plan.outcome, None);
+        let plan_b = &result.trade_plans[1];
+        assert_eq!(plan_b.direction, "LONG");
+        assert_eq!(plan_b.timeframe, Some(Timeframe::D1));
+    }
+
+    #[test]
+    fn test_parse_alert_json_valid_short_1d_plan_preserved() {
+        // Fail-closed conviction requires >=2 matching valid plans; both preserved.
+        let text = r#"{
+            "confidence": 77,
+            "direction": "SHORT",
+            "summary": "Daily rejection",
+            "trade_plans": [
+                {"label": "A", "direction": "SHORT", "entry": 100.0, "target": 90.0, "stop": 105.0, "timeframe": "1d", "rationale": "rejection"},
+                {"label": "B", "direction": "SHORT", "entry": 100.0, "target": 92.0, "stop": 104.0, "timeframe": "4h", "rationale": "rejection"}
+            ]
+        }"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::Short);
+        assert_eq!(result.trade_plans.len(), 2);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "SHORT");
+        assert_eq!(plan.timeframe, Some(Timeframe::D1));
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_sub_4h_plan_becomes_wait() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "1h scalp",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "1h", "rationale": "scalp"}
+            ]
+        }"#;
+        let available = [Timeframe::H1, Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.trade_plans.len(), 1);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.entry, None);
+        assert_eq!(plan.target, None);
+        assert_eq!(plan.stop, None);
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_missing_timeframe_becomes_wait() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "No tf",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "rationale": "missing tf"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.trade_plans.len(), 1);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.entry, None);
+        assert_eq!(plan.target, None);
+        assert_eq!(plan.stop, None);
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_unavailable_timeframe_becomes_wait() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Unavailable tf",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "not fetched"}
+            ]
+        }"#;
+        // 4h not in available (only D1 fetched) → unavailable.
+        let available = [Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.trade_plans.len(), 1);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_invalid_ordering_becomes_wait() {
+        // LONG requires stop < entry < target; here stop > entry.
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Bad ordering",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 105.0, "timeframe": "4h", "rationale": "bad"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.entry, None);
+        assert_eq!(plan.target, None);
+        assert_eq!(plan.stop, None);
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_short_invalid_ordering_becomes_wait() {
+        // SHORT requires target < entry < stop; here entry < target.
+        let text = r#"{
+            "confidence": 80,
+            "direction": "SHORT",
+            "summary": "Bad short ordering",
+            "trade_plans": [
+                {"label": "A", "direction": "SHORT", "entry": 110.0, "target": 115.0, "stop": 120.0, "timeframe": "4h", "rationale": "bad"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_sub_1r_becomes_wait() {
+        // LONG reward (2) < risk (5) → sub-1:1.
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Poor RR",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 102.0, "stop": 95.0, "timeframe": "4h", "rationale": "poor rr"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.entry, None);
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_noncanonical_timeframe_becomes_wait() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Bad tf string",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4H", "rationale": "noncanonical"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_nonpositive_levels_become_wait() {
+        let text = r#"{
+            "confidence": 80,
+            "direction": "LONG",
+            "summary": "Zero entry",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 0.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "zero"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.entry, None);
+        assert_eq!(plan.timeframe, None);
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_alert_json_no_eligible_timeframe_forces_wait_none_zero() {
+        let text = r#"{
+            "confidence": 85,
+            "direction": "LONG",
+            "summary": "Should be forced",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "valid but no eligible fetch"},
+                {"label": "B", "direction": "WAIT", "entry": null, "target": null, "stop": null, "timeframe": null, "rationale": "wait"}
+            ]
+        }"#;
+        let available = [Timeframe::M15, Timeframe::H1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.trade_plans.len(), 2);
+        for plan in &result.trade_plans {
+            assert_eq!(plan.direction, "WAIT");
+            assert_eq!(plan.entry, None);
+            assert_eq!(plan.target, None);
+            assert_eq!(plan.stop, None);
+            assert_eq!(plan.timeframe, None);
+            assert_eq!(plan.outcome, None);
+        }
+    }
+
+    #[test]
+    fn test_parse_alert_json_wait_keeps_qualifying_timeframe() {
+        let text = r#"{
+            "confidence": 40,
+            "direction": "NONE",
+            "summary": "Wait on 4h",
+            "trade_plans": [
+                {"label": "A", "direction": "WAIT", "entry": null, "target": null, "stop": null, "timeframe": "4h", "rationale": "conflict"}
+            ]
+        }"#;
+        let available = [Timeframe::H4];
+        let result = parse_alert_json(text, &available);
+        let plan = &result.trade_plans[0];
+        assert_eq!(plan.direction, "WAIT");
+        assert_eq!(plan.timeframe, Some(Timeframe::H4));
+        assert_eq!(plan.outcome, None);
+    }
+
+    #[test]
+    fn test_parse_analysis_result_full_mode_ignores_available() {
+        let text = r#"{"confidence": 90, "direction": "LONG", "summary": "Should be ignored"}"#
+            .to_string();
+        let empty: [Timeframe; 0] = [];
+        let result_empty = parse_analysis_result(text.clone(), AnalysisMode::FullAnalysis, &empty);
+        let with_tf = [Timeframe::H1];
+        let result_with = parse_analysis_result(text.clone(), AnalysisMode::FullAnalysis, &with_tf);
+        for result in [&result_empty, &result_with] {
+            assert_eq!(result.text, text);
+            assert!((result.confidence - 100.0).abs() < f64::EPSILON);
+            assert_eq!(result.direction, algotrap::prelude::Direction::None);
+            assert!(result.trade_plans.is_empty());
+        }
+    }
+
+    // ─── U5 plan-outcome presentation ────────────────────────────────────
+
+    fn u5_outcome(kind: crate::memory::TradePlanOutcomeKind) -> crate::memory::TradePlanOutcome {
+        crate::memory::TradePlanOutcome {
+            kind,
+            entry_hit_at: None,
+            resolved_at: chrono::Utc::now(),
+            resolution_timeframe: Timeframe::H4,
+            lowest_reached: 95.0,
+            highest_reached: 110.0,
+        }
+    }
+
+    fn u5_plan_with(
+        label: &str,
+        direction: &str,
+        timeframe: Option<Timeframe>,
+        outcome: Option<crate::memory::TradePlanOutcome>,
+    ) -> crate::memory::TradePlan {
+        crate::memory::TradePlan {
+            label: label.to_string(),
+            direction: direction.to_string(),
+            entry: Some(100.0),
+            target: Some(110.0),
+            stop: Some(95.0),
+            rationale: String::new(),
+            timeframe,
+            outcome,
+        }
+    }
+
+    fn u5_memory_with_plans(plans: Vec<crate::memory::TradePlan>) -> TickerMemory {
+        let mut mem = TickerMemory::new("BTC-USDT");
+        mem.predictions.push(crate::memory::Prediction {
+            timestamp: chrono::Utc::now(),
+            confidence: 60.0,
+            direction: algotrap::prelude::Direction::Long,
+            summary: "u5".into(),
+            trade_plans: plans,
+            indicators: HashMap::new(),
+            outcome_score: None,
+        });
+        mem
+    }
+
+    #[test]
+    fn test_u5_trade_plan_token_directional_includes_timeframe_and_status() {
+        let pending = u5_plan_with("A", "LONG", Some(Timeframe::H4), None);
+        assert_eq!(format_trade_plan_token(&pending), "A:LONG@4h:pending");
+        let settled = u5_plan_with(
+            "B",
+            "SHORT",
+            Some(Timeframe::D1),
+            Some(u5_outcome(crate::memory::TradePlanOutcomeKind::TakeProfit)),
+        );
+        assert_eq!(format_trade_plan_token(&settled), "B:SHORT@1d:take_profit");
+        let missing = u5_plan_with("C", "LONG", None, None);
+        assert_eq!(format_trade_plan_token(&missing), "C:LONG@n/a:pending");
+    }
+
+    #[test]
+    fn test_u5_trade_plan_token_settled_kinds_use_snake_case() {
+        for (kind, expected) in [
+            (
+                crate::memory::TradePlanOutcomeKind::TakeProfit,
+                "take_profit",
+            ),
+            (crate::memory::TradePlanOutcomeKind::StopLoss, "stop_loss"),
+            (crate::memory::TradePlanOutcomeKind::Ambiguous, "ambiguous"),
+        ] {
+            let plan = u5_plan_with("A", "LONG", Some(Timeframe::H4), Some(u5_outcome(kind)));
+            let token = format_trade_plan_token(&plan);
+            assert!(token.ends_with(expected), "expected {expected}: {token}");
+        }
+    }
+
+    #[test]
+    fn test_u5_memory_context_includes_plan_timeframe_and_status() {
+        let mem = u5_memory_with_plans(vec![
+            u5_plan_with("A", "LONG", Some(Timeframe::H4), None),
+            u5_plan_with(
+                "B",
+                "SHORT",
+                Some(Timeframe::D1),
+                Some(u5_outcome(crate::memory::TradePlanOutcomeKind::StopLoss)),
+            ),
+        ]);
+        let ctx = format_memory_context(&mem);
+        assert!(ctx.contains("outcome=pending"), "{ctx}");
+        assert!(ctx.contains("A:LONG@4h:pending"), "{ctx}");
+        assert!(ctx.contains("B:SHORT@1d:stop_loss"), "{ctx}");
+    }
+
+    #[test]
+    fn test_u5_outcome_summary_reports_tally_but_keeps_direction_accuracy() {
+        let mut mem = u5_memory_with_plans(vec![
+            u5_plan_with(
+                "A",
+                "LONG",
+                Some(Timeframe::H4),
+                Some(u5_outcome(crate::memory::TradePlanOutcomeKind::TakeProfit)),
+            ),
+            u5_plan_with("B", "LONG", Some(Timeframe::H4), None),
+        ]);
+        // Numeric accuracy basis: one scored prediction at 0.9.
+        mem.predictions[0].outcome_score = Some(0.9);
+        let summary = format_outcome_summary(&mem);
+        assert!(summary.contains("Direction: 1/1 correct"), "{summary}");
+        assert!(summary.contains("1 take_profit"), "{summary}");
+        assert!(summary.contains("1 pending"), "{summary}");
+        assert!(
+            summary.contains("Prediction.outcome_score only"),
+            "{summary}"
+        );
+        assert!(summary.contains("ambiguous"), "{summary}");
+    }
+
+    #[test]
+    fn test_u5_outcome_summary_ambiguous_only_plans_still_unvalidated() {
+        // Ambiguous-only plans must not fabricate a numeric score: with no
+        // outcome_score the summary stays in the unvalidated branch.
+        let mem = u5_memory_with_plans(vec![u5_plan_with(
+            "A",
+            "LONG",
+            Some(Timeframe::H4),
+            Some(u5_outcome(crate::memory::TradePlanOutcomeKind::Ambiguous)),
+        )]);
+        assert!(
+            crate::scoring::trade_plan_outcome_score(&mem.predictions[0].trade_plans).is_none()
+        );
+        let summary = format_outcome_summary(&mem);
+        assert!(summary.contains("not been validated yet"), "{summary}");
+        assert!(summary.contains("1 ambiguous (excluded)"), "{summary}");
+    }
+
+    #[test]
+    fn test_u5_memory_patterns_reflects_plan_outcomes() {
+        let mut mem = u5_memory_with_plans(vec![
+            u5_plan_with(
+                "A",
+                "LONG",
+                Some(Timeframe::H4),
+                Some(u5_outcome(crate::memory::TradePlanOutcomeKind::TakeProfit)),
+            ),
+            u5_plan_with("B", "LONG", Some(Timeframe::H4), None),
+        ]);
+        mem.predictions[0].outcome_score = Some(0.9);
+        let patterns = format_memory_patterns(&mem);
+        assert!(patterns.contains("Validated accuracy:"), "{patterns}");
+        assert!(patterns.contains("1 take_profit"), "{patterns}");
+        assert!(patterns.contains("1 pending"), "{patterns}");
+    }
+
+    fn config_map_literal_block(yaml: &str, key: &str) -> String {
+        let header = format!("  {key}: ");
+        let (_, remainder) = yaml
+            .split_once(&header)
+            .unwrap_or_else(|| panic!("missing ConfigMap key: {key}"));
+        let (style, content) = remainder
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("missing literal block content for: {key}"));
+        assert!(
+            matches!(style, "|" | "|-"),
+            "{key} must use a literal block"
+        );
+
+        let mut rendered = String::new();
+        for raw_line in content.split_inclusive('\n') {
+            let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+            if let Some(unindented) = line.strip_prefix("    ") {
+                rendered.push_str(unindented);
+                if raw_line.ends_with('\n') {
+                    rendered.push('\n');
+                }
+            } else if line.is_empty() {
+                rendered.push_str(raw_line);
+            } else {
+                break;
+            }
+        }
+
+        // YAML's clip (`|`) keeps exactly one trailing newline; strip (`|-`)
+        // removes every trailing newline. The preceding loop intentionally
+        // retains blank block lines so this models chomping rather than a trim.
+        while rendered.ends_with('\n') {
+            rendered.pop();
+        }
+        if style == "|" {
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    #[test]
+    fn test_active_adaptive_prompt_sources_match_configmap_literal_blocks_byte_for_byte() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_map = std::fs::read_to_string(manifest_dir.join("k8s/prompts-configmap.yaml"))
+            .expect("read prompts ConfigMap");
+
+        for filename in ["system_adaptive.txt", "user_adaptive.txt"] {
+            let source =
+                std::fs::read_to_string(manifest_dir.join("config/prompts").join(filename))
+                    .unwrap_or_else(|error| {
+                        panic!("read active prompt source {filename}: {error}")
+                    });
+            let from_config_map = config_map_literal_block(&config_map, filename);
+
+            assert_eq!(
+                from_config_map, source,
+                "ConfigMap literal block for {filename} drifted from its active prompt source"
+            );
+        }
+    }
+
+    #[test]
+    fn test_active_adaptive_prompt_contract_includes_timeframe_and_outcome_rules() {
+        let prompts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/prompts");
+        let system = std::fs::read_to_string(prompts_dir.join("system_adaptive.txt"))
+            .expect("read active adaptive system prompt");
+        let user = std::fs::read_to_string(prompts_dir.join("user_adaptive.txt"))
+            .expect("read active adaptive user prompt");
+        let contract = format!("{system}\n{user}");
+
+        assert!(contract.contains("MEDIUM/LONG-TERM"));
+        assert!(contract.contains(">=4h"));
+        assert!(contract.contains("Lower timeframes may refine"));
+        assert!(contract.contains("never override the >=4h thesis"));
+        assert!(contract.contains("\"timeframe\""));
+        assert!(contract.contains("candle highs/lows"));
+        assert!(contract.contains("entry must be hit first"));
+        assert!(contract.contains("then TP/SL"));
+        assert!(contract.contains("ambiguous/unscored"));
+    }
+
+    // ─── Fail-closed conviction (reviewer #1 + recovery half of #3) ──────────
+
+    fn assert_all_wait_null(plans: &[crate::memory::TradePlan]) {
+        assert!(!plans.is_empty());
+        for plan in plans {
+            assert_eq!(plan.direction, "WAIT", "label={}", plan.label);
+            assert_eq!(plan.entry, None, "label={}", plan.label);
+            assert_eq!(plan.target, None, "label={}", plan.label);
+            assert_eq!(plan.stop, None, "label={}", plan.label);
+            assert_eq!(plan.timeframe, None, "label={}", plan.label);
+            assert_eq!(plan.outcome, None, "label={}", plan.label);
+        }
+    }
+
+    #[test]
+    fn test_fail_closed_empty_plans_forces_none_zero() {
+        let text = r#"{"confidence": 92, "direction": "LONG", "summary": "High conviction but no plans", "trade_plans": []}"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert!(result.trade_plans.is_empty());
+    }
+
+    #[test]
+    fn test_fail_closed_all_invalid_plans_forces_none_zero() {
+        // Both LONG plans use sub-4h timeframes → WAIT-normalized → 0 matching.
+        let text = r#"{
+            "confidence": 90,
+            "direction": "LONG",
+            "summary": "Invalid plans",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "1h", "rationale": "scalp"},
+                {"label": "B", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "15m", "rationale": "scalp"}
+            ]
+        }"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.trade_plans.len(), 2);
+        assert_all_wait_null(&result.trade_plans);
+    }
+
+    #[test]
+    fn test_fail_closed_single_valid_plan_forces_none_zero() {
+        // Only one valid LONG >=4h plan → fewer than 2 → force NONE/0.
+        let text = r#"{
+            "confidence": 88,
+            "direction": "LONG",
+            "summary": "Only one valid plan",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "breakout"},
+                {"label": "B", "direction": "WAIT", "entry": null, "target": null, "stop": null, "timeframe": null, "rationale": "wait"}
+            ]
+        }"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.trade_plans.len(), 2);
+        assert_all_wait_null(&result.trade_plans);
+    }
+
+    #[test]
+    fn test_fail_closed_mismatched_plans_forces_none_zero() {
+        // Top LONG but both valid plans are SHORT → mismatched → force NONE/0.
+        let text = r#"{
+            "confidence": 91,
+            "direction": "LONG",
+            "summary": "Mismatched",
+            "trade_plans": [
+                {"label": "A", "direction": "SHORT", "entry": 100.0, "target": 90.0, "stop": 105.0, "timeframe": "4h", "rationale": "rejection"},
+                {"label": "B", "direction": "SHORT", "entry": 100.0, "target": 92.0, "stop": 104.0, "timeframe": "1d", "rationale": "rejection"}
+            ]
+        }"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::None);
+        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(result.trade_plans.len(), 2);
+        assert_all_wait_null(&result.trade_plans);
+    }
+
+    #[test]
+    fn test_fail_closed_two_matching_valid_plans_retained() {
+        let text = r#"{
+            "confidence": 87,
+            "direction": "LONG",
+            "summary": "Two valid plans",
+            "trade_plans": [
+                {"label": "A", "direction": "LONG", "entry": 100.0, "target": 110.0, "stop": 95.0, "timeframe": "4h", "rationale": "breakout"},
+                {"label": "B", "direction": "LONG", "entry": 100.0, "target": 112.0, "stop": 96.0, "timeframe": "1d", "rationale": "trend"},
+                {"label": "C", "direction": "WAIT", "entry": null, "target": null, "stop": null, "timeframe": null, "rationale": "wait"}
+            ]
+        }"#;
+        let available = [Timeframe::H4, Timeframe::D1];
+        let result = parse_alert_json(text, &available);
+        assert_eq!(result.direction, algotrap::prelude::Direction::Long);
+        assert!((result.confidence - 87.0).abs() < f64::EPSILON);
+        assert!(result.conviction_aligned);
+        assert_eq!(result.trade_plans.len(), 3);
+        assert_eq!(result.trade_plans[0].direction, "LONG");
+        assert_eq!(result.trade_plans[0].timeframe, Some(Timeframe::H4));
+        assert_eq!(result.trade_plans[0].entry, Some(100.0));
+        assert_eq!(result.trade_plans[1].direction, "LONG");
+        assert_eq!(result.trade_plans[1].timeframe, Some(Timeframe::D1));
+        assert_eq!(result.trade_plans[2].direction, "WAIT");
+    }
+
+    #[test]
+    fn test_empty_response_correction_message_includes_timeframe_rules() {
+        let msg = empty_response_correction_message(AnalysisMode::AlertScan);
+        assert!(msg.contains("timeframe"));
+        assert!(msg.contains(">=4h"));
+        assert!(msg.contains("WAIT"));
+        assert!(msg.contains("null"));
     }
 }

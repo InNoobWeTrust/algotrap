@@ -3,12 +3,13 @@
 /// Classifies a failure produced by the technical-analysis domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaErrorKind {
+    /// Input or invariant validation failed.
     Validation,
+    /// A lookback period is zero or otherwise invalid.
     InvalidPeriod,
-    InvalidPlan,
-    Alignment,
-    Source,
+    /// A materialized indicator output is non-finite.
     NonFiniteIndicatorOutput,
+    /// A kernel computation failed.
     Computation,
 }
 
@@ -32,21 +33,6 @@ impl TaError {
     /// Creates an error for a zero or otherwise invalid lookback period.
     pub fn invalid_period(message: impl Into<String>) -> Self {
         Self::new(TaErrorKind::InvalidPeriod, message)
-    }
-
-    /// Creates an error for an invalid lazy indicator plan.
-    pub fn invalid_plan(message: impl Into<String>) -> Self {
-        Self::new(TaErrorKind::InvalidPlan, message)
-    }
-
-    /// Creates an error for incompatible domain series lengths.
-    pub fn alignment(message: impl Into<String>) -> Self {
-        Self::new(TaErrorKind::Alignment, message)
-    }
-
-    /// Creates an error for an unavailable or invalid domain source.
-    pub fn source(message: impl Into<String>) -> Self {
-        Self::new(TaErrorKind::Source, message)
     }
 
     /// Creates a typed error for a non-finite materialized indicator value.
@@ -93,8 +79,8 @@ mod tests {
         let period = TaError::invalid_period("period must be greater than zero");
         assert_eq!(period.kind, TaErrorKind::InvalidPeriod);
 
-        let plan = TaError::invalid_plan("indicator plan contains a cycle");
-        assert_eq!(plan.kind, TaErrorKind::InvalidPlan);
+        let validation = TaError::validation("Kline slice is empty");
+        assert_eq!(validation.kind, TaErrorKind::Validation);
 
         let output = TaError::non_finite_indicator_output(7, "atr");
         assert_eq!(output.kind, TaErrorKind::NonFiniteIndicatorOutput);

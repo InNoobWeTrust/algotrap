@@ -15,8 +15,9 @@ use llm_tool::{ToolError, ToolRegistry, llm_tool};
 use tracing::warn;
 
 use crate::browserless::capture_chart_screenshot;
-use crate::chart::render_single_tf_chart_html;
+use crate::chart::{gap_zones_to_chart_json, render_single_tf_chart_html};
 use crate::config::{EnvConf, TickerConf};
+use algotrap::query::gap_zones::GapZoneRecord;
 
 use super::AnalysisMode;
 
@@ -31,7 +32,7 @@ fn format_available_timeframes(timeframes: &[Timeframe]) -> String {
 
 // ─── Tool Declarations (Schemas automatically derived via llm_tool) ─────────
 
-/// Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR reversion %, structure power, Sharpe ratio, EMA200, leverage, gap zones.
+/// Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR %, structure power, Sharpe ratio, EMA200, leverage, gap zones.
 #[llm_tool]
 fn get_indicator_summary(
     /// The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')
@@ -61,7 +62,7 @@ fn capture_chart(
     Ok(timeframe.map(|tf| tf.to_string()).unwrap_or_default())
 }
 
-/// Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR reversion %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.
+/// Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.
 #[llm_tool]
 fn get_multi_tf_overview() -> Result<String, ToolError> {
     Ok(String::new())
@@ -160,9 +161,10 @@ pub fn build_tools(
 pub async fn execute_tool_call(
     tool_call: &ChatCompletionMessageToolCall,
     all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
+    gap_zones: &HashMap<Timeframe, Vec<GapZoneRecord>>,
     conf: &EnvConf,
     ticker: &TickerConf,
-    ic: &crate::memory::IndicatorConfig,
+    _ic: &crate::memory::IndicatorConfig,
     scratchpad: &mut HashMap<String, String>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     match tool_call.function.name.as_str() {
@@ -175,10 +177,8 @@ pub async fn execute_tool_call(
                 Some(df) => {
                     let last_rows = df.slice_last(3)?;
                     let mut summary = extract_indicator_summary(&*last_rows, &tf)?;
-                    // Append gap zone context if active
-                    if ic.is_active("gap_zones")
-                        && let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic)
-                    {
+                    let zones = gap_zones.get(&tf).map(Vec::as_slice).unwrap_or(&[]);
+                    if let Some(gap_ctx) = compute_gap_zone_context(zones) {
                         summary.push('\n');
                         summary.push_str(&gap_ctx);
                     }
@@ -225,17 +225,8 @@ pub async fn execute_tool_call(
             };
             let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
             let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
-            let gap_zones_json = if ic.is_active("gap_zones") {
-                let params = ic.gap_zone_params();
-                let zones =
-                    algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params)
-                        .map_err(|error| {
-                            std::io::Error::other(format!("Gap-zone extraction failed: {error}"))
-                        })?;
-                crate::chart::gap_zones_to_chart_json(&zones, 0.3)
-            } else {
-                "[]".to_string()
-            };
+            let gap_zones_json =
+                gap_zones_to_chart_json(gap_zones.get(&tf).map(Vec::as_slice).unwrap_or(&[]));
             let chart_html =
                 render_single_tf_chart_html(&tf, df.as_ref(), ticker, &gap_zones_json, rssi_tint)?;
 
@@ -252,7 +243,7 @@ pub async fn execute_tool_call(
             }
         }
         "get_multi_tf_overview" => {
-            let overview = build_multi_tf_overview(all_dfs, ticker, ic)?;
+            let overview = build_multi_tf_overview(all_dfs, ticker, _ic, gap_zones)?;
             Ok(overview)
         }
         "read_kb" => {
@@ -386,7 +377,8 @@ fn extract_price_action(
 fn build_multi_tf_overview(
     all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
     ticker: &TickerConf,
-    ic: &crate::memory::IndicatorConfig,
+    _ic: &crate::memory::IndicatorConfig,
+    gap_zones: &HashMap<Timeframe, Vec<GapZoneRecord>>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let mut lines = vec![format!(
         "=== {} Multi-Timeframe Overview ===",
@@ -396,6 +388,7 @@ fn build_multi_tf_overview(
     let mut tfs: Vec<Timeframe> = all_dfs.keys().cloned().collect();
     tfs.sort_by_key(|tf| tf.weight());
 
+    // Indicator lines keep the existing ascending-weight order.
     for tf in &tfs {
         if let Some(df) = all_dfs.get(tf) {
             let last = df.slice_last(1)?;
@@ -420,12 +413,43 @@ fn build_multi_tf_overview(
                 sharpe = get_val("sharpe"),
                 close = get_val("close"),
             ));
+        }
+    }
 
-            // Append gap zone summary per timeframe if active
-            if ic.is_active("gap_zones")
-                && let Some(gap_ctx) = compute_gap_zone_context(df.as_ref(), ic)
-            {
-                lines.push(format!("    {gap_ctx}"));
+    // Zone blocks iterate highest weight first with a combined ~64 zone-line
+    // ceiling. Indicator-line order above is unchanged.
+    let mut tfs_desc = tfs.clone();
+    tfs_desc.sort_by_key(|tf| std::cmp::Reverse(tf.weight()));
+    let mut emitted_zone_lines: usize = 0;
+    for tf in &tfs_desc {
+        if emitted_zone_lines >= 64 {
+            break;
+        }
+        let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
+        if zones.is_empty() {
+            continue;
+        }
+        // Per-timeframe hard cap (newest 32) then aggregate-budget truncation
+        // (newest `remaining`) so the combined digest never exceeds 64 lines.
+        let capped: &[GapZoneRecord] = if zones.len() > 32 {
+            &zones[zones.len() - 32..]
+        } else {
+            zones
+        };
+        let remaining = 64 - emitted_zone_lines;
+        let emit: &[GapZoneRecord] = if capped.len() > remaining {
+            &capped[capped.len() - remaining..]
+        } else {
+            capped
+        };
+        if let Some(ctx) = compute_gap_zone_context(emit) {
+            let mut ctx_lines = ctx.lines();
+            if let Some(envelope) = ctx_lines.next() {
+                lines.push(format!("  {tf} {envelope}"));
+                for zone_line in ctx_lines {
+                    lines.push(format!("    {zone_line}"));
+                }
+                emitted_zone_lines += emit.len();
             }
         }
     }
@@ -433,51 +457,70 @@ fn build_multi_tf_overview(
     Ok(lines.join("\n"))
 }
 
-fn compute_gap_zone_context(
-    df: &dyn ComputedFrame,
-    ic: &crate::memory::IndicatorConfig,
-) -> Option<String> {
-    if df.is_empty() {
-        return None;
-    }
-
-    for col in ["is_atr_gap", "body_ratio", "open", "close"] {
-        if !df.has_column(col) {
-            return None;
-        }
-    }
-
-    let params = ic.gap_zone_params();
-    let zones = algotrap::engine::gap_zones::extract_gap_zones_from_frame(df, &params).ok()?;
-
-    if zones.is_empty() {
-        return Some("Gap zones: none detected".to_string());
-    }
-
-    let n = df.len();
-    let current_price = df.f64_at("close", n - 1).ok()??;
-    let summary = algotrap::ta::gap_zones::gap_zone_summary(&zones, current_price).ok()?;
-
-    let nearest_str = match summary.nearest_gap {
-        Some((b, t, trust)) => format!(", nearest={b:.0}-{t:.0} (trust {trust:.2})"),
-        None => String::new(),
+fn compute_gap_zone_context(zones: &[GapZoneRecord]) -> Option<String> {
+    // Zones arrive pre-budgeted by `recent_gap_zones` SQL LIMIT; enforce the
+    // hard 32/timeframe cap here regardless of config, keeping the newest.
+    let capped: &[GapZoneRecord] = if zones.len() > 32 {
+        &zones[zones.len() - 32..]
+    } else {
+        zones
     };
-
-    Some(format!(
-        "Gap zones: {} total ({} above, {} below), overlap@price: count={} weighted_trust={:.2}{}",
-        zones.len(),
-        summary.zones_above,
-        summary.zones_below,
-        summary.overlap_at_price.count,
-        summary.overlap_at_price.weighted_trust,
-        nearest_str
-    ))
+    // Zones arrive pre-truncated by SQL LIMIT to the per-timeframe config
+    // budget, so the true available count is unknown here; report honestly
+    // instead of fabricating M/truncated.
+    let mut lines = vec![format!(
+        "Gap zones ({} returned, available=unknown, truncated=unknown)",
+        capped.len()
+    )];
+    for z in capped {
+        let direction = match z.direction {
+            algotrap::query::gap_zones::GapZoneDirection::Bullish => "bullish",
+            algotrap::query::gap_zones::GapZoneDirection::Bearish => "bearish",
+            algotrap::query::gap_zones::GapZoneDirection::Flat => "flat",
+        };
+        let mut line = format!(
+            "{} | {}/{}/{}/{} | {}-{} | {}",
+            z.time_ms, z.open, z.high, z.low, z.close, z.body_bottom, z.body_top, direction
+        );
+        if let Some(ratio) = z.body_ratio {
+            line.push_str(&format!(" | {ratio}"));
+        }
+        lines.push(line);
+    }
+    Some(lines.join("\n"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_openai::types::chat::ChatCompletionTools;
+
+    fn sample_ticker() -> TickerConf {
+        TickerConf {
+            symbol: "BTC-USDT".to_string(),
+            sl_percent: 0.02,
+            tol_percent: 0.01,
+            tfs: vec![Timeframe::H1],
+            default_tf: Timeframe::H1,
+        }
+    }
+
+    fn sample_klines() -> Vec<Kline> {
+        (0..240)
+            .map(|index| {
+                let open = 100.0 + index as f64;
+                Kline {
+                    open,
+                    high: open + 4.0,
+                    low: open - 2.0,
+                    close: open + if index % 2 == 0 { 2.0 } else { -1.0 },
+                    volume: 1_000.0 + index as f64,
+                    time: 1_700_000_000_000 + index as i64 * 60_000,
+                    adjclose: None,
+                }
+            })
+            .collect()
+    }
 
     fn dummy_env_conf() -> EnvConf {
         let env: HashMap<String, String> = [
@@ -672,5 +715,165 @@ mod tests {
                 func.function.name
             );
         }
+    }
+
+    fn gap_record(
+        time_ms: i64,
+        direction: algotrap::query::gap_zones::GapZoneDirection,
+        body_ratio: Option<f64>,
+    ) -> GapZoneRecord {
+        let (open, close) = match direction {
+            algotrap::query::gap_zones::GapZoneDirection::Bearish => (110.0, 100.0),
+            algotrap::query::gap_zones::GapZoneDirection::Flat => (100.0, 100.0),
+            algotrap::query::gap_zones::GapZoneDirection::Bullish => (100.0, 110.0),
+        };
+        GapZoneRecord {
+            time_ms,
+            open,
+            high: 115.0,
+            low: 95.0,
+            close,
+            volume: 1_000.0,
+            body_bottom: open.min(close),
+            body_top: open.max(close),
+            direction,
+            body_ratio,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compute_gap_zone_context_uses_parallel_zones_regardless_of_output_toggles() {
+        let mut ic = crate::memory::IndicatorConfig::default();
+        ic.outputs.is_atr_gap.active = false;
+        ic.outputs.body_ratio.active = false;
+        let frame = crate::data::process_data(&sample_klines(), &sample_ticker(), &ic)
+            .await
+            .unwrap();
+
+        assert!(!frame.has_column("is_atr_gap"));
+        assert!(!frame.has_column("body_ratio"));
+        // Zones no longer depend on visible-output toggles; digest works off
+        // the parallel map entry (empty here) and always yields an envelope.
+        let gap_zones: HashMap<Timeframe, Vec<GapZoneRecord>> =
+            HashMap::from([(Timeframe::H1, vec![])]);
+        let zones = gap_zones.get(&Timeframe::H1).map(Vec::as_slice).unwrap_or(&[]);
+        let ctx = compute_gap_zone_context(zones).expect("envelope must exist");
+        assert!(ctx.contains("Gap zones (0 returned"));
+        assert!(ctx.contains("available=unknown"));
+    }
+
+    #[tokio::test]
+    async fn test_multi_tf_overview_formats_unavailable_indicator_values_as_na() {
+        let ticker = sample_ticker();
+        let mut ic = crate::memory::IndicatorConfig::default();
+        ic.outputs.rssi.active = false;
+
+        let frame = crate::data::process_data(&sample_klines(), &ticker, &ic)
+            .await
+            .unwrap();
+        let all_dfs = HashMap::from([(Timeframe::H1, frame)]);
+        let gap_zones: HashMap<Timeframe, Vec<GapZoneRecord>> = HashMap::new();
+
+        let overview = build_multi_tf_overview(&all_dfs, &ticker, &ic, &gap_zones).unwrap();
+
+        assert!(overview.contains("RSSI=N/A"));
+        assert!(overview.contains("close="));
+    }
+
+    #[test]
+    fn test_gap_zone_digest_budget_envelope_ordering_and_no_legacy_wording() {
+        use algotrap::query::gap_zones::GapZoneDirection;
+
+        // Per-tf hard cap: 40 zones in -> 32 lines out + envelope.
+        let many: Vec<GapZoneRecord> = (0..40)
+            .map(|i| {
+                gap_record(
+                    1_700_000_000_000 + i * 60_000,
+                    GapZoneDirection::Bullish,
+                    Some(0.8),
+                )
+            })
+            .collect();
+        let ctx = compute_gap_zone_context(&many).unwrap();
+        let lines: Vec<&str> = ctx.lines().collect();
+        assert!(lines[0].contains("Gap zones (32 returned"));
+        assert!(lines[0].contains("available=unknown"));
+        assert!(lines[0].contains("truncated=unknown"));
+        assert_eq!(lines.len(), 1 + 32);
+        // Newest 32 retained (ascending tail: indices 8..39).
+        assert!(lines[1].contains("1700000480000"));
+        assert!(lines[lines.len() - 1].contains("1700002340000"));
+        assert!(!ctx.contains("trust"));
+        assert!(!ctx.contains("nearest"));
+        assert!(!ctx.contains("overlap"));
+        assert!(!ctx.contains("above"));
+        // body_ratio skipped when None, present otherwise.
+        let mixed = vec![
+            gap_record(1_000, GapZoneDirection::Bearish, None),
+            gap_record(2_000, GapZoneDirection::Flat, Some(0.7)),
+        ];
+        let mixed_ctx = compute_gap_zone_context(&mixed).unwrap();
+        let mixed_lines: Vec<&str> = mixed_ctx.lines().collect();
+        assert_eq!(mixed_lines.len(), 3);
+        assert!(mixed_lines[1].contains("bearish"));
+        assert!(!mixed_lines[1].contains("body_ratio"));
+        assert!(mixed_lines[2].contains("flat"));
+        assert!(mixed_lines[2].contains("0.7"));
+    }
+
+    #[tokio::test]
+    async fn test_multi_tf_overview_aggregate_caps_at_64_highest_weight_first() {
+        use algotrap::query::gap_zones::GapZoneDirection;
+
+        let ticker = TickerConf {
+            symbol: "BTC-USDT".to_string(),
+            sl_percent: 0.02,
+            tol_percent: 0.01,
+            tfs: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4],
+            default_tf: Timeframe::H1,
+        };
+        let ic = crate::memory::IndicatorConfig::default();
+        let frame = crate::data::process_data(&sample_klines(), &ticker, &ic)
+            .await
+            .unwrap();
+        let all_dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = HashMap::from([
+            (Timeframe::M15, crate::data::process_data(&sample_klines(), &ticker, &ic).await.unwrap()),
+            (Timeframe::H1, crate::data::process_data(&sample_klines(), &ticker, &ic).await.unwrap()),
+            (
+                Timeframe::H4,
+                frame,
+            ),
+        ]);
+        // 30 zones per tf x 3 tfs = 90 raw -> aggregate must cap at 64.
+        let mk = |base: i64| {
+            (0..30)
+                .map(|i| gap_record(base + i * 60_000, GapZoneDirection::Bullish, Some(0.8)))
+                .collect::<Vec<_>>()
+        };
+        let gap_zones: HashMap<Timeframe, Vec<GapZoneRecord>> = HashMap::from([
+            (Timeframe::M15, mk(1_700_000_000_000)),
+            (Timeframe::H1, mk(1_700_100_000_000)),
+            (Timeframe::H4, mk(1_700_200_000_000)),
+        ]);
+
+        let overview = build_multi_tf_overview(&all_dfs, &ticker, &ic, &gap_zones).unwrap();
+        assert!(overview.contains("Gap zones ("));
+        assert!(!overview.to_lowercase().contains("trust"));
+        assert!(!overview.contains("nearest"));
+        // Count zone detail lines (contain " | " and a direction token).
+        let zone_lines: Vec<&str> = overview
+            .lines()
+            .filter(|l| l.contains(" | ") && (l.contains("bullish") || l.contains("bearish") || l.contains("flat")))
+            .collect();
+        assert_eq!(zone_lines.len(), 64, "aggregate ceiling must hold");
+        // Highest-weight-first: H4 block appears before H1, H1 before M15.
+        let pos_h4 = overview.find("4h Gap zones (").expect("H4 block");
+        let pos_h1 = overview.find("1h Gap zones (").expect("H1 block");
+        let pos_m15 = overview.find("15m Gap zones (").expect("M15 block");
+        assert!(pos_h4 < pos_h1 && pos_h1 < pos_m15);
+        // Indicator-line order stays ascending (existing contract).
+        let ind_h4 = overview.find("4h: RSSI=").unwrap_or(usize::MAX);
+        let ind_m15 = overview.find("15m: RSSI=").expect("M15 indicator line");
+        assert!(ind_m15 < ind_h4);
     }
 }

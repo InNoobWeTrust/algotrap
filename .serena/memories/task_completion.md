@@ -5,3 +5,6 @@
 - cargo test --workspace
 - cargo run -p algotrap --bin cryptobot (or appropriate binary)
 - ensure unit tests pass; integration tests as applicable
+- Root prelude (`src/prelude.rs`) owns only ext/model/ta module re-exports and time_utils convenience; frame/query/Kernel imports use owning paths (`algotrap::engine::frame`, `algotrap::query::duckdb`, `algotrap::ta::prelude`).
+- Both application aggregates (Kernel + state) are owned in presentation.rs: `bins/cryptobot/src/presentation.rs` and `bins/telegrambot/src/presentation.rs`.
+- `TaError` carries exactly four variants: Validation, InvalidPeriod, NonFiniteIndicatorOutput, Computation. Source and alignment concerns are owned by the adapter layer (`StreamPipelineError::Source`, `StreamPipelineError::Alignment`), not by `TaError`.

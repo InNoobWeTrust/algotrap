@@ -39,7 +39,9 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
     for ticker in &tickers {
         println!("📡 Fetching data for {}...", ticker.symbol);
-        let all_dfs = telegrambot::data::fetch_all_data(&bingx, ticker, &ic).await?;
+        let data = telegrambot::data::fetch_all_data(&bingx, ticker, &ic).await?;
+        let all_dfs = &data.dfs;
+        let gap_zones = &data.gap_zones;
         println!("✅ Fetched {} timeframes", all_dfs.len());
 
         for tf in &ticker.tfs {
@@ -52,16 +54,10 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             let last_rssi = telegrambot::chart::last_rssi_from_df(df.as_ref());
             let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
 
-            // Extract gap zones for this TF
-            let params = ic.gap_zone_params();
-            let zones =
-                algotrap::engine::gap_zones::extract_gap_zones_from_frame(df.as_ref(), &params)?;
-            let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(&zones, 0.3);
-            println!(
-                "    gap zones: {} (of {} raw)",
-                zones.len().min(10),
-                zones.len()
-            );
+            // Gap zones come from the parallel recent_gap_zones map.
+            let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
+            let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(zones);
+            println!("    gap zones: {}", zones.len());
 
             let chart_html = telegrambot::chart::render_single_tf_chart_html(
                 tf,

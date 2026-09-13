@@ -1,11 +1,22 @@
 # Research & Technical Specification: I Ching Hexagram Datetime Calculation & Market Cycle Quantization
 
-- **Target module:** `algotrap::ta::iching`
+> **Planned / Not Implemented**
+>
+> This document describes a **planned** feature that does not currently exist in the
+> codebase. No `src/ta/iching`, `src/ext/lunar`, `src/iching`, or `bins/iching`
+> implementation currently exists. All module layouts, API names, data shapes,
+> snapshot schemas, verification commands, and integration paths below are
+> **proposed target state** and remain provisional until the root library contracts are stabilized and a follow-up design review is completed.
+>
+> **Blocked on:** root library stabilization (typed `Kernel`/`Processor`/`PriorState` contracts, `SourceFrame`/`QueryResultFrame` column semantics, `DuckDBQuery` projection seam, and `Kline.time` timestamp-unit resolution).
+>
+> **Current architecture references:** [docs/architecture.md](../../../docs/architecture.md) · [src/README.md](../../../src/README.md) · [docs/architecture/stream-and-duckdb-data-flow.md](../../../docs/architecture/stream-and-duckdb-data-flow.md)
+
+- **Target module:** `algotrap::ta::iching` (proposed)
 - **Category:** Technical analysis research / macro-cycle feature extraction
-- **Status:** Research specification; implementation is pending explicit domain-validation and acceptance gates. Nothing in this document claims that the feature is implemented.
-- **Rust dependencies:** `chrono` for UTC instants, calendar fields, and epoch conversion; `serde` with derive support and `serde_json` for typed records, nullable values, and the existing frame serialization contract.
-- **Runtime dependency:** The engine-owned `libduckdb` shared library, loaded through the existing private C-API FFI. When set, `DUCKDB_LIBRARY_PATH` must be nonempty, absolute, and identify a regular file. Compatibility is established afterward by dynamic loading and required C-API symbol resolution; override validation does not prevalidate readability or architecture.
-- **Database constraint:** DuckDB is an in-memory, read-only execution utility for this feature. There is no networked database, persistent DuckDB file, remote table, `ATTACH`, HTTP extension, or database connection pool in scope.
+- **Status:** Planned. This feature is intentionally blocked on root library stabilization. No implementation, tests, binary, or verification gates currently exist.
+- **Rust dependencies:** `chrono` for UTC instants, calendar fields, and epoch conversion; `serde` with derive support and `serde_json` for typed records and nullable values.
+- **Integration path (proposed):** Pure deterministic I-Ching calculations in `src/ta` produce typed `IchingRecord` value objects outside the aggregate. The root aggregate contract currently supports only nullable Number/Boolean scalar inputs and outputs; a complete record cannot currently flow through the aggregate (documented blocker). A future reviewed bridge must flatten selected deterministic fields into scalar aggregate inputs/outputs or keep records outside the aggregate. Optional source-controlled SQL projection through `DuckDBQuery` to `QueryResultFrame`. Application/CLI owns input loading and presentation. DuckDB does not own I-Ching computation.
 
 > **Scientific caveat:** Every output specified here is an experimental, deterministic feature derived from a selected calendar or hexagram convention. It is not a market prediction, a causal explanation, or trading advice.
 
@@ -28,21 +39,20 @@ The core must make the method, calendar inputs, line convention, null policy, an
 - Implementing a Hilbert transform, Phase-Locking Value (PLV), or other advanced numerical method before its numerical method and dependency are approved.
 - Exposing arbitrary SQL, a public database connection, or a general-purpose database adapter.
 
-### 1.3 End-to-end shape
+### 1.3 End-to-end shape (proposed target state)
 
 ```mermaid
 flowchart TD
-    T["UTC timestamp / Kline.time"] --> C["Rust ta::iching calculators"]
-    C --> R["Typed I Ching records\nserde / serde_json"]
-    K["Kline candle values"] --> V["Engine-owned candle VALUES CTE"]
-    R --> I["Trusted I Ching VALUES CTE"]
-    V --> Q["Fixed single WITH ... SELECT"]
-    I --> Q
-    Q --> F["Private C-API FFI\nDuckDB in-memory query"]
-    F --> O["DuckDBComputedFrame\nComputedFrame"]
+    T["UTC timestamp / Kline.time"] --> C["Rust ta::iching calculators\n(pure — no I/O)"]
+    C --> R["Typed IchingRecord\n(serde value objects)"]
+    R -->|"application / research\nserialization only"| SER["JSON / snapshot\n(outside the aggregate)"]
+    K["Kline candle values"] --> AGG["application-owned aggregate\nKernel + Processor<K>"]
+    AGG --> OUT["SourceFrame\n(owned typed columns)"]
+    OUT -.->|"optional: DuckDBQuery\nsource-controlled SQL"| OWF["QueryResultFrame\n(SQL-projected)"]
+    R -.->|"future reviewed bridge\n(flatten selected deterministic fields)"| AGG
 ```
 
-The calculator is Rust-pure. DuckDB only joins and projects already-calculated values with the candle frame; it is not the authority for I Ching rules.
+The calculator is Rust-pure and lives in `src/ta`. A complete typed `IchingRecord` is **not** a current aggregate input/output: the root aggregate contract supports only nullable Number/Boolean scalar inputs and outputs. A whole record cannot flow through the aggregate today; that is a documented blocker/constraint. DuckDB is available only as an optional downstream SQL projection adapter — it is not the authority for I Ching rules.
 
 ## 2. Shared I Ching Representation
 
@@ -108,7 +118,9 @@ pub struct IchingRecord {
 }
 ```
 
-The exact public field set may be split into method-specific structs, but the same semantics must remain observable. `moving_line` is one-based and bottom-to-top when present. `None` is meaningful and must not be encoded as a zero line.
+> **Provisional.** The exact public field set may be split into method-specific structs, but the same semantics must remain observable. The `time_ms` field name and timestamp unit (milliseconds assumed) are provisional — they depend on the resolved `Kline.time` contract in the root library.
+
+`moving_line` is one-based and bottom-to-top when present. `None` is meaningful and must not be encoded as a zero line.
 
 ## 3. Datetime-to-Hexagram Systems
 
@@ -116,7 +128,7 @@ The exact public field set may be split into method-specific structs, but the sa
 
 #### Inputs and calendar boundary
 
-`chrono` supplies a UTC instant and Gregorian fields; it does not provide a lunar calendar. Until an approved lunar-calendar conversion dependency or fixture source is selected, the pure casting function accepts validated discrete inputs:
+`chrono` supplies a UTC instant and Gregorian fields; it does not provide a lunar calendar. The pure casting function accepts validated discrete inputs; the responsibility for resolving a UTC candle timestamp into those inputs belongs to a method-scoped adapter. That adapter is gated separately from Gua Qi and Fu Xi (see Stage 0b in §6 and [`docs/architecture/iching-lunar-calendar-integration.md`](../../architecture/iching-lunar-calendar-integration.md) for the adapter module layout, time policy, and invariants). The pure-core interface is:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,7 +313,7 @@ The sequence contract is explicit:
    $$D_i = \frac{P_i - P_{i-1}}{(t_i - t_{i-1}) / 1000}.$$
 
    `D_i = null` for the first row, a null signal, or any non-positive time delta. Under the current `Kline` contract there is no nullable timestamp row in the sequence. After `RejectOutOfOrder` or an explicit stable sort, a non-positive delta is an error rather than a silently repaired value.
-6. **Finite contract:** Every present numeric output must be finite. `NaN`, positive infinity, and negative infinity are rejected before SQL or JSON serialization. Optional values are represented as `NULL` in DuckDB and `null` in JSON.
+6. **Finite contract:** Every present numeric output must be finite. `NaN`, positive infinity, and negative infinity are rejected before serialization. Optional values are represented as `null` in JSON and SQL `NULL` where applicable.
 
 ### 4.5 Turn-point labels and correlation research
 
@@ -315,196 +327,130 @@ Qian→Gou and Kun→Fu are sovereign boundary annotations and must not be fed i
 
 The Hilbert-transform PLV implementation is **deferred**. It may be designed only after an approved numerical method, edge-treatment policy, precision policy, and dependency are selected. A formula in a research note is not an implementation dependency or an acceptance claim.
 
-## 5. Architecture and DuckDB Integration
+## 5. Architecture and Integration (Proposed Target State)
+
+> **All architecture, module layout, API, and integration material in this section is proposed target state.** Exact API names, module placement, timestamp units, snapshot/schema versions, provider choice, and verification commands remain provisional until root stabilization and a follow-up design review.
 
 ### 5.1 Target module boundaries
 
 The target layout is a plan, not a claim that these modules currently exist:
 
 ```text
-src/ta/iching/
-├── mod.rs              # Public, typed calculator and record exports
-├── types.rs            # Line, trigram, hexagram, method, and policy types
-├── plum_blossom.rs     # Explicit-input casting and transformations
-├── gua_qi.rs           # JD, solar longitude, and twelve-sector mapping
-├── solar_wheel.rs      # 64-bin angular mapping and approved wheel order
-├── quantization.rs     # Polarity, binary, Wu Xing, and kinetic metrics
-└── signals.rs          # Ordering, duplicate, derivative, and label policies
+src/ta/iching/                 (proposed — pure core, no I/O)
+├── mod.rs                     # Public, typed calculator and record exports
+├── types.rs                   # Line, trigram, hexagram, method, and policy types
+├── plum_blossom.rs            # Explicit-input casting and transformations
+├── gua_qi.rs                  # JD, solar longitude, and twelve-sector mapping
+├── solar_wheel.rs             # 64-bin angular mapping and approved wheel order
+├── quantization.rs            # Polarity, binary, Wu Xing, and kinetic metrics
+└── signals.rs                 # Ordering, duplicate, derivative, and label policies
 
-src/engine/duckdb_engine.rs  # Fixed SQL builder and ComputedFrame integration
-src/engine/duckdb_ffi.rs     # Existing private, read-only C-API boundary
+src/ext/lunar/                 (proposed — offline lunar adapter)
+└── [see docs/architecture/iching-lunar-calendar-integration.md]
 ```
 
-The `ta::iching` core imports only standard Rust types plus the approved `chrono`, `serde`, and `serde_json` APIs. It must not import the engine, FFI, SQL builder, or frame implementation. The engine owns the adapter because it already owns `Kline` ingestion, fixed SQL generation, and `DuckDBComputedFrame` materialization.
+The `ta::iching` core imports only standard Rust types plus the approved `chrono`, `serde`, and `serde_json` APIs. It must not import the engine, query adapter, SQL builder, or frame implementation. DuckDB projection is an optional downstream consumer through the standard `DuckDBQuery` → `QueryResultFrame` seam; it does not own or influence I-Ching computation.
 
-### 5.2 Existing engine conventions to preserve
+### 5.2 Aggregate integration approach
 
-- `Kline.time` is UTC epoch milliseconds and is the join key.
-- The engine obtains the shared API through the private `duckdb_api()` singleton.
-- `DuckDbApi::query_to_json` executes one internal read-only query against an in-memory database and returns JSON text.
-- `DuckDBComputedFrame::from_json(&json, columns)` materializes the existing `ComputedFrame` contract.
-- Missing numeric values stay `serde_json::Value::Null`; `ComputedFrame::f64_at` returns `Ok(None)` for them.
-- The engine returns named columns through `ComputedFrame`; downstream consumers do not receive a database handle or a backend-specific table object.
+In the target architecture, I-Ching computation integrates through the existing aggregate
+layers with an important current constraint:
 
-The FFI currently exposes query execution and typed result extraction only. It does **not** expose prepared statements, native function registration, or Rust UDF registration. This specification must not add an assumed registration path.
+**Current blocker:** The root aggregate contract supports only nullable Number and Boolean
+scalar inputs and outputs. A complete typed `IchingRecord` **cannot** currently flow through
+the aggregate; there is no struct, record, or multi-column composite input/output in the
+aggregate contract. Any integration path must flatten selected deterministic fields into
+named numeric/boolean scalar aggregate inputs/outputs.
 
-### 5.3 Safe join design
+1. **`src/ta`:** Pure I-Ching calculators produce `IchingRecord` value objects outside the aggregate. The complete record is available for application and research serialization (JSON, snapshot). Selected deterministic scalar fields from the record may be exposed as aggregate scalars via a future reviewed bridge (see below).
+2. **`src/engine`:** The application projector materializes results into `SourceFrame` (owned typed columns implementing `ComputedFrame`). The aggregate currently handles only scalar Number and Boolean output columns.
+3. **`src/query/duckdb`:** Optional. `DuckDBQuery::project(SourceFrame, RawQuery)` produces `QueryResultFrame` through the standard DuckDB virtual-table adapter. This is source-controlled SQL projection, not I-Ching computation.
 
-The engine integration proceeds as follows:
+**Future reviewed bridge (intentionally unresolved):** A bridge between typed `IchingRecord`
+value objects and the scalar aggregate contract remains intentionally unresolved until
+root-library stabilization and a follow-up design review. Plausible choices include:
 
-1. Validate the candle slice and finite numeric inputs using existing engine error conventions.
-2. Convert each `Kline.time` with a checked UTC epoch-millisecond conversion.
-3. Calculate I Ching values in Rust and retain them as typed `IchingRecord` values.
-4. Build a single engine-owned SQL string containing:
-   - the existing candle `VALUES`/derived-data CTE;
-   - a trusted I Ching `VALUES` CTE containing only Rust-calculated scalar values; and
-   - a fixed-column `LEFT JOIN` on `time`, followed by the fixed projection and `ORDER BY time`.
-5. Execute that query through `query_to_json` and construct `DuckDBComputedFrame` with the fixed output-column list.
+- **Scalar input adapter:** Flatten selected deterministic record fields (e.g. `binary_index`,
+  `polarity_weighted`) into named scalar aggregate inputs that become aggregate inputs.
+- **Dedicated scalar expression/operator nodes:** Add aggregate expression nodes that compute
+  individual I-Ching scalar columns directly within the aggregate model, still materializing
+  scalar columns.
+- **Keep records outside aggregate:** Maintain `IchingRecord` as a pure off-aggregate value
+  object; `DuckDBQuery` can project selected I-Ching scalar fields only after an approved
+  bridge has materialized them into `SourceFrame`. Otherwise any typed-record association
+  remains application-layer and outside DuckDB. Never imply DuckDB can read or compute
+  off-aggregate `IchingRecord`; the complete record remains available for serialization
+  outside the frame.
 
-The SQL builder owns every identifier and alias. User-derived identifiers never enter SQL: no caller-supplied timestamp column name, ticker text, indicator name, or JSON key is interpolated as an identifier. Runtime values are rendered only as checked numeric literals or `NULL`; any future string value must use a dedicated literal encoder and a fixed enum vocabulary. The FFI remains the final defense-in-depth check for a single `WITH`/`SELECT` read-only statement without semicolons or destructive keywords.
+A complete `IchingRecord` must not be smuggled through an incompatible parallel batch/frame
+path that bypasses the aggregate contract. The bridge design is deferred to match the user
+intent to stabilize root library contracts first.
 
-Illustrative SQL shape:
+The critical constraint: **DuckDB does not compute I-Ching values.** All deterministic
+calculation happens in `src/ta`. DuckDB is available for post-compute SQL projection only.
+
+### 5.3 Application/CLI ownership
+
+The application/CLI layer owns:
+
+- Input loading (fetching Kline data, loading lunar fixture files)
+- Aggregate construction (typed `Kernel` + state over `Kline` data)
+- Calling the projector to produce `SourceFrame`
+- Optional `DuckDBQuery::project` for SQL-based presentation
+- Presentation, delivery, monitoring, and deployment configuration
+
+### 5.4 Timestamp-unit provisionality
+
+The root library does not uniformly settle whether `Kline.time` is epoch seconds or epoch milliseconds. The restored specification above uses `time_ms` (milliseconds) as a provisional field name in `IchingRecord`, but this **must not** be treated as an approved contract. The final timestamp unit will be resolved during root stabilization.
+
+### 5.5 SQL projection example (illustrative)
+
+If an application needs I-Ching columns alongside candle data in a SQL-projected frame, the standard approach would use `DuckDBQuery` after `SourceFrame` construction:
 
 ```sql
-WITH
-klines(open, high, low, close, volume, time, adj_close) AS (
-    -- Existing engine-owned build_klines_values_cte supplies this CTE.
-    VALUES (...)
-),
-iching(time, iching_binary_index, iching_polarity, iching_kinetic, iching_moving_line) AS (
-    VALUES
-        (1700000000000, 1,  -0.8, 0.0, NULL),
-        (1700000060000, 15, 0.2,  0.0, NULL)
-)
-SELECT
-    klines.time,
-    klines.open,
-    klines.high,
-    klines.low,
-    klines.close,
-    klines.volume,
-    klines.adj_close,
-    iching.iching_binary_index,
-    iching.iching_polarity,
-    iching.iching_kinetic,
-    iching.iching_moving_line
-FROM klines
-LEFT JOIN iching ON klines.time = iching.time
-ORDER BY klines.time
+-- Source-controlled SQL via RawQuery::source_controlled
+SELECT computed.*, klines.open, klines.high, klines.low, klines.close
+FROM computed()
+LEFT JOIN klines ON computed.time = klines.time
+ORDER BY computed.time
 ```
 
-The example values are illustrative only. The production builder must render actual checked Rust values and must not accept arbitrary SQL fragments.
-
-### 5.4 Rust interface and integration sketch
-
-The following is a concise implementation-shaped interface. It is a design sketch, not an assertion that the functions already exist:
-
-```rust
-use chrono::{DateTime, TimeZone, Utc};
-use serde_json::{Map, Value};
-
-use crate::engine::duckdb_ffi::DuckDbApi;
-use crate::engine::error::MarketError;
-// This sketch is placed in the engine module, beside query_frame and
-// DuckDBComputedFrame, so it uses the existing private helpers directly.
-use crate::model::kline::Kline;
-use crate::ta::iching::{IchingRecord, record_from_utc};
-
-fn records_as_json(
-    records: &[IchingRecord],
-) -> Result<Vec<Map<String, Value>>, serde_json::Error> {
-    records
-        .iter()
-        .map(|record| serde_json::to_value(record).and_then(serde_json::from_value))
-        .collect()
-}
-
-fn compute_iching_frame(
-    api: &DuckDbApi,
-    klines: &[Kline],
-) -> Result<DuckDBComputedFrame, MarketError> {
-    let records = klines
-        .iter()
-        .map(|kline| {
-            let timestamp: DateTime<Utc> = Utc
-                .timestamp_millis_opt(kline.time)
-                .single()
-                .ok_or_else(|| MarketError::validation("invalid UTC epoch millisecond"))?;
-            record_from_utc(timestamp)
-                .map_err(|error| MarketError::computation(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let _json_records = records_as_json(&records)
-        .map_err(|error| MarketError::computation(error.to_string()))?;
-    let sql = build_iching_join_sql(klines, &records)?;
-    query_frame(api, &sql, iching_output_columns())
-}
-```
-
-The `query_frame` call above uses the existing engine convention: query JSON through the private API, then call `DuckDBComputedFrame::from_json`. `records_as_json` is for the repository's serializable-record and fixture contract; the SQL builder must still render typed, finite values into its trusted `VALUES` CTE rather than treating JSON as SQL.
-
-A fixed builder can be shaped as follows:
-
-```rust
-fn build_iching_join_sql(
-    klines: &[Kline],
-    records: &[IchingRecord],
-) -> Result<String, MarketError> {
-    let klines_cte = build_klines_values_cte(klines);
-    let iching_rows = records
-        .iter()
-        .map(render_iching_values_row)
-        .collect::<Result<Vec<_>, MarketError>>()?
-        .join(",\n        ");
-
-    Ok(format!(
-        r#"WITH {klines_cte},
-iching(time, iching_binary_index, iching_polarity, iching_kinetic, iching_moving_line) AS (VALUES
-        {iching_rows}
-)
-SELECT klines.time, klines.open, klines.high, klines.low, klines.close,
-       klines.volume, klines.adj_close, iching.iching_binary_index,
-       iching.iching_polarity, iching.iching_kinetic, iching.iching_moving_line
-FROM klines LEFT JOIN iching ON klines.time = iching.time
-ORDER BY klines.time"#
-    ))
-}
-```
-
-The helper emits the `klines(...)` relation shown above; the sketch therefore uses `klines` consistently and does not invent a `candles` relation or alias. The exact existing candle CTE may be composed into the engine's current recursive indicator query rather than copied. The invariants are fixed identifiers, one statement, no caller SQL, and the I Ching join occurring after Rust calculation.
-
-### 5.5 Runtime constraints
-
-- When set, `DUCKDB_LIBRARY_PATH` is validated only for nonempty, absolute, regular-file shape before dynamic loading. Dynamic loading and required C-API symbol resolution then establish whether the selected library is compatible; path validation does not prevalidate readability or architecture.
-- If the variable is unset, the existing platform loader-name fallback may be used according to the engine contract; this is still a local shared library, not a network lookup.
-- The runtime opens `:memory:` only. A missing or incompatible library is an explicit typed error; it is not a reason to select another compute backend.
-- SQL is fixed and read-only. The current FFI rejects empty SQL, semicolon-separated statements, and destructive statement keywords. The I Ching integration must remain inside that capability boundary.
-- No dependency on a server, networked database, downloaded extension, persistent database file, or runtime SQL function registration is required.
-
-### 5.6 Future extension: native DuckDB function registration
-
-**Not part of this implementation.** If native DuckDB scalar/table function registration is later designed, it must begin with an explicit FFI capability and an ABI/lifetime/thread-safety review. The extension would need:
-
-1. a versioned C-API surface for registration and callback ownership;
-2. a proof that callbacks cannot outlive the Rust-owned calculator state;
-3. fixed argument and nullability contracts;
-4. parity tests against the Rust-pure calculator; and
-5. a decision on whether registration remains private and read-only.
-
-Until those gates pass, no UDF registration is assumed and the trusted derived-data CTE join is the only integration design.
+The `computed()` virtual table function is the standard DuckDB adapter entry point (see [docs/architecture/stream-and-duckdb-data-flow.md](../../../docs/architecture/stream-and-duckdb-data-flow.md)). The SQL above is illustrative; the exact column names depend on the application projector's declared output columns.
 
 ## 6. Staged Implementation and Machine-Verifiable Acceptance
 
-### Stage 0 — Domain and contract freeze
+> **All stages below are planned.** No implementation currently exists. All verification commands, gate descriptions, and status annotations describe proposed future acceptance criteria.
 
-Approve the lunar-calendar input source, solar-longitude tolerance, Gregorian/UTC conversion behavior, and the 64-entry wheel order. Record each decision in fixtures or versioned policy types. The data-source approval gate **passes only if** the selected lunar-calendar source/version, solar reference or expected-longitude fixture source/version, `1e-9°` non-boundary tolerance, and approved 64-entry wheel-order table are all recorded. It **fails** if any source, version, tolerance, or table is missing; implementation must stop rather than silently substituting one.
+### Stage 0 — Domain and contract freeze (method-scoped)
 
-### Stage 1 — Rust-pure calculator
+Stage 0 is split by method. Gua Qi and Fu Xi share a solar-longitude and wheel-ordering gate. Plum Blossom requires a separate, additional lunar-calendar gate.
 
-Implement and test `ta::iching` without engine or DuckDB imports.
+#### Stage 0a — Gua Qi and Fu Xi gate (planned)
 
-Machine-verifiable acceptance:
+The planned gate verifies: solar-longitude tolerance (`1e-9°` non-boundary, `1e-12°` boundary-stabilization epsilon), Gregorian/UTC–Julian-day conversion, and the approved 64-entry Fu Xi wheel-order table. Unit-test fixtures must cover all twelve sovereign boundary cases and representative seasonal fixtures.
+
+**Status: Planned — not yet implemented.**
+
+#### Stage 0b — Plum Blossom lunar-calendar gate (planned)
+
+The Plum Blossom gate depends on the offline lunar-calendar adapter (see [`docs/architecture/iching-lunar-calendar-integration.md`](../../architecture/iching-lunar-calendar-integration.md)). The offline gate **plans to verify:**
+
+- The offline lunar-calendar adapter compiles and all unit and integration tests pass.
+- Synthetic repository fixture files exist covering at least: one non-leap date set and one leap-month date (for the fail-closed test).
+- The leap-month fail-closed rule is verified: a fixture with `is_leap_month = true` under the default `LeapMonthPolicy::Reject` yields a typed error with no output produced; `LeapMonthPolicy::Allow` permits casting and records `leap-allow` in provenance.
+- `LunarFixture` v2 fields are frozen (`schema_version = 2`; Gregorian date, lunar year/month/day, leap flag, fixture_id); fixtures from older schema versions fail closed at `validate()`.
+- An offline replay integration test builds a complete Plum Blossom snapshot from synthetic fixtures without network access; `snapshot_id` is deterministic and folds the policy ID, fixture schema version, Zi-hour flag, and per-date fixture semantic identities.
+- The v1 same-local-date Zi-hour rule is tested: a candle at CST `[23:00, 24:00)` keeps the same local date as the lookup key and assigns `hour_branch = 1`.
+
+The gate **plans to fail** if any of the above are missing, or if the lunar adapter introduces any network access, environment-variable reads, or async runtime dependency.
+
+> **Future work — live remote calendar provider integration.** A future monitor or Telegram bot that needs live lunar-calendar resolution must implement the remote adapter at the application layer, not in the offline adapter. That future gate would additionally require: provider selection and live endpoint validation (sustained availability, fair-use compliance under production traffic, terms of use, redistribution rights); a PVC-backed or filesystem cache for normalized `LunarFixture` v2 documents with cache-first resolution and bounded retries; and production approval before any monitoring deployment. Offline charting from caller-supplied synthetic fixtures is unaffected by and independent of that future work.
+
+### Stage 1 — Rust-pure calculator (planned)
+
+Implement and test `ta::iching` without engine or query adapter imports.
+
+Planned machine-verifiable acceptance:
 
 - Trigram round trips preserve the bottom-to-top line array and the top-to-bottom display string.
 - All twelve sovereign fixtures match the exact sectors, bit strings, Yang counts, and binary indices in §3.2.
@@ -530,10 +476,13 @@ Machine-verifiable acceptance:
 
 - Fixed expected UTC fixtures for the selected winter solstice, spring equinox, summer solstice, and autumn equinox inputs return Fu, Da Zhuang, Gou, and Guan respectively, subject to the `1e-9°` non-boundary tolerance when the fixture is not a boundary case.
 - Plum Blossom fixtures verify moving-line calculation, bottom-to-top flipping, transformed hexagram, and mutual/nuclear line selection.
+- Plum Blossom fixtures are synthetic (hand-authored); no raw remote-provider payload may be committed to the repository.
+- The Zi-hour rule is tested under the approved v1 policy: a candle open timestamp in CST `[23:00, 24:00)` keeps the **same** Gregorian civil date as the calendar lookup key and assigns `hour_branch = 1`.
+- An offline replay integration test builds a complete Plum Blossom snapshot from synthetic lunar-date fixtures without network access; `snapshot_id` is deterministic across identical inputs and incorporates the frozen time-policy ID plus per-date fixture/schema-version provenance (see [`docs/architecture/iching-lunar-calendar-integration.md`](../../architecture/iching-lunar-calendar-integration.md)).
 - Sovereign fixtures verify `moving_line=None` and `kinetic_score=0.0`.
 - Wheel fixtures verify 64-bin and six-position half-open behavior without converting geometric position into a moving line.
 
-The exact unit-test gate is:
+The exact unit-test gate (planned):
 
 ```text
 cargo test -p algotrap --lib ta::iching -- --nocapture
@@ -541,52 +490,44 @@ cargo test -p algotrap --lib ta::iching -- --nocapture
 
 It passes only when the command exits `0`, reports at least one I Ching test, and all listed fixtures—including the `1e-9°` non-boundary comparisons and the exact boundary table—pass. A nonzero exit, zero matching tests, or any failed assertion is a gate failure.
 
-### Stage 2 — Signal and serialization contract
+### Stage 2 — Signal and serialization contract (planned)
 
-Machine-verifiable acceptance:
+Planned machine-verifiable acceptance:
 
 - Tests cover first-row, source-row null/unparseable timestamp rejection before `Kline` construction, null-signal, out-of-order, duplicate, and zero/negative-delta cases. No current test preserves a null-time `Kline`; a future nullable-ingestion extension would require its own contract and fixtures.
 - `RejectOutOfOrder`, stable `SortAscending`, `RejectDuplicates`, `KeepFirst`, and `KeepLast` produce the documented results.
-- Derivatives use seconds from epoch milliseconds and never divide by zero.
-- Every present numeric output is finite; optional outputs serialize as JSON `null` and DuckDB `NULL`.
+- Derivatives use seconds from the resolved timestamp unit and never divide by zero.
+- Every present numeric output is finite; optional outputs serialize as JSON `null` and SQL `NULL`.
 - `serde_json` round trips preserve field names, `moving_line=None`, and nullable values without `NaN` or infinity.
 
-### Stage 3 — DuckDB engine integration
+### Stage 3 — Optional DuckDB SQL projection (planned)
 
-Machine-verifiable acceptance:
+Planned machine-verifiable acceptance:
 
-- The integration uses only the existing private, read-only C-API FFI and `DuckDBComputedFrame`/`ComputedFrame` conventions.
-- A runtime test with a local shared library selected by `DUCKDB_LIBRARY_PATH` opens DuckDB in memory, executes the fixed join, and returns the expected JSON records and columns. Runtime availability **passes only if** dynamic loading, required C-API symbol resolution, the in-memory query, and result assertions all succeed; it **fails** on an unset fallback that cannot load, an invalid override, a load/symbol error, a query error, or a result mismatch.
-- The generated SQL contains only engine-owned identifiers, one `WITH`/`SELECT` statement, checked `VALUES` data, a time join, and the fixed projection.
+- The integration uses only the standard `DuckDBQuery` → `QueryResultFrame` projection seam through `RawQuery::source_controlled`.
+- A runtime test opens an in-memory DuckDB connection through `src/query/duckdb/session`, executes source-controlled SQL, and returns the expected `QueryResultFrame` records and columns.
+- The generated SQL uses only `computed()` virtual table and standard identifiers; no caller-supplied identifier interpolation.
 - Tests prove null preservation and row-order preservation through the `ComputedFrame` accessors.
 - No networked database, persistent database, arbitrary SQL input, or function-registration capability is required.
 
-The exact integration and runtime gates are:
+The exact integration and runtime gates (planned):
 
 ```text
-DUCKDB_LIBRARY_PATH=/opt/homebrew/lib/libduckdb.dylib cargo test -p algotrap --lib engine::duckdb_engine::tests::iching_join_preserves_nulls_and_order -- --exact --nocapture
-DUCKDB_LIBRARY_PATH=/opt/homebrew/lib/libduckdb.dylib cargo test -p algotrap --lib engine::duckdb_ffi::tests::duckdb_runtime_contract -- --exact --ignored --nocapture
+cargo test -p algotrap --lib query::duckdb -- --nocapture
 ```
 
-The integration command must report exactly one passing named test and no failures. The runtime command must report exactly one passing ignored test and no failures; otherwise runtime availability is not approved. The explicit path is an example of the configured local override used by the repository's runtime gate; the test must still exercise the current nonempty/absolute/regular-file validation followed by dynamic loading and symbol resolution.
+The integration command must report no failures. Runtime availability is validated by the standard engine DuckDB loading contract (see [docs/engineering/quality-gates.md](../../../docs/engineering/quality-gates.md)).
 
-### Stage 4 — Repository and quality gate
+### Stage 4 — Repository and quality gate (planned)
 
-Machine-verifiable acceptance:
+Planned machine-verifiable acceptance:
 
 - `cargo fmt --check` passes.
 - Focused pure-core tests pass without network access.
-- The local DuckDB runtime contract passes with the configured `DUCKDB_LIBRARY_PATH` under the Stage 3 runtime command; if no candidate can be dynamically loaded and resolve the required symbols, this gate fails rather than selecting another backend.
-- The exact obsolete-coupling search gate is:
+- The DuckDB runtime contract passes with the configured library path; if no candidate can be dynamically loaded and resolve the required symbols, this gate fails rather than selecting another backend.
+- The feature has one DuckDB projection path through the standard `DuckDBQuery` seam and no compatibility branch for another table-computation backend.
 
-  ```text
-  rg -n --glob '*.rs' '(?i)(iching.{0,80}(polars|dataframe|expr)|(polars|dataframe|expr).{0,80}iching)' src >/tmp/iching-obsolete-search.txt; test $? -eq 1
-  ```
-
-  It passes only when `rg` finds no match (the final `test` exits `0`); a match or search error fails the gate.
-- The feature has one DuckDB engine path and no compatibility branch for another table-computation backend.
-
-### Stage 5 — Explicit non-causal market-efficacy gate
+### Stage 5 — Explicit non-causal market-efficacy gate (planned)
 
 This gate is separate from deterministic calculator correctness and cannot block the core feature by claiming predictive success. If a later research task evaluates market association, it must be explicitly non-causal:
 
@@ -597,3 +538,58 @@ This gate is separate from deterministic calculator correctness and cannot block
 - prohibit conversion of an association or backtest result into a market prediction or trading advice.
 
 PLV/Hilbert work remains deferred until the numerical method and dependency are approved. A passing backtest is neither required nor sufficient for acceptance of the deterministic feature.
+
+## 7. Supportive Citations & Academic References
+
+### 7.1 Astronomical Ephemeris & Solar Coordinates (§3.2, §6 Stage 1)
+
+- **Meeus, Jean (1998).** *Astronomical Algorithms* (2nd ed.). Richmond, VA: Willmann-Bell, Inc. ISBN: 978-0943396613.
+  - *Annotation:* Chapter 25 ("Solar Coordinates", pp. 163–169) provides the standard low-precision polynomial approximations for the Sun's geometric mean longitude ($L_0$), mean anomaly ($M$), and Equation of the Center ($C$) referenced to standard epoch J2000.0 ($JD = 2451545.0$).
+- **Simon, J. L., Bretagnon, P., Chapront, J., Chapront-Touzé, M., Francou, G., & Laskar, J. (1994).** "Numerical expressions for precession formulae and mean elements for the Moon and the planets." *Astronomy and Astrophysics*, 282, 663–683.
+  - *Annotation:* Establishes the planetary theory (VSOP87) baseline supporting the $10^{-9\circ}$ non-boundary validation tolerance in Stage 1.
+- **Urban, Sean E., & Seidelmann, P. Kenneth (Eds.) (2012).** *Explanatory Supplement to the Astronomical Almanac* (3rd ed.). Mill Valley, CA: University Science Books. ISBN: 978-1891389856.
+  - *Annotation:* Standard reference for Julian Day ($JD$) number computation, UTC epoch time fractioning, and ecliptic coordinate systems.
+
+### 7.2 Classical Sinological & I Ching Numerology Systems (§2.1–§2.3, §3.1–§3.3, §4.2)
+
+- **Nielsen, Bent (2003).** *A Companion to Yi Jing Numerology and Cosmology: Chinese Studies of Images and Numbers from Han (202 BCE–220 CE) to Song (960–1279 CE)*. London: RoutledgeCurzon. ISBN: 978-0700716081.
+  - *Annotation:* Comprehensive academic reference on *Xiangshu* (象數) Yixue, documenting the historical mechanics of Han Dynasty *Gua Qi* (卦氣, Meng Xi and Jing Fang), the Twelve Sovereign/Tidal Hexagrams (十二辟卦 / 十二消息卦), mutual/nuclear hexagrams (互卦), and Five Elements (五行) interactions.
+- **Liu, Da (1979).** *I Ching Numerology: Based on Shao Yung's Classic Plum Blossom Numerology*. San Francisco: Harper & Row / Routledge & Kegan Paul. ISBN: 978-0710002440.
+  - *Annotation:* Primary English reference for Plum Blossom (*Mei Hua Yi Shu* 梅花易數) calculation rules, modular arithmetic for trigram derivation ($S_1 \pmod 8$, $S_2 \pmod 8$), moving lines ($S2 \pmod 6$), and transformed hexagrams.
+- **Birdwhistell, Anne D. (1989).** *Transition to Neo-Confucianism: Shao Yung on Knowledge and Symbols of Reality*. Stanford, CA: Stanford University Press. ISBN: 978-0804715508.
+  - *Annotation:* Analyzes Shao Yong's (邵雍, 1011–1077 CE) cosmology and the structural logic of the Prior-to-Heaven (Xiantian 先天) trigram sequence and the *Huangji Jingshi* (皇極經世).
+- **Smith, Richard J. (2008).** *Fathoming the Cosmos and Ordering the World: The Yijing (I Ching) and Its Evolution in China*. Charlottesville: University of Virginia Press. ISBN: 978-0813927053.
+  - *Annotation:* Historical examination of hexagram orderings, seasonal calendar correlations, and diagrammatic traditions.
+
+### 7.3 Binary Combinatorics & Mathematical Orderings (§2.1, §3.3)
+
+- **Leibniz, Gottfried Wilhelm (1703).** "Explication de l'Arithmétique Binaire, qui se sert des seuls caractères 0 et 1; avec des remarques sur son utilité, et sur ce qu'elle donne le sens des anciennes figures Chinoises de Fohy." *Histoire de l'Académie Royale des Sciences avec les Mémoires de Mathématique et de Physique*, Paris, pp. 85–89.
+  - *Annotation:* Establishes the mathematical mapping between binary positional arithmetic ($B \in [0, 63]$) and the 6-line Yin/Yang hexagram permutations.
+- **Needham, Joseph (1956).** *Science and Civilisation in China, Volume 2: History of Scientific Thought*. Cambridge: Cambridge University Press. (Section 13: "The Book of Changes", pp. 340–345).
+  - *Annotation:* Analyzes the mathematical symmetry and binary combinatorial structure of the 64 hexagrams.
+- **Sung, Z. D. (1935).** *The Symbols of Yi King (or The Symbols of The Book of Changes)*. Shanghai: The China Modern Education Co. (Reprinted 1969 by Paragon Book Reprint Corp.).
+  - *Annotation:* Details the geometric and angular quantization of the 64-hexagram circular wheel ($360^\circ / 64 = 5.625^\circ$, $0.9375^\circ$ per line).
+
+### 7.4 Digital Signal Processing & Cycle Phase Synchronization (§4.4, §4.5, §6 Stage 5)
+
+- **Lachaux, Jean-Philippe, Rodriguez, Eugenio, Martinerie, Jacques, & Varela, Francisco J. (1999).** "Measuring phase synchrony in brain signals." *Human Brain Mapping*, 8(4), 194–208. DOI: 10.1002/(SICI)1097-0193(1999)8:4<194::AID-HBM4>3.0.CO;2-C.
+  - *Annotation:* Foundational paper for the Phase-Locking Value (PLV) formulation referenced in §1.2 and §4.5 for quantifying phase coupling across non-stationary cyclical processes.
+- **Boashash, Boualem (1992).** "Estimating and interpreting the instantaneous frequency of a signal—Part 1: Fundamentals." *Proceedings of the IEEE*, 80(4), 520–538. DOI: 10.1109/5.135376.
+  - *Annotation:* Theoretical treatment of the Hilbert transform, analytic signal representation, and instantaneous phase calculation.
+- **Ehlers, John F. (2001).** *Rocket Science for Traders: Digital Signal Processing Applications*. New York: John Wiley & Sons. ISBN: 978-0471401650.
+  - *Annotation:* Groundbreaking application of Hilbert transform-derived phase angle, cyclical feature quantization, and discrete derivatives to market time-series.
+- **Ehlers, John F. (2013).** *Cycle Analytics for Traders: Advanced Technical Trading Concepts*. Hoboken, NJ: John Wiley & Sons. ISBN: 978-1118728512.
+  - *Annotation:* Advanced techniques for measuring empirical cycle periods and phase synchronization in market data.
+
+### 7.5 Quantitative Finance, Calendar Cycles & Anti-Overfitting Governance (§1.2, §4.5, §6 Stage 5)
+
+- **Bailey, David H., Borwein, Jonathan M., López de Prado, Marcos, & Zhu, Qiji Jim (2014).** "Pseudo-Mathematics and Financial Charlatanism: The Dangers of Backtest Overfitting." *Notices of the American Mathematical Society*, 61(5), 458–471. DOI: 10.1090/noti1105.
+  - *Annotation:* Establishes the dangers of data mining and justifies the strict non-causal isolation of deterministic indicator engineering from backtest efficacy claims in §1.2 and §6 Stage 5.
+- **Harvey, Campbell R., Liu, Yan, & Zhu, Heqing (2016).** "… and the Cross-Section of Expected Returns." *The Review of Financial Studies*, 29(1), 5–68. DOI: 10.1093/rfs/hhv059.
+  - *Annotation:* Justifies multiple-testing corrections and strict statistical hurdles for newly proposed market cycle and anomaly factors.
+- **López de Prado, Marcos (2018).** *Advances in Financial Machine Learning*. Hoboken, NJ: John Wiley & Sons. ISBN: 978-1119482086.
+  - *Annotation:* Standard reference for non-causal time-series feature engineering, chronological train/test partitioning, and fractional differentiation.
+- **Yuan, Kathy, Zheng, Lu, & Zhu, Qiaoqiao (2006).** "Are investors moonstruck? Lunar phases and stock returns." *Journal of Empirical Finance*, 13(1), 1–23. DOI: 10.1016/j.jempfin.2005.06.001.
+  - *Annotation:* Peer-reviewed empirical benchmark investigating global market return distributions across calendar/lunar cycles under controlled econometric conditions.
+- **Kamstra, Mark J., Kramer, Lisa A., & Levi, Maurice D. (2003).** "Winter Blues: A SAD Stock Market Cycle." *American Economic Review*, 93(1), 324–343. DOI: 10.1257/000282803321455322.
+  - *Annotation:* Peer-reviewed benchmark documenting seasonal and solar daylight cycle anomalies in market returns.

@@ -20,6 +20,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ─── Cook: build ONLY dependencies (cached until Cargo.toml/lock change) ─────
 FROM chef AS cook
 
+ENV DUCKDB_DOWNLOAD_LIB=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -46,15 +48,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/cargo-target \
     CARGO_TARGET_DIR=/cargo-target cargo build --release -p cryptobot --bin cryptobot && \
     cp /cargo-target/release/cryptobot /build/cryptobot && \
-    strip /build/cryptobot
-
-# ─── Pinned DuckDB shared library ─────────────────────────────────────────────
-FROM --platform=$TARGETPLATFORM debian:bookworm AS duckdb-builder
-ARG TARGETPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
-COPY docker/duckdb/ /usr/local/src/duckdb/
-RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/install-libduckdb.sh
+    strip /build/cryptobot && \
+    mkdir -p /build-artifacts && \
+    cp /cargo-target/release/deps/libduckdb.so /build-artifacts/libduckdb.so
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
 FROM --platform=$TARGETPLATFORM node:20-slim
@@ -68,10 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /build/cryptobot .
-COPY --from=duckdb-builder /opt/duckdb/lib/libduckdb.so /usr/local/lib/libduckdb.so
-COPY --from=duckdb-builder /opt/duckdb/libexec/duckdb-smoke /usr/local/libexec/duckdb-smoke
-COPY --from=duckdb-builder /opt/duckdb-artifacts/ /usr/local/share/algotrap/
-RUN /usr/local/libexec/duckdb-smoke
+COPY --from=builder /build-artifacts/libduckdb.so /usr/local/lib/libduckdb.so
+RUN ldconfig
 # node:20-slim is Debian/glibc, matching the native Rust binary and built DuckDB library.
 ENV DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so
 

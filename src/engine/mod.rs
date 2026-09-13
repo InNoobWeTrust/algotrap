@@ -1,38 +1,19 @@
-//! Engine abstraction layer for compute backend neutrality.
+//! Engine-owned result frames and validation boundaries.
 //!
-//! This module provides the boundary between downstream consumers and DuckDB computation.
-//!
-//! # Architecture
-//!
-//! - [`MarketFrameEngine`]: Trait producing [`ComputedFrame`] values
-//! - [`ComputedFrame`]: table access for charts, tools, and serialization
-//! - [`DuckDBEngine`]: the shared compute implementation
+//! This module owns [`SourceColumnData`], [`SourceFrame`], [`QueryResultFrame`], and
+//! [`ComputedFrame`] table access for charts, tools, and serialization.
 
-pub mod duckdb_engine;
-mod duckdb_ffi;
-mod duckdb_ta_table_function;
+/// Engine error types.
 pub mod error;
-pub mod execution_strategy;
-pub mod gap_zones;
-mod indicators;
-mod ta_execution;
-/// Creates the single shared DuckDB-backed compute engine.
-pub fn create_engine() -> Box<dyn traits::MarketFrameEngine> {
-    Box::new(duckdb_engine::DuckDBEngine::new())
-}
-pub mod kline_batch;
-pub mod telegram_config;
+/// Owned result-frame types and accessors.
+pub mod frame;
+/// Engine-neutral frame access contracts.
 pub mod traits;
+/// Ticker input validation types.
 pub mod validation;
 
 // Re-export types for convenience
-pub use duckdb_engine::{
-    CryptoBatchRequest, CryptoBatchResult, DuckDBComputedFrame, DuckDBEngine, TelegramBatchRequest,
-    TelegramBatchResult,
-};
 pub use error::{ErrorKind, MarketError};
-pub use execution_strategy::{ExecutionInstructions, ExecutionStrategy};
-pub use kline_batch::{BatchLimits, RawKlineBatch};
-pub use telegram_config::TelegramIndicatorConfig;
-pub use traits::{ComputedFrame, MarketFrameEngine};
-pub use validation::{Ticker, ValidatedIndicator, ValidatedTicker};
+pub use frame::{SourceColumnData, SourceFrame, QueryResultFrame};
+pub use traits::ComputedFrame;
+pub use validation::{Ticker, ValidatedTicker};

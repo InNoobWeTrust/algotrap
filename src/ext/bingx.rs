@@ -10,10 +10,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tap::Pipe;
 
 type HmacSha256 = Hmac<Sha256>;
+/// Configured maximum number of klines for a BingX request.
 pub const MAX_LIMIT: u32 = 1440;
+/// Default request timeout, in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// BingX perpetual-futures klines endpoint.
 pub const BINGX_API_KLINES: &str = "https://open-api.bingx.com/openApi/swap/v3/quote/klines";
 
+/// Client for BingX perpetual-futures market data.
 #[derive(Clone)]
 pub struct BingXClient {
     api_key: String,
@@ -29,6 +33,7 @@ impl Default for BingXClient {
 }
 
 impl BingXClient {
+    /// Creates a client using the supplied BingX API credentials.
     pub fn new(api_key: &str, secret_key: &str) -> Self {
         Self {
             api_key: api_key.to_string(),
@@ -41,6 +46,7 @@ impl BingXClient {
         }
     }
 
+    /// Creates an anonymous client with a custom request timeout.
     pub fn with_timeout(timeout_secs: u64) -> Self {
         Self {
             api_key: "".to_string(),
@@ -62,6 +68,7 @@ impl BingXClient {
     }
 
     // Fetch perpetual futures candles
+    /// Fetches perpetual-futures klines for a symbol and interval.
     pub async fn get_futures_klines(
         &self,
         symbol: &str,
