@@ -9,6 +9,7 @@ const CANONICAL_TIMEFRAMES: &[&str] = &[
     "1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
 ];
 
+/// Supported market-data aggregation intervals and their canonical labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 #[allow(clippy::upper_case_acronyms)]
@@ -43,11 +44,14 @@ pub enum Timeframe {
     MOS1 = 43_200,
 }
 
+/// Safe because `Timeframe` is a fieldless, copyable enum with no shared mutable state.
 unsafe impl Sync for Timeframe {}
 
 impl Timeframe {
+    /// Canonical labels for all supported timeframes, in enum order.
     pub const ALL_CANONICAL: &'static [&'static str] = CANONICAL_TIMEFRAMES;
 
+    /// Returns the timeframe's configured minute-equivalent weight.
     pub fn weight(self) -> usize {
         self.into()
     }

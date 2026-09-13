@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
 use algotrap::engine::error::MarketError;
-use algotrap::engine::telegram_config::{IndicatorParamSpec, TelegramIndicatorConfig};
-use algotrap::engine::traits::{ComputedFrame, MarketFrameEngine};
-use algotrap::engine::validation::{ValidatedIndicator, ValidatedTicker};
-use algotrap::engine::{DuckDBEngine, TelegramBatchRequest};
+use algotrap::engine::traits::ComputedFrame;
+use algotrap::engine::validation::ValidatedTicker;
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
 use futures::future::join_all;
@@ -14,81 +12,28 @@ use crate::config::TickerConf;
 
 // ─── Data Fetching ───────────────────────────────────────────────────────────
 
+/// Fetched market data carrying the projected chart frames alongside the
+/// parallel pre-budgeted recent gap zones.
+///
+/// The `dfs` map preserves the `HashMap<Timeframe, Box<dyn ComputedFrame>>`
+/// contract consumed by scoring/LLM; `gap_zones` carries the parallel
+/// `recent_gap_zones` relation per timeframe (empty vec when a timeframe
+/// yields no zones, missing entry only when that sibling failed).
+pub struct MarketData {
+    pub dfs: HashMap<Timeframe, Box<dyn ComputedFrame>>,
+    pub gap_zones: HashMap<Timeframe, Vec<algotrap::query::gap_zones::GapZoneRecord>>,
+}
+
 fn validated_ticker(ticker: &TickerConf) -> Result<ValidatedTicker, MarketError> {
     ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent)
 }
 
-fn telegram_indicator_config(ic: &crate::memory::IndicatorConfig) -> TelegramIndicatorConfig {
-    let indicators = ic
-        .indicators
-        .iter()
-        .map(|(name, params)| {
-            (
-                name.clone(),
-                IndicatorParamSpec {
-                    period: params.period.as_ref().map(|spec| spec.clamped() as usize),
-                    smooth: params.smooth.as_ref().map(|spec| spec.clamped() as usize),
-                },
-            )
-        })
-        .collect();
-
-    TelegramIndicatorConfig { indicators }
-}
-
-fn push_unique(indicators: &mut Vec<ValidatedIndicator>, indicator: ValidatedIndicator) {
-    if !indicators.iter().any(|existing| existing == &indicator) {
-        indicators.push(indicator);
-    }
-}
-
-fn validated_indicators(ic: &crate::memory::IndicatorConfig) -> Vec<ValidatedIndicator> {
-    let mut indicators = vec![
-        ValidatedIndicator::Date,
-        ValidatedIndicator::SMA,
-        ValidatedIndicator::EMA,
-        ValidatedIndicator::RSI,
-        ValidatedIndicator::RevRsi,
-        ValidatedIndicator::ATR,
-        ValidatedIndicator::ATRRevPercent,
-        ValidatedIndicator::BandReversion,
-        ValidatedIndicator::BiasReversion,
-        ValidatedIndicator::Sharpe,
-        ValidatedIndicator::StructurePower,
-        ValidatedIndicator::IsAtrGap,
-        ValidatedIndicator::BodyRatio,
-        ValidatedIndicator::Leverage,
-    ];
-
-    for (name, params) in &ic.indicators {
-        if !params.active {
-            continue;
-        }
-
-        match name.as_str() {
-            "ema200" => push_unique(&mut indicators, ValidatedIndicator::EMA),
-            "rssi" => push_unique(&mut indicators, ValidatedIndicator::RSI),
-            "revrsi" => push_unique(&mut indicators, ValidatedIndicator::RevRsi),
-            "atr" => push_unique(&mut indicators, ValidatedIndicator::ATR),
-            "structure_power" => push_unique(&mut indicators, ValidatedIndicator::StructurePower),
-            "sharpe" => push_unique(&mut indicators, ValidatedIndicator::Sharpe),
-            "bias_reversion" => push_unique(&mut indicators, ValidatedIndicator::BiasReversion),
-            "gap_zones" => {
-                push_unique(&mut indicators, ValidatedIndicator::IsAtrGap);
-                push_unique(&mut indicators, ValidatedIndicator::BodyRatio);
-            }
-            _ => {}
-        }
-    }
-
-    indicators
-}
-
+/// Fetches futures klines for every configured timeframe, computes Telegram frames, and returns them by timeframe.
 pub async fn fetch_all_data(
     client: &ext::bingx::BingXClient,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
-) -> Result<HashMap<Timeframe, Box<dyn ComputedFrame>>, Box<dyn core::error::Error + Send + Sync>> {
+) -> Result<MarketData, Box<dyn core::error::Error + Send + Sync>> {
     let fetched = join_all(
         ticker
             .tfs
@@ -115,73 +60,68 @@ pub async fn fetch_all_data(
             }
         })
         .collect();
-    let all_dfs = compute_telegram_frames(fetched, ticker, ic);
+    let data = compute_telegram_frames(fetched, ticker, ic).await;
 
-    Ok(all_dfs)
+    Ok(data)
 }
 
-pub fn process_data(
+/// Computes a Telegram frame from the supplied klines and ticker configuration.
+pub async fn process_data(
     klines: &[Kline],
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
 ) -> Result<Box<dyn ComputedFrame>, MarketError> {
     let validated_ticker = validated_ticker(ticker)?;
-    let indicators = validated_indicators(ic);
-    let config = telegram_indicator_config(ic);
-
-    DuckDBEngine::new().compute_telegram(klines, validated_ticker, indicators, &config)
+    crate::presentation::compute_telegram_frame(klines.to_vec(), validated_ticker, ic)
+        .await
+        .map(|(frame, _)| frame)
 }
 
-fn compute_telegram_frames(
+async fn compute_telegram_frames(
     fetched: Vec<(Timeframe, Vec<Kline>)>,
     ticker: &TickerConf,
     ic: &crate::memory::IndicatorConfig,
-) -> HashMap<Timeframe, Box<dyn ComputedFrame>> {
+) -> MarketData {
     let validated_ticker = match validated_ticker(ticker) {
         Ok(validated_ticker) => validated_ticker,
         Err(err) => {
             for (timeframe, _) in fetched {
                 error!(timeframe = %timeframe, "Invalid ticker config: {err}");
             }
-            return HashMap::new();
-        }
-    };
-    let indicators = validated_indicators(ic);
-    let config = telegram_indicator_config(ic);
-    let timeframes = fetched
-        .iter()
-        .map(|(timeframe, _)| *timeframe)
-        .collect::<Vec<_>>();
-    let requests = fetched
-        .into_iter()
-        .map(|(_, klines)| TelegramBatchRequest {
-            klines,
-            ticker: validated_ticker.clone(),
-            indicators: indicators.clone(),
-            config: config.clone(),
-        })
-        .collect();
-    let results = match DuckDBEngine::new().compute_telegram_batch(requests, None) {
-        Ok(results) => results,
-        Err(err) => {
-            for timeframe in timeframes {
-                error!(timeframe = %timeframe, "Error processing klines: {err}");
-            }
-            return HashMap::new();
+            return MarketData {
+                dfs: HashMap::new(),
+                gap_zones: HashMap::new(),
+            };
         }
     };
 
-    timeframes
-        .into_iter()
-        .zip(results)
-        .filter_map(|(timeframe, result)| match result.result {
-            Ok(frame) => Some((timeframe, Box::new(frame) as Box<dyn ComputedFrame>)),
+    let computations = fetched.into_iter().map(|(timeframe, klines)| {
+        let validated_ticker = validated_ticker.clone();
+        async move {
+            (
+                timeframe,
+                crate::presentation::compute_telegram_frame(klines, validated_ticker, ic).await,
+            )
+        }
+    });
+
+    let mut dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = HashMap::new();
+    let mut gap_zones: HashMap<
+        Timeframe,
+        Vec<algotrap::query::gap_zones::GapZoneRecord>,
+    > = HashMap::new();
+    for (timeframe, result) in join_all(computations).await {
+        match result {
+            Ok((frame, zones)) => {
+                dfs.insert(timeframe, frame);
+                gap_zones.insert(timeframe, zones);
+            }
             Err(err) => {
                 error!(timeframe = %timeframe, "Error processing klines: {err}");
-                None
             }
-        })
-        .collect()
+        }
+    }
+    MarketData { dfs, gap_zones }
 }
 
 #[cfg(test)]
@@ -215,8 +155,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn telegram_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
+    #[tokio::test]
+    async fn telegram_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
         let ticker = ticker();
         let indicators = crate::memory::IndicatorConfig::default();
         let valid_5m = klines(100.0);
@@ -224,7 +164,7 @@ mod tests {
         let mut invalid = klines(300.0);
         invalid[0].open = f64::NAN;
 
-        let frames = compute_telegram_frames(
+        let data = compute_telegram_frames(
             vec![
                 (Timeframe::H1, valid_1h.clone()),
                 (Timeframe::M1, invalid),
@@ -232,17 +172,49 @@ mod tests {
             ],
             &ticker,
             &indicators,
-        );
+        )
+        .await;
 
-        assert_eq!(frames.len(), 2);
-        assert!(!frames.contains_key(&Timeframe::M1));
+        assert_eq!(data.dfs.len(), 2);
+        assert!(!data.dfs.contains_key(&Timeframe::M1));
         for (timeframe, klines) in [(Timeframe::H1, valid_1h), (Timeframe::M5, valid_5m)] {
-            let expected = process_data(&klines, &ticker, &indicators).unwrap();
+            let expected = process_data(&klines, &ticker, &indicators).await.unwrap();
             assert_eq!(
-                frames[&timeframe].to_json_records().unwrap(),
+                data.dfs[&timeframe].to_json_records().unwrap(),
                 expected.to_json_records().unwrap(),
                 "timeframe {timeframe} must retain its matching batch result"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn market_data_isolates_failures_in_both_maps() {
+        let ticker = ticker();
+        let indicators = crate::memory::IndicatorConfig::default();
+        let valid_5m = klines(100.0);
+        let valid_1h = klines(200.0);
+        let mut invalid = klines(300.0);
+        invalid[0].open = f64::NAN;
+
+        let data = compute_telegram_frames(
+            vec![
+                (Timeframe::H1, valid_1h),
+                (Timeframe::M1, invalid),
+                (Timeframe::M5, valid_5m),
+            ],
+            &ticker,
+            &indicators,
+        )
+        .await;
+
+        // Failing sibling drops from BOTH maps; survivors stay in both.
+        assert_eq!(data.dfs.len(), 2);
+        assert_eq!(data.gap_zones.len(), 2);
+        assert!(!data.dfs.contains_key(&Timeframe::M1));
+        assert!(!data.gap_zones.contains_key(&Timeframe::M1));
+        assert!(data.dfs.contains_key(&Timeframe::H1));
+        assert!(data.dfs.contains_key(&Timeframe::M5));
+        assert!(data.gap_zones.contains_key(&Timeframe::H1));
+        assert!(data.gap_zones.contains_key(&Timeframe::M5));
     }
 }

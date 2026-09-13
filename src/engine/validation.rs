@@ -76,37 +76,6 @@ impl std::fmt::Display for ValidatedTicker {
     }
 }
 
-/// Indicator specification for the engine.
-///
-/// These are the allowed indicators that can be computed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ValidatedIndicator {
-    SMA,
-    EMA,
-    RSI,
-    RevRsi,
-    ATR,
-    ATRRevPercent,
-    BandReversion,
-    BiasReversion,
-    Sharpe,
-    StructurePower,
-    IsAtrGap,
-    BodyRatio,
-    Leverage,
-    Date,
-}
-
-impl ValidatedIndicator {
-    /// Returns the output column names for this indicator.
-    ///
-    /// Derived from the indicator binding registry, which is the single place
-    /// where indicators are wired to TA leaves and frame columns.
-    pub fn output_columns(&self) -> Vec<String> {
-        super::indicators::advertised_columns(self)
-    }
-}
-
 /// Parses and validates a ticker symbol.
 ///
 /// # Rules
@@ -178,32 +147,23 @@ mod tests {
         assert!(parse_validated_ticker("").is_err());
         assert!(parse_validated_ticker("BTC/USDT").is_err()); // slash not allowed
         assert!(parse_validated_ticker("BTC USDT").is_err()); // space not allowed
-        assert!(parse_validated_ticker("../BTCUSDT").is_err());
+        assert!(parse_validated_ticker("..").is_err());
+        assert!(parse_validated_ticker("BTC🔥").is_err());
     }
 
     #[test]
     fn test_validated_ticker_new_validates_percentages() {
-        assert!(ValidatedTicker::new("BTCUSDT", 0.02, 0.01).is_ok());
-        assert!(ValidatedTicker::new("BTCUSDT", -0.01, 0.01).is_err());
-        assert!(ValidatedTicker::new("BTCUSDT", 0.02, 1.01).is_err());
+        assert!(ValidatedTicker::new("BTCUSDT", 0.0, 0.0).is_ok());
+        assert!(ValidatedTicker::new("BTCUSDT", 1.0, 1.0).is_ok());
+        assert!(ValidatedTicker::new("BTCUSDT", -0.1, 0.1).is_err());
+        assert!(ValidatedTicker::new("BTCUSDT", 0.1, 1.1).is_err());
     }
 
     #[test]
     fn validated_ticker_exposes_its_validated_risk_percentages_read_only() {
-        let ticker = ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap();
+        let ticker = ValidatedTicker::new("eth-usdt", 0.025, 0.015).unwrap();
 
-        assert_eq!(ticker.risk_percentages(), (0.02, 0.01));
-    }
-
-    #[test]
-    fn test_output_columns_match_engine_aliases() {
-        assert_eq!(
-            ValidatedIndicator::EMA.output_columns(),
-            vec!["ema200".to_string()]
-        );
-        assert_eq!(
-            ValidatedIndicator::RSI.output_columns(),
-            vec!["rssi".to_string(), "rssi_ma".to_string()]
-        );
+        assert_eq!(ticker.as_str(), "ETH-USDT");
+        assert_eq!(ticker.risk_percentages(), (0.025, 0.015));
     }
 }

@@ -140,11 +140,52 @@ fn parse_flow_cell(cell: &Value) -> Result<Option<f64>, Box<dyn Error + Send + S
             .as_f64()
             .ok_or("ETF flow number is not representable as f64")?,
         Value::String(value) => {
-            let cleaned = value.trim().replace(',', "");
-            if cleaned.is_empty() || cleaned == "-" {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed == "-" {
                 return Ok(None);
             }
-            cleaned.parse::<f64>()?
+            // Optional leading `$` may appear outside parentheses (e.g. `$(95.1)`).
+            let (without_outer_dollar, had_outer_dollar) = match trimmed.strip_prefix('$') {
+                Some(rest) => (rest.trim_start(), true),
+                None => (trimmed, false),
+            };
+            let (inner, negative) =
+                if without_outer_dollar.starts_with('(') || without_outer_dollar.ends_with(')') {
+                    if !(without_outer_dollar.starts_with('(')
+                        && without_outer_dollar.ends_with(')')
+                        && without_outer_dollar.len() >= 2)
+                    {
+                        return Err("ETF flow cell has mismatched parentheses".into());
+                    }
+                    let inner = &without_outer_dollar[1..without_outer_dollar.len() - 1];
+                    if inner.contains('(') || inner.contains(')') {
+                        return Err("ETF flow cell has nested parentheses".into());
+                    }
+                    let inner_trimmed = inner.trim();
+                    if inner_trimmed.is_empty() || inner_trimmed == "-" {
+                        return Err("ETF flow cell has empty parentheses".into());
+                    }
+                    (inner_trimmed, true)
+                } else {
+                    (without_outer_dollar, false)
+                };
+            // Optional leading `$` may appear inside parentheses (e.g. `($1,234.5)`).
+            let (without_inner_dollar, had_inner_dollar) = match inner.strip_prefix('$') {
+                Some(rest) => (rest.trim_start(), true),
+                None => (inner, false),
+            };
+            if had_outer_dollar && had_inner_dollar {
+                return Err("ETF flow cell has duplicate dollar signs".into());
+            }
+            let cleaned = without_inner_dollar.replace(',', "");
+            if cleaned.is_empty() || cleaned == "-" {
+                return Err("ETF flow cell has no digits".into());
+            }
+            if negative && (cleaned.starts_with('+') || cleaned.starts_with('-')) {
+                return Err("ETF flow cell has a sign inside parentheses".into());
+            }
+            let parsed: f64 = cleaned.parse()?;
+            if negative { -parsed } else { parsed }
         }
         _ => return Err("ETF flow cell must be a number, string, or null".into()),
     };
@@ -310,9 +351,9 @@ const SOL_TICKER: &str = "SOL-USD";
 const ETF_BTC_URL: &str = "https://farside.co.uk/bitcoin-etf-flow-all-data/";
 const ETF_ETH_URL: &str = "https://farside.co.uk/ethereum-etf-flow-all-data/";
 const ETF_SOL_URL: &str = "https://farside.co.uk/sol/";
-const ETF_BTC_EXTRACT_SCRIPT: &str = r#"const table = arguments[0]; const rows = [...table.rows]; const headerIndex = rows.findIndex(row => [...row.cells].some(cell => cell.innerText.trim() === 'Date')); if (headerIndex < 0) throw new Error('ETF table has no Date header'); const headers = [...rows[headerIndex].cells].map(cell => cell.innerText.trim()).filter(Boolean); return rows.slice(headerIndex + 1).map(row => [...row.cells].map(cell => cell.innerText.trim())).filter(cells => cells.length >= headers.length && /^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/.test(cells[0])).map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] === '-' ? null : cells[index]))));"#;
-const ETF_ETH_EXTRACT_SCRIPT: &str = ETF_BTC_EXTRACT_SCRIPT;
-const ETF_SOL_EXTRACT_SCRIPT: &str = ETF_BTC_EXTRACT_SCRIPT;
+const ETF_BTC_EXTRACT_SCRIPT: &str = r#"const table = arguments[0]; const rows = [...table.rows]; const headerIndex = rows.findIndex(row => [...row.cells].some(cell => cell.innerText.trim() === 'Date')); if (headerIndex < 0) throw new Error('ETF table has no Date header'); const headers = [...rows[headerIndex].cells].map(cell => cell.innerText.trim()).filter(Boolean); return rows.slice(headerIndex + 1).map(row => [...row.cells].map(cell => cell.innerText.trim())).filter(cells => cells.length >= headers.length && /^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/.test(cells[0])).map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] === '-' ? null : cells[index]])));"#;
+const ETF_ETH_EXTRACT_SCRIPT: &str = r#"const table = arguments[0]; const rows = [...table.rows]; const headerIndex = rows.findIndex(row => [...row.cells].some(cell => cell.innerText.trim() === 'ETHA')); if (headerIndex < 0) throw new Error('ETF table has no ETHA header'); const headers = [...rows[headerIndex].cells].map(cell => cell.innerText.trim()).filter(Boolean); headers[0] = 'Date'; headers[headers.length - 1] = 'Total'; return rows.slice(headerIndex + 1).map(row => [...row.cells].map(cell => cell.innerText.trim())).filter(cells => cells.length >= headers.length && /^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/.test(cells[0])).map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] === '-' ? null : cells[index]])));"#;
+const ETF_SOL_EXTRACT_SCRIPT: &str = r#"const table = arguments[0]; const rows = [...table.rows]; const headerIndex = rows.findIndex(row => [...row.cells].some(cell => cell.innerText.trim() === 'BSOL')); if (headerIndex < 0) throw new Error('ETF table has no BSOL header'); const headers = [...rows[headerIndex].cells].map(cell => cell.innerText.trim()).filter(Boolean); headers[0] = 'Date'; headers[headers.length - 1] = 'Total'; return rows.slice(headerIndex + 1).map(row => [...row.cells].map(cell => cell.innerText.trim())).filter(cells => cells.length >= headers.length && /^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/.test(cells[0])).map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] === '-' ? null : cells[index]])));"#;
 
 const TDV_HTML_TEMPLATE: &str = r#"<!doctype html><html><head><meta charset=\"utf-8\"><title>{{ symbol }} ETF flows</title></head><body><h1>{{ symbol }} ETF flows</h1><script id=\"dashboard-datasets\" type=\"application/json\">{{ datasets }}</script><script>const datasets=JSON.parse(document.getElementById('dashboard-datasets').textContent);</script></body></html>"#;
 
@@ -379,5 +420,206 @@ mod tests {
         assert!(html.contains("BTC-USD ETF flows"));
         assert!(html.contains("netflow_total"));
         assert!(html.contains("dashboard-datasets"));
+    }
+    #[test]
+    fn btc_extract_script_uses_literal_date_header() {
+        assert!(
+            ETF_BTC_EXTRACT_SCRIPT.contains("=== 'Date'"),
+            "BTC extract script must select the literal Date header row: {ETF_BTC_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_BTC_EXTRACT_SCRIPT.contains("ETF table has no Date header"),
+            "BTC extract script must error on missing Date header: {ETF_BTC_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_BTC_EXTRACT_SCRIPT.ends_with("cells[index]])));"),
+            "BTC extract script tail must close array then map/fromEntries/outer-map: {ETF_BTC_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_BTC_EXTRACT_SCRIPT
+                .contains("Object.fromEntries(headers.map((header, index) => [header,"),
+            "BTC extract script must build rows via Object.fromEntries: {ETF_BTC_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_BTC_EXTRACT_SCRIPT.contains(".filter(Boolean)"),
+            "BTC extract script must drop blank headers so output headers are never blank: {ETF_BTC_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            !ETF_BTC_EXTRACT_SCRIPT.contains("ETHA") && !ETF_BTC_EXTRACT_SCRIPT.contains("BSOL"),
+            "BTC extract script must not reference ETHA/BSOL ticker headers: {ETF_BTC_EXTRACT_SCRIPT}"
+        );
+    }
+    #[test]
+    fn eth_extract_script_repairs_etha_header_row() {
+        assert!(
+            ETF_ETH_EXTRACT_SCRIPT.contains("=== 'ETHA'"),
+            "ETH extract script must select the ETHA ticker header row: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_ETH_EXTRACT_SCRIPT.contains("ETF table has no ETHA header"),
+            "ETH extract script must error on missing ETHA header: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_ETH_EXTRACT_SCRIPT.contains("headers[0]")
+                && ETF_ETH_EXTRACT_SCRIPT.contains("headers[0] = 'Date'"),
+            "ETH extract script must repair headers[0] to Date: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_ETH_EXTRACT_SCRIPT.contains("headers[headers.length - 1]")
+                && ETF_ETH_EXTRACT_SCRIPT.contains("headers[headers.length - 1] = 'Total'"),
+            "ETH extract script must repair final header to Total: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_ETH_EXTRACT_SCRIPT.contains(".filter(Boolean)"),
+            "ETH extract script must drop blank headers so output headers are never blank: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+        let repair = ETF_ETH_EXTRACT_SCRIPT
+            .find("headers[0] = 'Date'")
+            .expect("ETH repair must exist");
+        let body = ETF_ETH_EXTRACT_SCRIPT
+            .find("rows.slice(headerIndex + 1)")
+            .expect("ETH body mapping must exist");
+        assert!(
+            repair < body,
+            "ETH header repair must run before body mapping: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_ETH_EXTRACT_SCRIPT
+                .contains("Object.fromEntries(headers.map((header, index) => [header,"),
+            "ETH extract script must build rows via Object.fromEntries: {ETF_ETH_EXTRACT_SCRIPT}"
+        );
+    }
+    #[test]
+    fn sol_extract_script_repairs_bsol_header_row() {
+        assert!(
+            ETF_SOL_EXTRACT_SCRIPT.contains("=== 'BSOL'"),
+            "SOL extract script must select the BSOL ticker header row: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_SOL_EXTRACT_SCRIPT.contains("ETF table has no BSOL header"),
+            "SOL extract script must error on missing BSOL header: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_SOL_EXTRACT_SCRIPT.contains("headers[0]")
+                && ETF_SOL_EXTRACT_SCRIPT.contains("headers[0] = 'Date'"),
+            "SOL extract script must repair headers[0] to Date: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_SOL_EXTRACT_SCRIPT.contains("headers[headers.length - 1]")
+                && ETF_SOL_EXTRACT_SCRIPT.contains("headers[headers.length - 1] = 'Total'"),
+            "SOL extract script must repair final header to Total: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_SOL_EXTRACT_SCRIPT.contains(".filter(Boolean)"),
+            "SOL extract script must drop blank headers so output headers are never blank: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+        let repair = ETF_SOL_EXTRACT_SCRIPT
+            .find("headers[0] = 'Date'")
+            .expect("SOL repair must exist");
+        let body = ETF_SOL_EXTRACT_SCRIPT
+            .find("rows.slice(headerIndex + 1)")
+            .expect("SOL body mapping must exist");
+        assert!(
+            repair < body,
+            "SOL header repair must run before body mapping: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+        assert!(
+            ETF_SOL_EXTRACT_SCRIPT
+                .contains("Object.fromEntries(headers.map((header, index) => [header,"),
+            "SOL extract script must build rows via Object.fromEntries: {ETF_SOL_EXTRACT_SCRIPT}"
+        );
+    }
+    #[test]
+    fn extract_scripts_are_distinct_and_blank_free() {
+        assert_ne!(
+            ETF_BTC_EXTRACT_SCRIPT, ETF_ETH_EXTRACT_SCRIPT,
+            "BTC and ETH scripts must be distinct"
+        );
+        assert_ne!(
+            ETF_BTC_EXTRACT_SCRIPT, ETF_SOL_EXTRACT_SCRIPT,
+            "BTC and SOL scripts must be distinct"
+        );
+        assert_ne!(
+            ETF_ETH_EXTRACT_SCRIPT, ETF_SOL_EXTRACT_SCRIPT,
+            "ETH and SOL scripts must be distinct"
+        );
+        for script in [
+            ETF_BTC_EXTRACT_SCRIPT,
+            ETF_ETH_EXTRACT_SCRIPT,
+            ETF_SOL_EXTRACT_SCRIPT,
+        ] {
+            assert!(
+                script.contains(".filter(Boolean)"),
+                "every extract script must guarantee no blank output header: {script}"
+            );
+        }
+        assert!(
+            !ETF_ETH_EXTRACT_SCRIPT.contains("=== 'BSOL'")
+                && !ETF_SOL_EXTRACT_SCRIPT.contains("=== 'ETHA'"),
+            "ETH and SOL scripts must not share ticker selectors"
+        );
+    }
+    #[test]
+    fn parse_flow_cell_supports_accounting_negatives() {
+        for (input, expected) in [
+            ("(95.1)", Some(-95.1)),
+            ("($1,234.5)", Some(-1234.5)),
+            ("$123.4", Some(123.4)),
+            ("$1,234.5", Some(1234.5)),
+            ("1,234.5", Some(1234.5)),
+            ("-95.1", Some(-95.1)),
+            ("95.1", Some(95.1)),
+            ("  $123.4  ", Some(123.4)),
+            ("  (95.1)  ", Some(-95.1)),
+            ("( $1,234.5 )", Some(-1234.5)),
+            ("", None),
+            ("   ", None),
+            ("-", None),
+            ("  -  ", None),
+        ] {
+            let cell = Value::String(input.to_string());
+            assert_eq!(
+                parse_flow_cell(&cell).unwrap(),
+                expected,
+                "input {input:?} should parse to {expected:?}"
+            );
+        }
+        assert_eq!(parse_flow_cell(&Value::Null).unwrap(), None);
+        assert_eq!(
+            parse_flow_cell(&json!(12.5)).unwrap(),
+            Some(12.5),
+            "numeric cells must stay numeric"
+        );
+    }
+    #[test]
+    fn parse_flow_cell_rejects_malformed_parentheses_and_nonfinite() {
+        for input in [
+            "(95.1",
+            "95.1)",
+            "()",
+            "( )",
+            "(-)",
+            "($)",
+            "((95.1))",
+            "(95.1))",
+            "(-95.1)",
+            "(+95.1)",
+            "$($123.4)",
+            "inf",
+            "-inf",
+            "+inf",
+            "NaN",
+            "(inf)",
+            "($NaN)",
+            "abc",
+            "$",
+            "$-",
+        ] {
+            let cell = Value::String(input.to_string());
+            assert!(
+                parse_flow_cell(&cell).is_err(),
+                "input {input:?} should be rejected"
+            );
+        }
     }
 }

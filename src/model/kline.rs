@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer};
 use serde_json::Value;
 
+/// A single OHLCV candle with a source timestamp and optional adjusted close.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Kline {
     #[serde(deserialize_with = "de_f64_or_string_as_f64")]

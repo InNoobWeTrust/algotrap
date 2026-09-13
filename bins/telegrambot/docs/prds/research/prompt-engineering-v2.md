@@ -21,7 +21,7 @@ Turn 1: LLM calls data-gathering tools (existing behavior)
 Turn 2: LLM calls `submit_assessment(confidence, direction, summary)`
 Turn 3: LLM calls `submit_trade_plans([{plan A}, {plan B}])`
 Turn 4: LLM calls `submit_weights({rssi: 0.3, ...})`
-Turn 5 (optional): LLM calls `submit_indicator_params({rssi: {period: 10}})`
+Turn 5 (optional): LLM returns `"indicator_params": [{"target":"period","name":"rsi","value":10}]`
 Final: LLM produces empty content (end turn) → pipeline assembles result
 ```
 
@@ -53,7 +53,7 @@ Worth exploring only if output quality is measurably degraded on the monolithic 
 - Reasoning tokens count as output tokens (billed, consume context window)
 - Latency increase is acceptable: 15-min scan cycle gives ample budget
 
-### Implementation
+### Configuration Detail
 
 #### Option A: API-Level (litellm passthrough)
 
@@ -130,9 +130,16 @@ Output: JSON only, no markdown fences.
     "entry": price|null, "target": price|null, "stop": price|null,
     "rationale": "1 sentence" }],
   "significance_threshold": 0.10-0.50,
-  "indicator_params": { "<name>": {"period": int, "active": bool} }
+  "indicator_params": [
+    { "target": "period", "name": "rsi", "value": 14 },
+    { "target": "output", "name": "rssi", "active": true },
+    { "target": "gap_zones", "max_zones": 16, "body_ratio_threshold": 0.618,
+      "atr_band_multiplier": 1.618, "atr_gap_multiplier": 1.0 }
+  ]
 }
 ```
+
+For `gap_zones`, the optional fields are `max_zones` (default 16, range [1, 32]), `body_ratio_threshold` (default 0.618, range [0.0, 1.0]), `atr_band_multiplier` (default 1.618, range [0.5, 5.0]), and `atr_gap_multiplier` (default 1.0, range [0.5, 5.0]). `atr_band_multiplier` controls ATR band width / band-reversion geometry; `atr_gap_multiplier` controls the explicit ATR-distance boundary used by gap candidate detection. All four proposal changes share the ±30% per-cycle rate limit. The pure TA path uses explicit multipliers and owns no multiplier defaults.
 
 This is 10 lines vs. 38 — saving ~400 tokens per request.
 
@@ -276,7 +283,7 @@ Phase 3: Context reset
   LLM continues with fresh context, full state preserved in scratchpad
 ```
 
-#### Implementation (in `run_agent`)
+#### Agent-loop Detail (`run_agent`)
 
 ```rust
 // Before each LLM call, check if handoff is needed
@@ -341,4 +348,3 @@ Exact tokenization isn't needed. Message count is a sufficient proxy — the cur
 3. **Prompt compression vs. context richness**: How much instruction can we remove before the model starts making structural errors (e.g., wrong JSON keys, missing trade plans)?
 4. **Scratchpad key design**: Should the keys be free-form (LLM chooses) or constrained (e.g., only "observations", "conflicts", "assessment")? Free-form is more flexible but constrained keys map better to the final JSON structure.
 5. **Scratchpad injection**: Should notes be injected into the final turn's context automatically, or should the LLM call `read_notes` explicitly? Automatic injection is more reliable for small models.
-

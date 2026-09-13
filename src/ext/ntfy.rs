@@ -2,6 +2,7 @@ use core::error::Error;
 use reqwest::Client;
 use validator::Validate;
 
+/// Builder for an ntfy notification.
 #[derive(Debug, Validate)]
 pub struct NtfyMessage {
     #[validate(url)]
@@ -32,50 +33,60 @@ impl Default for NtfyMessage {
 }
 
 impl NtfyMessage {
+    /// Creates a message builder with the supplied ntfy server URL.
     pub fn new(url: &str) -> Self {
         Self::default().url(url)
     }
 
+    /// Sets the ntfy server URL.
     pub fn url(mut self, url: &str) -> Self {
         self.url = url.to_string();
         self
     }
 
+    /// Sets the notification topic.
     pub fn topic(mut self, topic: &str) -> Self {
         self.topic = Some(topic.to_string());
         self
     }
 
+    /// Sets the notification title.
     pub fn title(mut self, title: &str) -> Self {
         self.title = Some(title.to_string());
         self
     }
 
+    /// Sets a server-side message template.
     pub fn message_template(mut self, message_template: &str) -> Self {
         self.message_template = Some(message_template.to_string());
         self
     }
 
+    /// Sets the notification body.
     pub fn message(mut self, message: &str) -> Self {
         self.message = Some(message.to_string());
         self
     }
 
+    /// Sets the notification priority from 1 to 5.
     pub fn priority(mut self, priority: u8) -> Self {
         self.priority = Some(priority);
         self
     }
 
+    /// Sets notification tags.
     pub fn tags(mut self, tags: Vec<String>) -> Self {
         self.tags = Some(tags);
         self
     }
 
+    /// Sets ntfy action definitions.
     pub fn actions(mut self, actions: Vec<Vec<String>>) -> Self {
         self.actions = Some(actions);
         self
     }
 
+    /// Validates and sends the notification.
     pub async fn send(self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.validate()?;
         if self.topic.is_none() {

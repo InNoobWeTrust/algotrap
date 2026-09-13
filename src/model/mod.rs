@@ -12,8 +12,10 @@ use std::str::FromStr;
 /// NONE/WAIT indicate no actionable directional trade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Direction {
+    /// Long-side directional trade or prediction.
     #[serde(rename = "LONG", alias = "long")]
     Long,
+    /// Short-side directional trade or prediction.
     #[serde(rename = "SHORT", alias = "short")]
     Short,
     /// No actionable trade — market is neutral or inconclusive.

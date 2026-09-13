@@ -1,104 +1,26 @@
-# N/A
+# algotrap
 
-> Some random guy: Hey dude, will you help fixing my issues for free?  
-> Me: No, fuck you!
+algotrap is a Rust workspace for market-analysis services and a shared analysis library. It contains reusable analysis foundations alongside application-specific integrations.
 
-> Another guy: Hey bro, will you make me this super cool bot that will win the whole market so I can be super rich, of course I won't pay you anything he he  
-> Me: No, for fuck's sake, fuck you too!
+## Applications
 
-> Some random guy: Your username look so cool, would you mind if I bought it and scam the ones that know you?  
-> Me: Seriously? Fuck you!
+- **[`cryptobot`](bins/cryptobot/README.md)**: Market-analysis service for cryptocurrency data.
+- **[`telegrambot`](bins/telegrambot/README.md)**: Market-analysis service with Telegram delivery.
+- **[`etf_dashboard`](bins/etf_dashboard/)**: Dashboard application for ETF analysis.
 
-> A poor man: Hey I'm so poor, would you mind...  
-> Me: Fuck you!
+## Architecture
 
-> A cute little girl dressed in cosplay suit grinning at me: 🥰 Hey, would you like to...  
-> Me: What is your OnlyFan? Just shut up and take my money! 🐧
+The shared library owns domain analysis and contracts; applications own orchestration, presentation, and integrations. SQL projection is optional and remains in-process. See [`docs/architecture.md`](docs/architecture.md) and [`src/README.md`](src/README.md) for durable workspace and library guidance.
 
----
+## Documentation
 
-I'm tired with you all trying to exploit me. Please, I'm poor AF, even don't have the luxury to choose the meal I like. No money for you to scam and no free time to fix your issues without being paid upfront at least 50%!
+- [`docs/README.md`](docs/README.md): documentation navigation.
+- [`docs/architecture.md`](docs/architecture.md): workspace architecture.
+- [`docs/engineering/quality-gates.md`](docs/engineering/quality-gates.md): verification gates and prerequisites.
+- [`bins/cryptobot/README.md`](bins/cryptobot/README.md): cryptobot application guide.
+- [`bins/telegrambot/README.md`](bins/telegrambot/README.md): telegrambot application guide.
+- [`bins/etf_dashboard/`](bins/etf_dashboard/): ETF dashboard application.
 
-I'm trying to make money for a living and fund my own research on humanoid robots, so no time to waste for the assholes like you all unless you are cute OnlyFan creators! 🥸
+## Verification
 
-I'm having enough with people that are trying to defame and attacking me as well as the place I'm intending to work. Do you understand what the fucking world I'm living, let alone still try to hurt me more? I wish you all die a painful death, assholes!
-
-You can browse my repos and do whatever you want with it, even call it stupid or crazy, I don't care. But don't try to exploit me anymore ok?
-
-I'm tired with you all bothering me constantly, I don't want to trace your information and hurt everyone that are precious to you due to your selfishness, please consider your attitude when contacting me. If you have bad intentions, be prepared that I will have reciprocal actions to make you suffer the mental pain that I'm having for years. You have been warned! Fuck you all! 😃
-
----
-
-## Services
-
-This repository houses multiple algorithmic trading bits:
-
-- **[`cryptobot`](bins/cryptobot)**: A serverless data-cruncher. It fetches OHLC data across timeframes, computes indicators, and pushes a lightweight frontend with static generated JSON directly to Cloudflare R2 via GitHub Actions.
-- **[`telegrambot`](bins/telegrambot/)**: An LLM-powered market analyst that runs in Kubernetes/Docker, which monitors indicators and sends actionable intelligence (plus chart screenshots) directly to Telegram.
-
-## Deployment
-
-### Shared DuckDB Runtime
-
-All market computation uses DuckDB through its dynamically loaded C library. Production images
-ship `/usr/local/lib/libduckdb.so` and set `DUCKDB_LIBRARY_PATH` to that absolute path. Local
-macOS development must point the same variable at an architecture-matched `libduckdb.dylib`.
-Docker images install DuckDB v1.5.5 from checksum-pinned official prebuilt `libduckdb` release
-assets inside a dedicated `duckdb-builder` stage for the selected Linux glibc target (amd64 or
-arm64); the asset SHA-256 and ELF machine are verified before install, and no library is vendored.
-Every build stage uses `--platform=$TARGETPLATFORM`, so a plain `docker build` follows
-the host architecture. On Apple Silicon this produces `linux/arm64`; if `DOCKER_DEFAULT_PLATFORM=linux/amd64`
-is inherited from the shell environment it must be unset before building. Use `--platform linux/amd64`
-only when explicitly publishing the amd64 target; the Rust builder and `duckdb-builder` stages must
-target the same architecture.
-
-For a full architecture reference — component ownership, runtime data flow, execution strategy
-decision, and container build/deployment — see
-[`docs/architecture/duckdb-ta-execution.md`](docs/architecture/duckdb-ta-execution.md).
-
-Verify the installed library without starting a bot:
-
-```bash
-DUCKDB_LIBRARY_PATH=/opt/homebrew/lib/libduckdb.dylib \
-  cargo test -p algotrap duckdb_runtime_contract -- --ignored
-```
-
-The contract loads the C API, reads its version, opens an in-memory database, and validates a
-typed query. A missing or incompatible library fails explicitly; there is no alternate backend.
-
-### Cryptobot (Serverless)
-
-`cryptobot` runs as a one-shot process and pushes rendered charts directly to Cloudflare R2 bucket. Heavy infrastructure is completely decoupled.
-
-1. **Local Test**:
-   ```bash
-   # Source your config. Add `--loop` if you want continuous polling.
-   set -a && source bins/cryptobot/.env && set +a
-   cargo run --release --bin cryptobot 
-   ```
-2. **GitHub Actions Workflow**:
-   The workflow (`.github/workflows/cryptobot-data.yml`) runs periodically on GitHub servers. It builds and runs the bot safely caching rust binaries, and executes `wrangler` uploads of the HTML and JSON dataset automatically.
-   *(Secrets must be configured in your GitHub repository, see `bins/cryptobot/.env.example`)*
-
-### Telegrambot (Docker / Kubernetes)
-
-`telegrambot` uses multi-turn reasoning loops and headless chart processing, making it well suited for stateful Docker or Kubernetes deployments.
-
-1. **Run via Docker Compose**:
-   ```bash
-   docker compose -f bins/telegrambot/deployment/docker-compose.yaml up
-   ```
-2. **Kubernetes (Orbstack/Minikube)**:
-   It utilizes `litellm` and `browserless` dependencies handled nicely in persistent clusters. Check out [`bins/telegrambot/README.md`](bins/telegrambot/README.md) for full deployment instructions.
-
-### Nightly Docker Images
-
-The repository pushes pre-built linux Docker images cleanly via GitHub actions exclusively for the stateful bots (`telegrambot`).
-
-**Image Location**:
-`ghcr.io/innoobwetrust/algotrap-telegrambot`
-
-Pull the latest tag with:
-```bash
-docker pull ghcr.io/innoobwetrust/algotrap-telegrambot:latest
-```
+Canonical verification commands and environment prerequisites live in [`docs/engineering/quality-gates.md`](docs/engineering/quality-gates.md).

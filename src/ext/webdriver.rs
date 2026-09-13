@@ -154,14 +154,18 @@ impl Subprocess {
     }
 }
 
+/// Controls a WebDriver-compatible browser process.
 pub trait WebDriver {
+    /// Returns the local WebDriver port.
     fn get_port(&self) -> usize;
+    /// Creates a browser client, optionally in headful mode.
     fn create_client(
         &self,
         headful: bool,
     ) -> impl Future<Output = Result<Client, Box<dyn Error + Sync + Send>>>;
 }
 
+/// Firefox WebDriver driver backed by a geckodriver subprocess.
 #[derive(Debug)]
 pub struct GeckoDriver {
     #[allow(dead_code)]
@@ -193,6 +197,7 @@ impl Default for GeckoDriver {
 }
 
 impl GeckoDriver {
+    /// Starts geckodriver with a generated port and log file.
     pub fn default_with_log(logfile: &Path) -> Result<Self, std::io::Error> {
         let mut rng = SmallRng::seed_from_u64(Utc::now().timestamp_micros() as u64);
         let port = rng.random_range(4445..=7999);
@@ -215,6 +220,7 @@ impl GeckoDriver {
         Ok(Self { proc, port })
     }
 
+    /// Starts geckodriver on the supplied port with a log file.
     pub fn new(port: usize, logfile: &Path) -> Result<Self, std::io::Error> {
         let proc = Subprocess::new(
             "geckodriver",
@@ -300,14 +306,19 @@ fn delay(duration: Option<Duration>) {
     std::thread::sleep(duration);
 }
 
+/// Extension methods for browser interaction and table extraction.
 pub trait ClientActionExt {
+    /// Moves the pointer to an element.
     fn mouse_move_to_element(&self, el: &Element) -> impl Future<Output = Result<(), CmdError>>;
+    /// Clicks an element through browser JavaScript.
     fn perform_click(&self, el: &Element) -> impl Future<Output = Result<(), CmdError>>;
+    /// Scrolls the page by the supplied offsets.
     fn mouse_scroll(
         &self,
         x_offset: isize,
         y_offset: isize,
     ) -> impl Future<Output = Result<(), CmdError>>;
+    /// Extracts an HTML table as JSON records.
     fn extract_table(
         &self,
         elem: &Element,

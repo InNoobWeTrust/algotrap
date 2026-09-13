@@ -1,67 +1,71 @@
-# 🤖 cryptobot
+# cryptobot
 
-A serverless, high-performance crypto data cruncher and web frontend generator.
+`cryptobot` is the one-shot market-data worker for the workspace. It fetches
+BingX OHLC data for configured tickers and timeframes, runs the shared analysis
+library, and renders the static chart site consumed from Cloudflare R2.
 
-`cryptobot` fetches OHLC data across multiple tickers and timeframes, computes a suite of advanced indicators (RSSI, ATR Reversion Bands, Climax Signals, etc.), and renders the results into a static HTML frontend + JSON datasets. 
+The shared analysis contracts and implementation are documented in
+[`src/README.md`](../../src/README.md). This README covers only operating the
+binary.
 
-It is designed to run asynchronously via **GitHub Actions** and serve the compiled chart directly out of a **Cloudflare R2** public bucket, ensuring zero native compute costs beyond the GitHub Actions free tier.
+## Prerequisites
 
-## Quick Start (Local)
+- Rust toolchain and the repository checkout for local execution.
+- BingX access as required by the configured data source.
+- For the hosted site: a GitHub Actions environment and a Cloudflare R2 bucket
+  with permission to publish the generated site.
 
-1. **Configure Environment**
+## Configuration
+
+Start from [`.env.example`](.env.example). The binary requires:
+
+| Variable | Purpose |
+| --- | --- |
+| `TICKERS` | JSON array of ticker objects containing `symbol`, `sl_percent`, `tol_percent`, and `default_tf` |
+| `CHART_TFS` | Comma-separated chart timeframes |
+
+`TIMEOUT_SECS` controls HTTP request timeouts. `SCAN_INTERVAL_SECS` is used
+only with `--loop`; the default one-shot mode does not require a schedule.
+
+Cloudflare settings are deployment credentials, not analysis inputs. Configure
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and
+`CLOUDFLARE_R2_BUCKET` in the GitHub Actions environment used to publish the
+site. Do not commit secrets.
+
+## Run locally
+
+From the workspace root:
+
 ```bash
-cp .env.example .env
-# Edit .env with your tickers, timeframes, and Cloudflare credentials
-```
-
-2. **Run One-Shot (Default)**
-Used primarily by CI/CD. Fetches data, processes it, outputs to `output/`, and exits.
-```bash
+cp bins/cryptobot/.env.example bins/cryptobot/.env
+# Edit bins/cryptobot/.env
 cargo run --release --bin cryptobot
 ```
 
-3. **Run Continuous Loop**
-Used for local testing to continuously poll BingX aligned with timeframe candle closes.
+Use continuous polling only when testing locally:
+
 ```bash
 cargo run --release --bin cryptobot -- --loop
 ```
 
-## How It Works
+The default one-shot invocation is the mode intended for scheduled automation.
 
-```text
-GitHub Actions Cron (e.g., every 4 hours):
-  1. Rust caching restores previous build for speed.
-  2. cargo run --release --bin cryptobot
-     → Fetch OHLC data for configured tickers
-     → Process TA indicators via previous dataframe implementation
-     → Generate /output/data/*.json
-     → Render index.html relative frontend
-  3. wrangler r2 object put (via npx)
-     → Pushes the generated frontend directly to R2.
+## Deploy
+
+The supported hosted path is scheduled GitHub Actions execution followed by
+publication to Cloudflare R2. Configure the required environment values and
+Cloudflare secrets, then run the repository's cryptobot workflow.
+
+For Kubernetes deployment, build from the workspace root, create the
+`cryptobot-env` secret from the application environment, and apply the
+application manifest:
+
+```bash
+docker build -f bins/cryptobot/deployment/Dockerfile -t algotrap-cryptobot:latest .
+kubectl apply -f bins/cryptobot/k8s/cryptobot.yaml
 ```
 
-The resulting architecture means **no web servers, no kubernetes pods, and no database** required for the visual interface. The app is served natively as simple JSON files requested by an HTML template!
-
-## Configuration
-
-All via environment variables (see [`.env.example`](.env.example)):
-
-| Variable | Description |
-| -------- | ----------- |
-| `TICKERS` | JSON array of `{"symbol", "sl_percent", "tol_percent", "default_tf"}` |
-| `CHART_TFS` | Shared timeframes to render (e.g. `5m,1h,4h,1d`) |
-| `SCAN_INTERVAL_SECS` | Run frequency when running with `--loop` |
-| `TIMEOUT_SECS` | Request timeout for REST client |
-| `CLOUDFLARE_ACCOUNT_ID` | Used in CI: Your CF account tag |
-| `CLOUDFLARE_API_TOKEN` | Used in CI: Needs `Object Read/Write` permissions for R2 |
-| `CLOUDFLARE_R2_BUCKET` | Used in CI: Name of the bucket (e.g. `algotrap-cryptobot`) |
-
-## File Layout
-
-```text
-src/
-├── main.rs              — Entry point, GH actions loop / oneshot
-├── chart_template.html  — The Jinja-templated LightweightCharts frontend
-└── ...                  — Library and indicator logic (shared)
-.env.example             — Starter environmental configuration
-```
+The manifest expects the image to be available to the cluster and the
+`cryptobot-env` secret to contain the runtime configuration. The deployment
+templates and repository-wide operational guidance are indexed in
+[`docs/README.md`](../../docs/README.md).

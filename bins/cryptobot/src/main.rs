@@ -11,10 +11,12 @@ use std::collections::HashMap;
 use algotrap::engine::error::MarketError;
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::engine::validation::ValidatedTicker;
-use algotrap::engine::{CryptoBatchRequest, DuckDBEngine};
+use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
 use algotrap::time_utils::next_close_across_tfs;
+
+mod presentation;
 
 // ─── Per-Ticker Config ───────────────────────────────────────────────────────
 
@@ -24,7 +26,7 @@ struct TickerConf {
     sl_percent: f64,
     tol_percent: f64,
     default_tf: Timeframe,
-    // Legacy signal-only fields are ignored if present in existing TICKERS JSON.
+    // Signal-only fields are ignored if present in existing TICKERS JSON.
     // Serde silently drops unknown fields by default.
 }
 
@@ -281,17 +283,24 @@ async fn process_ticker(
             }
         })
         .collect();
-    let all_dfs = compute_crypto_frames(fetched, ticker);
+    let all_dfs = compute_crypto_frames(fetched, ticker).await;
 
     // Serialize all fetched TFs to JSON for the chart
     let chart_dfs_serialized: HashMap<String, Value> = all_dfs
         .par_iter()
-        .map(|(tf, df)| {
+        .map(|(tf, (df, zones))| {
             let records = df.to_json_records()?;
-            let df_json = serde_json::Value::Array(
+            let candles_json = serde_json::Value::Array(
                 records.into_iter().map(serde_json::Value::Object).collect(),
             );
-            Ok::<_, MarketError>((tf.to_string(), df_json))
+            let gap_zones_json = serde_json::Value::Array(
+                zones.iter().map(gap_zone_to_json).collect(),
+            );
+            let tf_json = serde_json::json!({
+                "candles": candles_json,
+                "gapZones": gap_zones_json,
+            });
+            Ok::<_, MarketError>((tf.to_string(), tf_json))
         })
         .collect::<Result<HashMap<_, _>, MarketError>>()?;
     let chart_json = serde_json::to_string(&chart_dfs_serialized)?;
@@ -299,10 +308,10 @@ async fn process_ticker(
     Ok(chart_json)
 }
 
-fn compute_crypto_frames(
+async fn compute_crypto_frames(
     fetched: Vec<(Timeframe, Vec<Kline>)>,
     ticker: &TickerConf,
-) -> HashMap<Timeframe, Box<dyn ComputedFrame>> {
+) -> HashMap<Timeframe, (Box<dyn ComputedFrame>, Vec<GapZoneRecord>)> {
     let validated_ticker =
         match ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent) {
             Ok(validated_ticker) => validated_ticker,
@@ -316,35 +325,22 @@ fn compute_crypto_frames(
                 return HashMap::new();
             }
         };
-    let timeframes = fetched
-        .iter()
-        .map(|(timeframe, _)| *timeframe)
-        .collect::<Vec<_>>();
-    let requests = fetched
-        .into_iter()
-        .map(|(_, klines)| CryptoBatchRequest {
-            klines,
-            ticker: validated_ticker.clone(),
-        })
-        .collect();
-    let results = match DuckDBEngine::new().compute_crypto_batch(requests, None) {
-        Ok(results) => results,
-        Err(err) => {
-            for timeframe in timeframes {
-                eprintln!(
-                    "  Error computing indicators for {} {}: {err:#}",
-                    ticker.symbol, timeframe
-                );
-            }
-            return HashMap::new();
-        }
-    };
 
-    timeframes
+    let computations = fetched.into_iter().map(|(timeframe, klines)| {
+        let validated_ticker = validated_ticker.clone();
+        async move {
+            (
+                timeframe,
+                presentation::compute_crypto_frame(klines, validated_ticker).await,
+            )
+        }
+    });
+
+    join_all(computations)
+        .await
         .into_iter()
-        .zip(results)
-        .filter_map(|(timeframe, result)| match result.result {
-            Ok(frame) => Some((timeframe, Box::new(frame) as Box<dyn ComputedFrame>)),
+        .filter_map(|(timeframe, result)| match result {
+            Ok(frame) => Some((timeframe, frame)),
             Err(err) => {
                 eprintln!(
                     "  Error computing indicators for {} {}: {err:#}",
@@ -354,6 +350,25 @@ fn compute_crypto_frames(
             }
         })
         .collect()
+}
+
+fn gap_zone_to_json(zone: &GapZoneRecord) -> Value {
+    serde_json::json!({
+        "time_ms": zone.time_ms,
+        "open": zone.open,
+        "high": zone.high,
+        "low": zone.low,
+        "close": zone.close,
+        "volume": zone.volume,
+        "body_bottom": zone.body_bottom,
+        "body_top": zone.body_top,
+        "body_ratio": zone.body_ratio,
+        "direction": match zone.direction {
+            GapZoneDirection::Bullish => "bullish",
+            GapZoneDirection::Bearish => "bearish",
+            GapZoneDirection::Flat => "flat",
+        },
+    })
 }
 
 // ─── Ticker metadata for HTML template ───────────────────────────────────────
@@ -511,14 +526,18 @@ const TDV_HTML_TEMPLATE: &str = r#"
                     const ratio = scope.horizontalPixelRatio;
                     const vRatio = scope.verticalPixelRatio;
                     this._zones.forEach(z => {
-                        const yTop = s.priceToCoordinate(z.top);
-                        const yBot = s.priceToCoordinate(z.bottom);
+                        const top = z.body_top ?? z.top;
+                        const bottom = z.body_bottom ?? z.bottom;
+                        const yTop = s.priceToCoordinate(top);
+                        const yBot = s.priceToCoordinate(bottom);
                         if (yTop === null || yBot === null) return;
-                        const opacity = Math.min(0.25, 0.05 + z.trust * 0.2);
-                        const borderOpacity = Math.min(0.5, 0.1 + z.trust * 0.4);
+                        const opacity = 0.12;
+                        const borderOpacity = 0.4;
                         ctx.fillStyle = z.direction === 'bullish'
                             ? `rgba(33,150,243,${opacity})`
-                            : `rgba(255,152,0,${opacity})`;
+                            : z.direction === 'bearish'
+                                ? `rgba(255,152,0,${opacity})`
+                                : `rgba(158,158,158,${opacity})`;
                         const x = Math.round(xLeft * ratio);
                         const w = Math.round((xRight - xLeft + 40) * ratio);
                         const y = Math.round(Math.min(yTop, yBot) * vRatio);
@@ -526,7 +545,9 @@ const TDV_HTML_TEMPLATE: &str = r#"
                         ctx.fillRect(x, y, w, h);
                         ctx.strokeStyle = z.direction === 'bullish'
                             ? `rgba(33,150,243,${borderOpacity})`
-                            : `rgba(255,152,0,${borderOpacity})`;
+                            : z.direction === 'bearish'
+                                ? `rgba(255,152,0,${borderOpacity})`
+                                : `rgba(158,158,158,${borderOpacity})`;
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4 * ratio, 4 * ratio]);
                         ctx.beginPath();
@@ -697,7 +718,7 @@ const TDV_HTML_TEMPLATE: &str = r#"
         // ─── Watermark update ─────────────────────────────────────────
         const watermarkUpdate = () => {
             const tf = tf_btns.value || container.dataset.tf || chartTfs[0];
-            const lastBar = dataset[tf]?.slice(-1)[0];
+            const lastBar = dataset[tf]?.candles?.slice(-1)[0];
             if (lastBar) {
                 const atr = +(lastBar.atr_percent * 100).toFixed(2);
                 const lvrg = Math.floor(lastBar.leverage);
@@ -758,8 +779,9 @@ const TDV_HTML_TEMPLATE: &str = r#"
 
         // ─── TF update ────────────────────────────────────────────────
         const onIntervalUpdate = (tf) => {
-            if (!dataset[tf]) return;
-            const data = dataset[tf].map(d => ({
+            const tfData = dataset[tf];
+            if (!tfData) return;
+            const data = tfData.candles.map(d => ({
                 ...d,
                 time: Math.floor(d.time / 1000),
             }));
@@ -874,25 +896,13 @@ const TDV_HTML_TEMPLATE: &str = r#"
             markers.sort((a, b) => a.time - b.time);
             markersSeries.setMarkers(markers);
 
-            // ─── Gap Zone Bands ────────────────────────────────────────
-            const gapZones = [];
-            const MIN_TRUST = 0.3;
-            data.forEach(d => {
-                if (d.is_atr_gap && d.body_ratio >= MIN_TRUST) {
-                    const bottom = Math.min(d.open, d.close);
-                    const top = Math.max(d.open, d.close);
-                    const bullish = d.close > d.open;
-                    const rssiStrength = Math.abs((d.rssi || 50) - 50) / 50;
-                    const trust = d.body_ratio * (0.5 + 0.5 * rssiStrength);
-                    gapZones.push({ top, bottom, direction: bullish ? 'bullish' : 'bearish', trust });
-                }
-            });
-            const recentGaps = gapZones.slice(-10);
+            // ─── Gap Zone Bands (precomputed) ──────────────────────────
+            const suppliedGaps = Array.isArray(tfData.gapZones) ? tfData.gapZones : [];
             if (window._gapPrimitive) {
                 try { candlestickSeries.detachPrimitive(window._gapPrimitive); } catch(_) {}
             }
-            if (recentGaps.length > 0) {
-                window._gapPrimitive = new GapZonePrimitive(recentGaps, data);
+            if (suppliedGaps.length > 0) {
+                window._gapPrimitive = new GapZonePrimitive(suppliedGaps, data);
                 candlestickSeries.attachPrimitive(window._gapPrimitive);
             }
 
@@ -989,7 +999,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use algotrap::engine::MarketFrameEngine;
 
     fn ticker() -> TickerConf {
         TickerConf {
@@ -1017,8 +1026,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn crypto_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
+    #[tokio::test]
+    async fn crypto_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
         let ticker = ticker();
         let valid_5m = klines(100.0);
         let valid_1h = klines(200.0);
@@ -1032,20 +1041,25 @@ mod tests {
                 (Timeframe::M5, valid_5m.clone()),
             ],
             &ticker,
-        );
+        )
+        .await;
 
         assert_eq!(frames.len(), 2);
         assert!(!frames.contains_key(&Timeframe::M1));
         let validated =
             ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent).unwrap();
         for (timeframe, klines) in [(Timeframe::H1, valid_1h), (Timeframe::M5, valid_5m)] {
-            let expected = DuckDBEngine::new()
-                .compute_crypto(&klines, validated.clone())
+            let expected = presentation::compute_crypto_frame(klines, validated.clone())
+                .await
                 .unwrap();
             assert_eq!(
-                frames[&timeframe].to_json_records().unwrap(),
-                expected.to_json_records().unwrap(),
+                frames[&timeframe].0.to_json_records().unwrap(),
+                expected.0.to_json_records().unwrap(),
                 "timeframe {timeframe} must retain its matching batch result"
+            );
+            assert_eq!(
+                frames[&timeframe].1, expected.1,
+                "timeframe {timeframe} must retain its matching gap zones"
             );
         }
     }

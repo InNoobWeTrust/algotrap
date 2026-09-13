@@ -7,11 +7,16 @@ use algotrap::prelude::*;
 /// Trading parameters specific to a single ticker.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TickerConf {
+    /// Trading symbol for this ticker.
     pub symbol: String,
+    /// Stop-loss threshold, in percent.
     pub sl_percent: f64,
+    /// Tolerance threshold, in percent.
     pub tol_percent: f64,
     #[serde(deserialize_with = "deserialize_tfs")]
+    /// Timeframes used for this ticker.
     pub tfs: Vec<Timeframe>,
+    /// Default timeframe for this ticker.
     pub default_tf: Timeframe,
 }
 
@@ -33,66 +38,88 @@ where
 
 // ─── Global Config ───────────────────────────────────────────────────────────
 
+/// Configuration loaded from environment variables.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnvConf {
     // Multi-ticker (JSON array)
     #[serde(deserialize_with = "deserialize_tickers")]
+    /// Configured tickers and their trading parameters.
     pub tickers: Vec<TickerConf>,
 
     // Telegram
+    /// Telegram bot API token.
     pub telegram_bot_token: String,
+    /// Telegram chat ID for notifications.
     pub telegram_chat_id: i64,
 
     // LLM
+    /// Base URL for the LLM API.
     pub llm_api_base: String,
+    /// API key for the LLM provider.
     pub llm_api_key: String,
+    /// LLM model identifier.
     pub llm_model: String,
     #[serde(default)]
+    /// Whether LLM debugging is enabled.
     pub llm_debug: bool,
 
     // Browserless
+    /// Browserless service URL.
     pub browserless_url: String,
 
     // Prompt config directory (system.txt, user.txt, system_adaptive.txt, user_adaptive.txt)
     #[serde(default = "default_prompts_dir")]
+    /// Directory containing prompt templates.
     pub prompts_dir: String,
 
     // Alert scanning
     #[serde(default = "default_scan_interval")]
+    /// Interval between alert scans, in seconds.
     pub scan_interval_secs: u64,
 
     // Adaptive scoring — weight guardrails
     #[serde(default = "default_weight_rate_limit")]
+    /// Maximum allowed rate for adaptive scoring weights.
     pub weight_rate_limit: f64,
     #[serde(default = "default_weight_min")]
+    /// Minimum adaptive scoring weight.
     pub weight_min: f64,
     #[serde(default = "default_weight_max")]
+    /// Maximum adaptive scoring weight.
     pub weight_max: f64,
 
     // Memory
     #[serde(default = "default_memory_dir")]
+    /// Directory used for persistent memory.
     pub memory_dir: String,
     #[serde(default = "default_max_predictions")]
+    /// Maximum number of predictions to retain.
     pub max_predictions: usize,
     #[serde(default = "default_keep_recent_messages")]
+    /// Number of recent messages to retain.
     pub keep_recent_messages: usize,
 
     // Tier boundaries
     #[serde(default = "default_tier_alert_threshold")]
+    /// Threshold for alert tier classification.
     pub tier_alert_threshold: f64,
     #[serde(default = "default_tier_watch_threshold")]
+    /// Threshold for watch tier classification.
     pub tier_watch_threshold: f64,
 
     // Change detection
     #[serde(default = "default_change_detection_indicators")]
+    /// Comma-separated indicators used for change detection.
     pub change_detection_indicators: String,
 
     // Notification cooldown — minimum seconds between notifications per ticker
     #[serde(default = "default_notification_cooldown_secs")]
+    /// Minimum cooldown between notifications per ticker, in seconds.
     pub notification_cooldown_secs: u64,
 
     // HTTP request timeout
     #[serde(default = "default_timeout_secs")]
+    /// HTTP request timeout, in seconds.
     pub timeout_secs: u64,
 
     /// Whether the LLM model supports native reasoning (e.g., reasoning_effort param).
@@ -181,6 +208,7 @@ fn default_prompts_dir() -> String {
 }
 
 impl EnvConf {
+    /// Validate required configuration values.
     pub fn validate(&self) -> Result<(), std::io::Error> {
         for (name, value) in [
             ("TELEGRAM_BOT_TOKEN", self.telegram_bot_token.as_str()),
@@ -329,8 +357,10 @@ mod tests {
         assert!(conf.tickers.is_empty());
     }
 
+    /// Values loaded from `.env` retain shell quotes and must still deserialize
+    /// as the JSON array documented in `.env.example`.
     #[test]
-    fn test_quoted_tickers_json() {
+    fn test_shell_quoted_tickers_json_from_env_file() {
         let mut env = base_env();
         env.insert(
             "TICKERS".into(),

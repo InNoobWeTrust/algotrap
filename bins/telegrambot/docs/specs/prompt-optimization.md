@@ -1,6 +1,5 @@
 # Feature: Prompt Optimization — Reasoning Effort + Template Compression
 
-> **Status**: draft
 > **Owner**: InNoobWeTrust
 > **Created**: 2026-03-28
 > **Research**: `docs/prds/research/prompt-engineering-v2.md` (Approaches 2 + 3)
@@ -62,7 +61,15 @@ Both changes are independent and can be deployed separately. Combined, they impr
 - **Given** the compressed template
 - **When** the LLM omits `indicator_params` entirely
 - **Then** the system treats it as no-op (no indicator param changes)
-- **And** existing indicator config is retained unchanged
+- **And** existing typed `periods` / `outputs` / `gap_zones` config is retained unchanged
+
+The compact `gap_zones` example uses the four-field shape:
+
+```json
+{"target":"gap_zones","max_zones":16,"body_ratio_threshold":0.618,"atr_band_multiplier":1.618,"atr_gap_multiplier":1.0}
+```
+
+Valid ranges are `[1, 32]`, `[0.0, 1.0]`, `[0.5, 5.0]`, and `[0.5, 5.0]` respectively; all proposal changes share the ±30% per-cycle guard. `atr_band_multiplier` controls ATR band width / band-reversion geometry, while `atr_gap_multiplier` controls the explicit ATR-distance boundary used by gap candidate detection.
 
 ### Scenario 6: CoT prompt — non-reasoning models only
 

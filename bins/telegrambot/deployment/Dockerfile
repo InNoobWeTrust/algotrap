@@ -18,6 +18,7 @@ FROM chef AS cook
 # Default to 2 parallel build jobs to bound memory consumption
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV DUCKDB_DOWNLOAD_LIB=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
@@ -40,15 +41,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/cargo-target \
     CARGO_TARGET_DIR=/cargo-target cargo build --release -p telegrambot --bin telegrambot && \
     cp /cargo-target/release/telegrambot /build/telegrambot && \
-    strip /build/telegrambot
-
-# ─── Pinned DuckDB shared library ─────────────────────────────────────────────
-FROM --platform=$TARGETPLATFORM debian:bookworm AS duckdb-builder
-ARG TARGETPLATFORM
-ARG TARGETOS
-ARG TARGETARCH
-COPY docker/duckdb/ /usr/local/src/duckdb/
-RUN TARGETPLATFORM="$TARGETPLATFORM" TARGETOS="$TARGETOS" TARGETARCH="$TARGETARCH" bash /usr/local/src/duckdb/install-libduckdb.sh
+    strip /build/telegrambot && \
+    mkdir -p /build-artifacts && \
+    cp /cargo-target/release/deps/libduckdb.so /build-artifacts/libduckdb.so
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim
@@ -60,10 +55,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /build/telegrambot .
-COPY --from=duckdb-builder /opt/duckdb/lib/libduckdb.so /usr/local/lib/libduckdb.so
-COPY --from=duckdb-builder /opt/duckdb/libexec/duckdb-smoke /usr/local/libexec/duckdb-smoke
-COPY --from=duckdb-builder /opt/duckdb-artifacts/ /usr/local/share/algotrap/
-RUN /usr/local/libexec/duckdb-smoke
+COPY --from=builder /build-artifacts/libduckdb.so /usr/local/lib/libduckdb.so
+RUN ldconfig
 # Default prompt config (overridden by ConfigMap mount in K8s)
 COPY bins/telegrambot/config/prompts/ config/prompts/
 ENV PROMPTS_DIR=config/prompts \

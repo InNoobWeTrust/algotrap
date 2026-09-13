@@ -1,13 +1,21 @@
 /// Error kind enumeration for MarketError
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
+    /// Configuration or runtime setup failed.
     ConfigurationError,
+    /// Input failed validation.
     ValidationError,
+    /// Computation failed.
     ComputationError,
+    /// An indicator produced NaN or infinity.
     NonFiniteIndicatorOutput,
+    /// Data access failed.
     DataAccessError,
+    /// A thread-safety invariant was violated.
     ThreadSafetyError,
+    /// An invocation lifecycle transition was invalid.
     InvocationLifecycleError,
+    /// One or more operations failed while others succeeded.
     PartialFailure,
 }
 
@@ -138,11 +146,9 @@ impl From<crate::ta::TaError> for MarketError {
                 context: error.context,
             },
             crate::ta::TaErrorKind::Computation => Self::computation(error.message),
-            crate::ta::TaErrorKind::Validation
-            | crate::ta::TaErrorKind::InvalidPeriod
-            | crate::ta::TaErrorKind::InvalidPlan
-            | crate::ta::TaErrorKind::Alignment
-            | crate::ta::TaErrorKind::Source => Self::validation(error.message),
+            crate::ta::TaErrorKind::Validation | crate::ta::TaErrorKind::InvalidPeriod => {
+                Self::validation(error.message)
+            }
         }
     }
 }
