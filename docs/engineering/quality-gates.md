@@ -11,20 +11,16 @@ Run these commands from the **repository root** unless otherwise noted.
 ## About `DUCKDB_DOWNLOAD_LIB=1`
 
 The workspace depends on the `duckdb` crate with dynamic DuckDB linkage. When no
-system DuckDB shared library is installed, set `DUCKDB_DOWNLOAD_LIB=1` before
-any command that invokes the compiler or linker. This flag instructs
-`libduckdb-sys` to download the version-matched official DuckDB archive at build
-time instead of searching for a system installation.
+system DuckDB shared library is installed, `libduckdb-sys` downloads the version-matched
+official DuckDB archive at build time instead of searching for a system installation.
 
-Without this flag (and without a system DuckDB library at a known path), Clippy
-and test runs will fail during the `libduckdb-sys` build script with a
-library-not-found error.
+This is configured by default across the workspace in `.cargo/config.toml`
+(`DUCKDB_DOWNLOAD_LIB = { value = "1", force = false }`), so developers and CI runners
+do not need to prefix commands manually. It can be overridden via `DUCKDB_DOWNLOAD_LIB=0`
+or `DUCKDB_LIB_DIR=/path/to/duckdb` when a specific system installation is desired.
 
 `cargo fmt --check` never invokes the compiler and never requires this flag.
-`cargo check --workspace --locked` may also succeed on some systems where
-the build script finds headers but does not require a dynamic library for the
-type-check pass. All commands that compile, link, or execute tests require
-either `DUCKDB_DOWNLOAD_LIB=1` or a correctly provisioned system library.
+All commands that compile, link, or execute tests resolve the library automatically.
 
 ---
 
@@ -69,9 +65,9 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test --workspace --all-targets --locked
 
 Runs the full test suite including unit tests in `src/` and all bin crates.
 `DUCKDB_DOWNLOAD_LIB=1` is required when no system DuckDB library is installed.
-The same flag is set in `base.Dockerfile`, `bins/cryptobot/deployment/Dockerfile`,
-and `bins/telegrambot/deployment/Dockerfile`; the `Makefile` target `duckdb-test`
-uses it as well.
+The same flag is set in `bins/cryptobot/deployment/Dockerfile`,
+`bins/telegrambot/deployment/Dockerfile`, and `.github/workflows/nightly.yml`;
+the `Makefile` target `duckdb-test` uses it as well.
 
 ---
 

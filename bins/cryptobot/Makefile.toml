@@ -9,8 +9,7 @@ args = ["./deployment/setup_native_cronjobs.sh"]
 [tasks.dockerbuild]
 command = "bash"
 args = ["-c", """
-  docker build -t algotrap-bins:latest -f ../../base.Dockerfile ../..
-  docker build --build-context repo=../.. -t algotrap-cryptobot:latest -f deployment/Dockerfile .
+  docker build -t algotrap-cryptobot:latest -f deployment/Dockerfile ../..
 """]
 
 [tasks.dockerrun]
