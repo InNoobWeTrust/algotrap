@@ -1,0 +1,6 @@
+# Cargo workspace configuration
+
+[env]
+# Default to downloading version-matched DuckDB prebuilt binary if no system DuckDB is installed.
+# force = false allows callers to override via environment (e.g. DUCKDB_DOWNLOAD_LIB=0 or DUCKDB_LIB_DIR).
+DUCKDB_DOWNLOAD_LIB = { value = "1", force = false }
