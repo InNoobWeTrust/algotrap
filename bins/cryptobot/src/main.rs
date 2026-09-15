@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use algotrap::engine::error::MarketError;
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::engine::validation::ValidatedTicker;
-use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
+use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
 use algotrap::time_utils::next_close_across_tfs;
 
 mod presentation;
@@ -293,9 +293,8 @@ async fn process_ticker(
             let candles_json = serde_json::Value::Array(
                 records.into_iter().map(serde_json::Value::Object).collect(),
             );
-            let gap_zones_json = serde_json::Value::Array(
-                zones.iter().map(gap_zone_to_json).collect(),
-            );
+            let gap_zones_json =
+                serde_json::Value::Array(zones.iter().map(gap_zone_to_json).collect());
             let tf_json = serde_json::json!({
                 "candles": candles_json,
                 "gapZones": gap_zones_json,
@@ -415,12 +414,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
         #container {
             height: 100%;
         }
-        #container.rssi-bullish {
-            background: rgba(76,175,80,0.05);
-        }
-        #container.rssi-bearish {
-            background: rgba(242,54,69,0.05);
-        }
 
         #overlay {
             position: absolute;
@@ -531,23 +524,21 @@ const TDV_HTML_TEMPLATE: &str = r#"
                         const yTop = s.priceToCoordinate(top);
                         const yBot = s.priceToCoordinate(bottom);
                         if (yTop === null || yBot === null) return;
-                        const opacity = 0.12;
-                        const borderOpacity = 0.4;
                         ctx.fillStyle = z.direction === 'bullish'
-                            ? `rgba(33,150,243,${opacity})`
+                            ? `rgba(33,150,243,0.12)`
                             : z.direction === 'bearish'
-                                ? `rgba(255,152,0,${opacity})`
-                                : `rgba(158,158,158,${opacity})`;
+                                ? `rgba(255,152,0,0.12)`
+                                : `rgba(158,158,158,0.12)`;
                         const x = Math.round(xLeft * ratio);
                         const w = Math.round((xRight - xLeft + 40) * ratio);
                         const y = Math.round(Math.min(yTop, yBot) * vRatio);
                         const h = Math.round(Math.abs(yBot - yTop) * vRatio);
                         ctx.fillRect(x, y, w, h);
                         ctx.strokeStyle = z.direction === 'bullish'
-                            ? `rgba(33,150,243,${borderOpacity})`
+                            ? `rgba(33,150,243,0.4)`
                             : z.direction === 'bearish'
-                                ? `rgba(255,152,0,${borderOpacity})`
-                                : `rgba(158,158,158,${borderOpacity})`;
+                                ? `rgba(255,152,0,0.4)`
+                                : `rgba(158,158,158,0.4)`;
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4 * ratio, 4 * ratio]);
                         ctx.beginPath();
@@ -670,27 +661,10 @@ const TDV_HTML_TEMPLATE: &str = r#"
             bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
             bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
         }, 1);
-        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        const rssiMaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 50 },
-            topLineColor: 'rgba(76, 175, 80, 0.1)',
-            topFillColor1: 'rgba(76, 175, 80, 0.2)',
-            topFillColor2: 'rgba(76, 175, 80, 0.3)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.3)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
-        }, 2);
-        const rssiDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 50 },
-            topLineColor: 'rgba(76, 175, 80, 0.2)',
-            topFillColor1: 'rgba(76, 175, 80, 0.05)',
-            topFillColor2: 'rgba(76, 175, 80, 0.1)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.2)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
-        }, 2);
-        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
-        const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
+        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        const ichingOriginalSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#4FC3F7', lineWidth: 2 }, 3);
+        const ichingTransformedSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#FFB74D', lineWidth: 2 }, 3);
+        const ichingNuclearSeries = chart.addSeries(LightweightCharts.LineSeries, { color: '#CE93D8', lineWidth: 2 }, 3);
         const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
         const textWatermarks = [
             LightweightCharts.createTextWatermark(chart.panes()[0], {
@@ -706,10 +680,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 vertAlign: 'top',
             }),
             LightweightCharts.createTextWatermark(chart.panes()[3], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[4], {
                 horzAlign: 'left',
                 vertAlign: 'top',
             }),
@@ -747,15 +717,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 {
                     lines: [
                         {
-                            text: 'RSSI (14, 9)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
                             text: 'ATR Reversion (42, 1.618)',
                             color: 'rgba(178, 181, 190, 0.5)',
                             fontSize: 18,
@@ -765,8 +726,18 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 {
                     lines: [
                         {
-                            text: 'Sharpe (200)',
-                            color: 'rgba(178, 181, 190, 0.5)',
+                            text: 'I-Ching Original',
+                            color: '#4FC3F7',
+                            fontSize: 18,
+                        },
+                        {
+                            text: 'I-Ching Transformed',
+                            color: '#FFB74D',
+                            fontSize: 18,
+                        },
+                        {
+                            text: 'I-Ching Nuclear',
+                            color: '#CE93D8',
                             fontSize: 18,
                         },
                     ],
@@ -843,35 +814,24 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 time: d.time,
                 value: d.structure_power_direction,
             })));
-            rssiSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi,
-                color: d.rssi_color,
-            })));
-            rssiMaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi_ma,
-            })));
-            rssiDirSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi_direction,
-            })));
             atrRevSeries.setData(data.map(d => ({
                 time: d.time,
                 value: d.atr_reversion_percent,
                 color: d.atr_reversion_percent_color,
             })));
-            sharpeSeries.setData(data.map(d => ({
+            ichingOriginalSeries.setData(data.map(d => ({
                 time: d.time,
-                value: d.sharpe,
-                color: d.sharpe_color,
+                value: d.iching_original_energy,
             })));
-            const markers = data.filter(d => d.climax_signal != 0).map(d => ({
+            ichingTransformedSeries.setData(data.map(d => ({
                 time: d.time,
-                position: d.climax_signal_pos,
-                color: d.climax_signal_color,
-                shape: d.climax_signal_shape,
-            }))
+                value: d.iching_transformed_energy,
+            })));
+            ichingNuclearSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.iching_nuclear_energy,
+            })));
+            const markers = [];
             // ATR Climax circles
             data.forEach(d => {
                 if (d.close >= d.atr_upperband) {
@@ -905,12 +865,6 @@ const TDV_HTML_TEMPLATE: &str = r#"
                 window._gapPrimitive = new GapZonePrimitive(suppliedGaps, data);
                 candlestickSeries.attachPrimitive(window._gapPrimitive);
             }
-
-            // ─── RSSI Tint ─────────────────────────────────────────────
-            const lastRssi = data[data.length - 1]?.rssi || 50;
-            container.classList.remove('rssi-bullish', 'rssi-bearish');
-            if (lastRssi > 59) container.classList.add('rssi-bullish');
-            else if (lastRssi < 41) container.classList.add('rssi-bearish');
 
             watermarkUpdate();
         }
@@ -1061,6 +1015,316 @@ mod tests {
                 frames[&timeframe].1, expected.1,
                 "timeframe {timeframe} must retain its matching gap zones"
             );
+            assert_eq!(
+                frames[&timeframe]
+                    .1
+                    .iter()
+                    .map(|zone| zone.time_ms)
+                    .collect::<Vec<_>>(),
+                expected
+                    .1
+                    .iter()
+                    .map(|zone| zone.time_ms)
+                    .collect::<Vec<_>>(),
+                "timeframe {timeframe} must retain raw gap-zone ordering"
+            );
         }
+    }
+
+    #[test]
+    fn gap_zone_to_json_emits_exactly_raw_keys() {
+        let zone = GapZoneRecord {
+            time_ms: 1_700_000_000_000,
+            open: 100.0,
+            high: 115.0,
+            low: 95.0,
+            close: 110.0,
+            volume: 1_000.0,
+            body_bottom: 100.0,
+            body_top: 110.0,
+            direction: GapZoneDirection::Bullish,
+            body_ratio: Some(0.8),
+        };
+        let value = gap_zone_to_json(&zone);
+        let object = value.as_object().expect("gap zone JSON must be an object");
+        assert_eq!(value["time_ms"], serde_json::json!(1_700_000_000_000i64));
+        assert_eq!(value["open"], serde_json::json!(100.0));
+        assert_eq!(value["high"], serde_json::json!(115.0));
+        assert_eq!(value["low"], serde_json::json!(95.0));
+        assert_eq!(value["close"], serde_json::json!(110.0));
+        assert_eq!(value["volume"], serde_json::json!(1_000.0));
+        assert_eq!(value["body_bottom"], serde_json::json!(100.0));
+        assert_eq!(value["body_top"], serde_json::json!(110.0));
+        assert_eq!(value["body_ratio"], serde_json::json!(0.8));
+        assert_eq!(value["direction"], serde_json::json!("bullish"));
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "body_bottom",
+                "body_ratio",
+                "body_top",
+                "close",
+                "direction",
+                "high",
+                "low",
+                "open",
+                "time_ms",
+                "volume",
+            ],
+            "gap zone JSON must emit exactly the raw flat keys"
+        );
+        for forbidden in [
+            "rssi", "rssi_ma", "trust", "raw", "raw_zone", "candle", "candles", "ema", "ema9",
+            "input",
+        ] {
+            assert!(
+                object.get(forbidden).is_none(),
+                "gap zone JSON must not contain {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn candle_records_and_gap_zones_omit_rssi_and_trust() {
+        let validated =
+            ValidatedTicker::new(&ticker().symbol, ticker().sl_percent, ticker().tol_percent)
+                .unwrap();
+        let (frame, zones) = presentation::compute_crypto_frame(klines(100.0), validated)
+            .await
+            .unwrap();
+        for zone in zones {
+            let value = gap_zone_to_json(&zone);
+            assert!(
+                value.get("trust").is_none(),
+                "gap zone JSON must not carry trust"
+            );
+        }
+        let records = frame.to_json_records().unwrap();
+        assert!(
+            !records.is_empty(),
+            "projected frame must produce candle records"
+        );
+        for record in &records {
+            for forbidden in ["rssi", "rssi_ma", "trust"] {
+                assert!(
+                    !record.contains_key(forbidden),
+                    "candle record must not gain {forbidden}"
+                );
+            }
+        }
+        assert!(
+            !frame.has_column("rssi") && !frame.has_column("rssi_ma") && !frame.has_column("trust"),
+            "projected chart fields must not gain rssi/rssi_ma/trust"
+        );
+    }
+
+    #[test]
+    fn template_gap_bands_use_fixed_fill_and_stroke_opacity() {
+        assert!(
+            !TDV_HTML_TEMPLATE.contains("z.trust"),
+            "renderer must not consume trust"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("ctx.fillStyle"),
+            "renderer must retain fill styling"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("ctx.strokeStyle"),
+            "renderer must retain border styling"
+        );
+        for color in ["33,150,243", "255,152,0", "158,158,158"] {
+            for opacity in ["0.12", "0.4"] {
+                let expected = format!("rgba({color},{opacity})");
+                assert!(
+                    TDV_HTML_TEMPLATE.contains(&expected),
+                    "renderer must preserve fixed {opacity} opacity for {color}"
+                );
+            }
+        }
+        for preserved in [
+            "z.body_top",
+            "z.body_bottom",
+            "priceToCoordinate",
+            "ctx.fillRect",
+            "ctx.stroke()",
+            "GapZonePrimitive",
+            "paneViews()",
+            "attached({ series, chart })",
+        ] {
+            assert!(
+                TDV_HTML_TEMPLATE.contains(preserved),
+                "renderer must preserve geometry/lifecycle {preserved}"
+            );
+        }
+        assert!(
+            !TDV_HTML_TEMPLATE.to_lowercase().contains("rssi"),
+            "template must not restore RSSI visuals"
+        );
+        assert!(
+            !TDV_HTML_TEMPLATE.contains("d.trust") && !TDV_HTML_TEMPLATE.contains("d.rssi"),
+            "template must not add trust or RSSI candle fields"
+        );
+    }
+
+    #[test]
+    fn template_renders_iching_energy_pane() {
+        for field in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+        ] {
+            assert!(
+                TDV_HTML_TEMPLATE.contains(field),
+                "template must consume {field}"
+            );
+            assert!(
+                TDV_HTML_TEMPLATE.contains(&format!("value: d.{field}")),
+                "template must map {field} from normalized candle time"
+            );
+        }
+        for (label, color) in [
+            ("I-Ching Original", "#4FC3F7"),
+            ("I-Ching Transformed", "#FFB74D"),
+            ("I-Ching Nuclear", "#CE93D8"),
+        ] {
+            assert!(
+                TDV_HTML_TEMPLATE.contains(label),
+                "template must label {label}"
+            );
+            assert_eq!(
+                TDV_HTML_TEMPLATE.matches(label).count(),
+                1,
+                "template must identify {label} in exactly one watermark"
+            );
+            assert!(
+                TDV_HTML_TEMPLATE.contains(color),
+                "template must use opaque color {color} for {label}"
+            );
+        }
+        assert!(
+            TDV_HTML_TEMPLATE.contains("time: Math.floor(d.time / 1000)"),
+            "template must normalize candle time to seconds"
+        );
+        let pane3_add: Vec<&str> = TDV_HTML_TEMPLATE
+            .lines()
+            .filter(|line| line.contains("addSeries") && line.contains(", 3)"))
+            .collect();
+        assert_eq!(
+            pane3_add.len(),
+            3,
+            "pane 3 must contain exactly three series"
+        );
+        assert!(
+            pane3_add
+                .iter()
+                .all(|line| line.contains("LightweightCharts.LineSeries")),
+            "pane 3 must contain only LineSeries"
+        );
+        assert!(
+            !TDV_HTML_TEMPLATE.lines().any(|line| line.contains(", 3)")
+                && (line.contains("BaselineSeries")
+                    || line.contains("HistogramSeries")
+                    || line.contains("AreaSeries"))),
+            "pane 3 must not use gradient/baseline/histogram series"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("chart.panes()[3]"),
+            "template must create a watermark for pane 3"
+        );
+        assert!(
+            !TDV_HTML_TEMPLATE.contains("chart.panes()[4]"),
+            "template must reindex watermarks to four panes"
+        );
+    }
+
+    #[test]
+    fn template_removes_rssi_sharpe_and_retains_core_panes() {
+        let lower = TDV_HTML_TEMPLATE.to_lowercase();
+        assert!(
+            !lower.contains("rssi"),
+            "template must not retain RSSI artifacts"
+        );
+        assert!(
+            !lower.contains("sharpe"),
+            "template must not retain Sharpe artifacts"
+        );
+        assert!(
+            !TDV_HTML_TEMPLATE.contains("rssi-bullish")
+                && !TDV_HTML_TEMPLATE.contains("rssi-bearish"),
+            "template must not retain RSSI tint classes"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains(
+                "const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });"
+            ),
+            "Reverse RSI neutral overlay must remain in price pane 0"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains(
+                "const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });"
+            ),
+            "Reverse RSI bullish overlay must remain in price pane 0"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains(
+                "const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });"
+            ),
+            "Reverse RSI bearish overlay must remain in price pane 0"
+        );
+        for field in ["neutral_revrsi", "bullish_revrsi", "bearish_revrsi"] {
+            assert!(
+                TDV_HTML_TEMPLATE.contains(field),
+                "template must retain Reverse RSI data {field}"
+            );
+        }
+        assert!(
+            TDV_HTML_TEMPLATE.contains(
+                "const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);"
+            ),
+            "Structure Power must remain in pane 1"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains(
+                "const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);"
+            ),
+            "ATR Reversion must remain in pane 2"
+        );
+        let pane1_count = TDV_HTML_TEMPLATE.matches(", 1)").count();
+        assert_eq!(
+            pane1_count, 3,
+            "pane 1 must retain its three Structure series"
+        );
+        let pane2_count = TDV_HTML_TEMPLATE
+            .lines()
+            .filter(|line| line.contains("addSeries") && line.contains(", 2)"))
+            .count();
+        assert_eq!(pane2_count, 1, "pane 2 must retain only ATR Reversion");
+    }
+
+    #[test]
+    fn template_removes_climax_signal_markers_and_retains_atr_circles() {
+        assert!(
+            !TDV_HTML_TEMPLATE.contains("climax_signal"),
+            "template must not retain orphaned climax_signal marker mapping"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("const markers = [];"),
+            "template must initialize an empty marker collection"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("markersSeries.setMarkers(markers)"),
+            "template must apply only valid markers"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("shape: 'circle'"),
+            "template must retain ATR climax circles"
+        );
+        assert!(
+            TDV_HTML_TEMPLATE.contains("d.atr_upperband")
+                && TDV_HTML_TEMPLATE.contains("d.atr_lowerband"),
+            "template must retain ATR band climax conditions"
+        );
     }
 }
