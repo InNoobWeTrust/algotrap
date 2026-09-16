@@ -56,10 +56,12 @@ WORKDIR /app
 
 COPY --from=builder /build/telegrambot .
 COPY --from=builder /build-artifacts/libduckdb.so /usr/local/lib/libduckdb.so
-RUN ldconfig
+RUN ldconfig && \
+    ldd ./telegrambot | grep -E '^[[:space:]]*libduckdb\.so[[:space:]]*=>[[:space:]]*/usr/local/lib/libduckdb\.so[[:space:]]+\(0x[[:xdigit:]]+\)$'
 # Default prompt config (overridden by ConfigMap mount in K8s)
 COPY bins/telegrambot/config/prompts/ config/prompts/
 ENV PROMPTS_DIR=config/prompts \
-    DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so
+    DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so \
+    LD_LIBRARY_PATH=/usr/local/lib
 
 ENTRYPOINT ["./telegrambot"]

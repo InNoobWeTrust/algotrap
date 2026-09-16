@@ -65,8 +65,10 @@ WORKDIR /app
 
 COPY --from=builder /build/cryptobot .
 COPY --from=builder /build-artifacts/libduckdb.so /usr/local/lib/libduckdb.so
-RUN ldconfig
+RUN ldconfig && \
+    ldd ./cryptobot | grep -E '^[[:space:]]*libduckdb\.so[[:space:]]*=>[[:space:]]*/usr/local/lib/libduckdb\.so[[:space:]]+\(0x[[:xdigit:]]+\)[[:space:]]*$'
 # node:20-slim is Debian/glibc, matching the native Rust binary and built DuckDB library.
 ENV DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 ENTRYPOINT ["./cryptobot"]
