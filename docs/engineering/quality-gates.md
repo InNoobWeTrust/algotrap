@@ -135,6 +135,9 @@ make duckdb-test
 
 # 6. Dependency tree (all workspace crates, locked dependencies)
 cargo tree --workspace --locked
+
+# 7. Production container images (AMD64 and ARM64)
+make ci-verify-images
 ```
 
 All listed commands run against the same unchanged repository state.
@@ -153,3 +156,12 @@ All listed commands run against the same unchanged repository state.
   `cargo test --workspace` runs unconditionally.
 - For detailed component, container build, and shared-library context see
   [`docs/architecture/stream-and-duckdb-data-flow.md`](../architecture/stream-and-duckdb-data-flow.md).
+- `make ci-verify-images` is the canonical production-container gate. It creates
+  QEMU emulation, then creates and validates a `docker-container` Buildx builder
+  when needed. It concurrently builds the final Dockerfile stages for `linux/amd64`
+  and `linux/arm64` without publishing an image. It fails rather than silently using
+  a builder of another driver. Docker must allow privileged containers so QEMU can be
+  registered on a newly cloned machine.
+- Run `act workflow_dispatch -W .github/workflows/local-ci.yml` to exercise the durable local
+  workflow wrapper. It validates Actions orchestration around the canonical Make
+  target; the Make target remains the authoritative image-build gate.

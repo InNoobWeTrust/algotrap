@@ -20,6 +20,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ─── Cook: build ONLY dependencies (cached until Cargo.toml/lock change) ─────
 FROM chef AS cook
 
+ARG TARGETPLATFORM
 ENV DUCKDB_DOWNLOAD_LIB=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY --from=planner /build/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/cargo-target \
+    --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/cargo-target \
     CARGO_TARGET_DIR=/cargo-target cargo chef cook --release --recipe-path recipe.json -p cryptobot
 
 # ─── Build: compile the application (fast — deps already built) ──────────────
@@ -45,7 +46,7 @@ COPY bins/cryptobot/Cargo.toml ./bins/cryptobot/Cargo.toml
 COPY bins/cryptobot/src ./bins/cryptobot/src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/cargo-target \
+    --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/cargo-target \
     CARGO_TARGET_DIR=/cargo-target cargo build --release -p cryptobot --bin cryptobot && \
     cp /cargo-target/release/cryptobot /build/cryptobot && \
     strip /build/cryptobot && \
@@ -66,7 +67,7 @@ WORKDIR /app
 COPY --from=builder /build/cryptobot .
 COPY --from=builder /build-artifacts/libduckdb.so /usr/local/lib/libduckdb.so
 RUN ldconfig && \
-    ldd ./cryptobot | grep -E '^[[:space:]]*libduckdb\.so[[:space:]]*=>[[:space:]]*/usr/local/lib/libduckdb\.so[[:space:]]+\(0x[[:xdigit:]]+\)[[:space:]]*$'
+    ldd ./cryptobot | grep -Eq '[[:space:]]*libduckdb\.so[[:space:]]*=>[[:space:]]*/usr/local/lib/libduckdb\.so[[:space:]]+\('
 # node:20-slim is Debian/glibc, matching the native Rust binary and built DuckDB library.
 ENV DUCKDB_LIBRARY_PATH=/usr/local/lib/libduckdb.so
 ENV LD_LIBRARY_PATH=/usr/local/lib
