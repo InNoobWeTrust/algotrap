@@ -23,7 +23,7 @@ mod vtab;
 use std::sync::Arc;
 
 use crate::engine::error::MarketError;
-use crate::engine::frame::{SourceFrame, QueryResultFrame};
+use crate::engine::frame::{QueryResultFrame, SourceFrame};
 use crate::engine::traits::ComputedFrame;
 use crate::query::{FrameQuery, RawQuery};
 
@@ -51,7 +51,11 @@ impl DuckDBQuery {
     /// callback, reclaimed by `bind`, and finally materialized into a new
     /// `QueryResultFrame` by running `query.sql()`. Nesting two `project` calls on
     /// the same thread errors instead of mixing their frames.
-    pub fn project(&self, frame: SourceFrame, query: RawQuery) -> Result<QueryResultFrame, MarketError> {
+    pub fn project(
+        &self,
+        frame: SourceFrame,
+        query: RawQuery,
+    ) -> Result<QueryResultFrame, MarketError> {
         session::with_session(|connection| {
             vtab::register(connection)?;
             invocation::with_frame(Arc::new(frame), || {
@@ -379,8 +383,11 @@ mod tests {
     #[test]
     fn preserves_single_thread_invocation_lifecycle() {
         let make_frame = || {
-            SourceFrame::from_columns(vec![("metric".into(), SourceColumnData::Number(vec![Some(1.0)]))])
-                .unwrap()
+            SourceFrame::from_columns(vec![(
+                "metric".into(),
+                SourceColumnData::Number(vec![Some(1.0)]),
+            )])
+            .unwrap()
         };
 
         let first = DuckDBQuery::new()
@@ -411,9 +418,11 @@ mod tests {
 
     #[test]
     fn computed_table_rejects_arguments_without_a_compute_lifecycle() {
-        let frame =
-            SourceFrame::from_columns(vec![("metric".into(), SourceColumnData::Number(vec![Some(1.0)]))])
-                .unwrap();
+        let frame = SourceFrame::from_columns(vec![(
+            "metric".into(),
+            SourceColumnData::Number(vec![Some(1.0)]),
+        )])
+        .unwrap();
 
         let error = DuckDBQuery::new()
             .project(

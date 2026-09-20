@@ -1,0 +1,569 @@
+
+<!DOCTYPE html>
+<html class="sl-theme-dark" style="font-size: 22px">
+  <head>
+    <meta charset="utf-8" />
+    <title>InNoobWeTrust™ CryptoBot</title>
+    <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js" integrity="sha384-8J8e9bGIwf7e9BLO5rwf4zJwNRKcypGnvuGzORD/t4TrFA1gWbl3Hsi/RvyWwBKl" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            min-height: 100%;
+            box-sizing: border-box;
+        }
+
+        #container {
+            height: 100%;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 2.5%;
+            left: 2%;
+            z-index: 9999;
+        }
+        #ticker-select {
+            min-width: 200px;
+            margin-bottom: 0.25rem;
+        }
+        #tf-btns {
+            display: inline-block;
+        }
+        #fullscreen-btn {
+            position: absolute;
+            bottom: 15px;
+            left: -6px;
+            z-index: 9999;
+            font-size: 10px;
+        }
+        #loading-overlay {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.6);
+            z-index: 99999;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        #loading-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+    </style>
+  </head>
+  <body>
+    <div id="container" data-symbol="" data-tf=""></div>
+    <div id="loading-overlay"><sl-spinner style="font-size: 3rem; --track-width: 4px;"></sl-spinner></div>
+    <div id="overlay">
+        <div id="badges">
+            <sl-badge id="sl-badge" variant="danger" pill>SL: -</sl-badge>
+            <sl-badge id="tol-badge" variant="success" pill>Tol: -</sl-badge>
+            <sl-badge id="atr-percent" variant="warning" pill>ATR: -</sl-badge>
+            <sl-badge id="leverage" variant="primary" pill>Lvrg: -</sl-badge>
+        </div>
+        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
+        <sl-select id="ticker-select" size="small" placeholder="Select ticker"></sl-select>
+        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
+        <sl-radio-group id="tf-btns"></sl-radio-group>
+    </div>
+    <sl-icon-button
+      id="fullscreen-btn"
+      name="fullscreen"
+      label="Toggle Fullscreen"
+      style="font-size: 2rem;"
+      onclick="toggleFullscreen()">
+    </sl-icon-button>
+    <script>
+      const fullscreenButton = document.getElementById('fullscreen-btn');
+
+      function toggleFullscreen() {
+        if (!document.fullscreenElement) {
+          const elem = document.documentElement;
+          elem.requestFullscreen?.();
+          elem.webkitRequestFullscreen?.();
+          elem.msRequestFullscreen?.();
+        } else {
+          document.exitFullscreen?.();
+          document.webkitExitFullscreen?.();
+          document.msExitFullscreen?.();
+        }
+      }
+
+      document.addEventListener('fullscreenchange', () => {
+        if (document.fullscreenElement) {
+          fullscreenButton.name = 'fullscreen-exit';
+        } else {
+          fullscreenButton.name = 'fullscreen';
+        }
+      });
+    </script>
+    <!-- Gap Zone Primitive classes (must be defined before onIntervalUpdate) -->
+    <script type="text/javascript">
+        class GapZoneBandRenderer {
+            constructor(zones, chartData) { this._zones = zones; this._data = chartData; this._series = null; this._chart = null; }
+            update(series, chart) { this._series = series; this._chart = chart; }
+            draw(target) {
+                const s = this._series; const c = this._chart;
+                if (!s || !c || !this._data.length) return;
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const ts = c.timeScale();
+                    const firstTime = this._data[0]?.time;
+                    const lastTime = this._data[this._data.length - 1]?.time;
+                    if (!firstTime || !lastTime) return;
+                    const xLeft = ts.timeToCoordinate(firstTime);
+                    const xRight = ts.timeToCoordinate(lastTime);
+                    if (xLeft === null || xRight === null) return;
+                    const ratio = scope.horizontalPixelRatio;
+                    const vRatio = scope.verticalPixelRatio;
+                    this._zones.forEach(z => {
+                        const top = z.body_top ?? z.top;
+                        const bottom = z.body_bottom ?? z.bottom;
+                        const yTop = s.priceToCoordinate(top);
+                        const yBot = s.priceToCoordinate(bottom);
+                        if (yTop === null || yBot === null) return;
+                        ctx.fillStyle = z.direction === 'bullish'
+                            ? `rgba(33,150,243,0.12)`
+                            : z.direction === 'bearish'
+                                ? `rgba(255,152,0,0.12)`
+                                : `rgba(158,158,158,0.12)`;
+                        const x = Math.round(xLeft * ratio);
+                        const w = Math.round((xRight - xLeft + 40) * ratio);
+                        const y = Math.round(Math.min(yTop, yBot) * vRatio);
+                        const h = Math.round(Math.abs(yBot - yTop) * vRatio);
+                        ctx.fillRect(x, y, w, h);
+                    });
+                });
+            }
+        }
+        class GapZonePaneView {
+            constructor(renderer) { this._renderer = renderer; }
+            renderer() { return this._renderer; }
+        }
+        class GapZonePrimitive {
+            constructor(zones, chartData) {
+                this._renderer = new GapZoneBandRenderer(zones, chartData);
+                this._paneView = new GapZonePaneView(this._renderer);
+            }
+            attached({ series, chart }) { this._renderer.update(series, chart); }
+            detached() { this._renderer.update(null, null); }
+            paneViews() { return [this._paneView]; }
+            updateAllViews() {}
+        }
+    </script>
+    <script type="text/javascript">
+        // ─── Config from template ─────────────────────────────────────
+        const tickers = {{ tickers_json }};
+        const chartTfs = {{ chart_tfs }};
+
+        // ─── DOM refs ─────────────────────────────────────────────────
+        const tickerSelect = document.getElementById('ticker-select');
+        const tf_btns = document.getElementById('tf-btns');
+        const container = document.getElementById('container');
+        const slBadge = document.getElementById('sl-badge');
+        const tolBadge = document.getElementById('tol-badge');
+        const atr_badge = document.getElementById('atr-percent');
+        const lvrg_badge = document.getElementById('leverage');
+        const loadingOverlay = document.getElementById('loading-overlay');
+
+        // ─── Global state ─────────────────────────────────────────────
+        let dataset = {};
+        let currentTicker = null;
+
+        // ─── Populate ticker dropdown ─────────────────────────────────
+        tickers.forEach(t => {
+            const opt = document.createElement('sl-option');
+            opt.value = t.symbol;
+            opt.textContent = `BingX:${t.symbol}`;
+            tickerSelect.appendChild(opt);
+        });
+
+        // ─── Create chart ─────────────────────────────────────────────
+        const chart = LightweightCharts.createChart(container, {
+            autoSize: true,
+            layout: {
+                background: { color: '#22222240' },
+                textColor: '#DDD',
+            },
+            grid: {
+                vertLines: { color: '#44444440' },
+                horzLines: { color: '#44444440' },
+            },
+            timeScale: {
+                timeVisible: true,
+            },
+        });
+        const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
+            priceFormat: {
+                type: 'volume',
+            },
+            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
+        });
+        volumeSeries.priceScale().applyOptions({
+            scaleMargins: {
+                top: 0.8,
+                bottom: 0,
+            },
+        });
+        const volumeSmaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
+            lineColor: '#00000000',
+            topColor: '#FDD8354C',
+            bottomColor: '#FDD8352F',
+            priceFormat: {
+                type: 'volume',
+            },
+            priceScaleId: '',
+        });
+        volumeSmaSeries.priceScale().applyOptions({
+            scaleMargins: {
+                top: 0.8,
+                bottom: 0,
+            },
+        });
+        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, {});
+        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
+        const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
+        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
+        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
+        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
+        const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
+        const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 0 },
+            topLineColor: 'rgba(76, 175, 80, 0.3)',
+            topFillColor1: 'rgba(76, 175, 80, 0.2)',
+            topFillColor2: 'rgba(76, 175, 80, 0.5)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.3)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.5)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
+        }, 1);
+        const structurePwrDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 0 },
+            topLineColor: 'rgba(76, 175, 80, 0.5)',
+            topFillColor1: 'rgba(76, 175, 80, 0.05)',
+            topFillColor2: 'rgba(76, 175, 80, 0.1)',
+            bottomLineColor: 'rgba(242, 54, 69, 0.5)',
+            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
+            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
+        }, 1);
+        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
+        const ichingOriginalSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
+            // Energy direction, not market bullish/bearish direction: keep a
+            // single cool palette so the I-Ching pane cannot be mistaken for price.
+            upColor: 'rgba(79, 195, 247, 0.55)',
+            downColor: 'rgba(41, 121, 255, 0.55)',
+            borderDownColor: '#2979FF',
+            borderUpColor: '#4FC3F7',
+            wickDownColor: '#2979FF',
+            wickUpColor: '#4FC3F7',
+            priceLineVisible: false,
+        }, 3);
+        const ichingTransformedSeries = chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(255, 183, 77, 0.55)', lineWidth: 2, lineStyle: 2, lineType: 1 }, 3);
+        const ichingNuclearSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
+            baseValue: { type: 'price', price: 0 },
+            topLineColor: 'rgba(206, 147, 216, 0.34)',
+            topFillColor1: 'rgba(206, 147, 216, 0.12)',
+            topFillColor2: 'rgba(206, 147, 216, 0.34)',
+            bottomLineColor: 'rgba(156, 39, 176, 0.34)',
+            bottomFillColor1: 'rgba(156, 39, 176, 0.34)',
+            bottomFillColor2: 'rgba(156, 39, 176, 0.12)',
+            lineWidth: 1,
+            lineType: 1,
+        }, 3);
+        const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
+        const textWatermarks = [
+            LightweightCharts.createTextWatermark(chart.panes()[0], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[1], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[2], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+            LightweightCharts.createTextWatermark(chart.panes()[3], {
+                horzAlign: 'left',
+                vertAlign: 'top',
+            }),
+        ];
+
+        // ─── Watermark update ─────────────────────────────────────────
+        const watermarkUpdate = () => {
+            const tf = tf_btns.value || container.dataset.tf || chartTfs[0];
+            const lastBar = dataset[tf]?.candles?.slice(-1)[0];
+            if (lastBar) {
+                const atr = +(lastBar.atr_percent * 100).toFixed(2);
+                const lvrg = Math.floor(lastBar.leverage);
+                atr_badge.innerHTML = `ATR: ${atr}%`;
+                lvrg_badge.innerHTML = `x${lvrg}`;
+            }
+            const watermarks = [
+                {
+                    lines: [
+                        {
+                            text: `${container.dataset.symbol} ${tf}`,
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 24,
+                        },
+                    ],
+                },
+                {
+                    lines: [
+                        {
+                            text: 'Structure Power (9, 16)',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+                {
+                    lines: [
+                        {
+                            text: 'ATR Reversion (42, 1.618)',
+                            color: 'rgba(178, 181, 190, 0.5)',
+                            fontSize: 18,
+                        },
+                    ],
+                },
+                {
+                    lines: [
+                        {
+                            text: 'I-Ching Original range',
+                            color: '#4FC3F7',
+                            fontSize: 13,
+                        },
+                        {
+                            text: 'Transformed projection',
+                            color: '#FFB74D',
+                            fontSize: 13,
+                        },
+                        {
+                            text: 'Nuclear inner state',
+                            color: '#CE93D8',
+                            fontSize: 13,
+                        },
+                    ],
+                },
+            ];
+            Object.entries(textWatermarks).forEach(([k,v]) => {
+                v.applyOptions(watermarks[k]);
+            });
+        }
+
+        // ─── TF update ────────────────────────────────────────────────
+        const onIntervalUpdate = (tf) => {
+            const tfData = dataset[tf];
+            if (!tfData) return;
+            const data = tfData.candles.map(d => ({
+                ...d,
+                time: Math.floor(d.time / 1000),
+            }));
+            candlestickSeries.setData(data);
+            volumeSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.volume,
+                color: d.volume_color,
+            })));
+            volumeSmaSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.volume_sma,
+            })));
+            ema200Series.setData(data.map(d => ({
+                time: d.time,
+                value: d.ema200,
+                color: d.ema200_color,
+            })));
+            biasRevSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.bias_reversion,
+                color: d.bias_reversion_color,
+            })));
+            atrUpperBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.atr_upperband,
+                color: d.atr_upperband_color,
+            })));
+            atrLowerBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.atr_lowerband,
+                color: d.atr_lowerband_color,
+            })));
+            neutralRevRsiSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.neutral_revrsi,
+                color: d.neutral_revrsi_color,
+            })));
+            bullishBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.bullish_revrsi,
+                color: d.bullish_revrsi_color,
+            })));
+            bearishBandSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.bearish_revrsi,
+                color: d.bearish_revrsi_color,
+            })));
+            structurePwrSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.structure_power,
+                color: d.structure_power_color,
+            })));
+            structurePwrSmaSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.structure_power_sma,
+            })));
+            structurePwrDirSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.structure_power_direction,
+            })));
+            atrRevSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.atr_reversion_percent,
+                color: d.atr_reversion_percent_color,
+            })));
+            ichingOriginalSeries.setData(data.map(d => ({
+                time: d.time,
+                open: d.iching_open,
+                high: d.iching_high,
+                low: d.iching_low,
+                close: d.iching_close,
+            })));
+            ichingTransformedSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.iching_transformed_close,
+            })));
+            ichingNuclearSeries.setData(data.map(d => ({
+                time: d.time,
+                value: d.iching_nuclear_close,
+            })));
+            const markers = [];
+            // ATR Climax circles
+            data.forEach(d => {
+                if (d.close >= d.atr_upperband) {
+                    markers.push({
+                        time: d.time,
+                        position: 'aboveBar',
+                        shape: 'circle',
+                        color: 'rgba(157,225,159,0.7)',
+                        size: 3,
+                    });
+                }
+                if (d.close <= d.atr_lowerband) {
+                    markers.push({
+                        time: d.time,
+                        position: 'belowBar',
+                        shape: 'circle',
+                        color: 'rgba(201,134,134,0.7)',
+                        size: 3,
+                    });
+                }
+            });
+            markers.sort((a, b) => a.time - b.time);
+            markersSeries.setMarkers(markers);
+
+            // ─── Gap Zone Bands (precomputed) ──────────────────────────
+            const suppliedGaps = Array.isArray(tfData.gapZones) ? tfData.gapZones : [];
+            if (window._gapPrimitive) {
+                try { candlestickSeries.detachPrimitive(window._gapPrimitive); } catch(_) {}
+            }
+            if (suppliedGaps.length > 0) {
+                window._gapPrimitive = new GapZonePrimitive(suppliedGaps, data);
+                candlestickSeries.attachPrimitive(window._gapPrimitive);
+            }
+
+            watermarkUpdate();
+        }
+
+        // ─── Layout ───────────────────────────────────────────────────
+        const onSizeUpdate = () => {
+            const tmpSeries = chart.panes()[0].getSeries()[0];
+            const len = tmpSeries.data().length;
+            chart.timeScale().setVisibleLogicalRange({ from: len - 128, to: len + 5 });
+            const containerHeight = document.getElementById("container").getClientRects()[0].height;
+            chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
+            watermarkUpdate();
+        }
+        const resizeObserver = new ResizeObserver((entries) => {
+            requestAnimationFrame(() => {
+                onSizeUpdate();
+            });
+        });
+        resizeObserver.observe(container);
+
+        // ─── TF buttons ───────────────────────────────────────────────
+        chartTfs.forEach(tf => {
+            const tf_btn = document.createElement('sl-radio-button');
+            tf_btn.innerText = tf;
+            tf_btn.value = tf
+            tf_btn.addEventListener('click', () => {
+                requestAnimationFrame(() => {
+                    onIntervalUpdate(tf);
+                });
+            });
+            tf_btns.appendChild(tf_btn);
+        });
+
+        // ─── Ticker loading ───────────────────────────────────────────
+        async function loadTicker(symbol) {
+            loadingOverlay.classList.add('active');
+            try {
+                const resp = await fetch(`data/${symbol}.json`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                dataset = await resp.json();
+
+                const ticker = tickers.find(t => t.symbol === symbol);
+                currentTicker = ticker;
+                container.dataset.symbol = `BingX:${symbol}`;
+                container.dataset.tf = ticker.default_tf;
+
+                // Update badges
+                slBadge.innerHTML = `SL: ${ticker.sl_percent}%`;
+                tolBadge.innerHTML = `Tol: ${ticker.tol_percent}%`;
+
+                // Update page title
+                document.title = `BingX:${symbol} (InNoobWeTrust™)`;
+
+                // Click default TF
+                requestAnimationFrame(() => {
+                    const defaultBtn = [...tf_btns.children].find(b => b.textContent == ticker.default_tf);
+                    if (defaultBtn) defaultBtn.click();
+                    else if (tf_btns.children[0]) tf_btns.children[0].click();
+                });
+            } catch(e) {
+                console.error(`Failed to load ticker data for ${symbol}:`, e);
+            } finally {
+                loadingOverlay.classList.remove('active');
+            }
+        }
+
+        // ─── URL sync + init ──────────────────────────────────────────
+        tickerSelect.addEventListener('sl-change', (e) => {
+            const symbol = e.target.value;
+            history.replaceState(null, '', `?ticker=${symbol}`);
+            loadTicker(symbol);
+        });
+
+        // Initial load from URL params or first ticker
+        const params = new URLSearchParams(location.search);
+        const initialTicker = params.get('ticker') || tickers[0]?.symbol;
+        if (initialTicker) {
+            tickerSelect.value = initialTicker;
+            loadTicker(initialTicker);
+        }
+    </script>
+  </body>
+</html>

@@ -89,10 +89,7 @@ impl Kernel for BandReversionPercent {
         prior: PriorState<'_, Self::State>,
         input: &Self::Input,
     ) -> TaResult<KernelStep<Self::Output, Self::State>> {
-        validate_multiplier(
-            "band reversion percent multiplier",
-            self.multiplier,
-        )?;
+        validate_multiplier("band reversion percent multiplier", self.multiplier)?;
         let child_prior = match prior {
             PriorState::Initial => PriorState::Initial,
             PriorState::Existing(state) => PriorState::Existing(&state.reversion),
@@ -147,8 +144,7 @@ impl Kernel for IsAtrGap {
         let oscillation = input.atr * self.multiplier;
         Ok(KernelStep {
             output: Some(
-                input.signal > input.open + oscillation
-                    || input.signal < input.open - oscillation,
+                input.signal > input.open + oscillation || input.signal < input.open - oscillation,
             ),
             next_state: IsAtrGapState,
         })
@@ -394,10 +390,7 @@ mod immutable_kernel_tests {
         }
     }
 
-    fn transition_gap_error(
-        kernel: super::IsAtrGap,
-        input: &BandPoint,
-    ) -> crate::ta::TaError {
+    fn transition_gap_error(kernel: super::IsAtrGap, input: &BandPoint) -> crate::ta::TaError {
         match kernel.transition(PriorState::Initial, input) {
             Ok(_) => panic!("transition must fail"),
             Err(error) => error,

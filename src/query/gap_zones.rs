@@ -141,7 +141,11 @@ fn build_recent_zones_sql(
     max_zones: usize,
     include_body_ratio: bool,
 ) -> String {
-    let ratio_select = if include_body_ratio { ", body_ratio" } else { "" };
+    let ratio_select = if include_body_ratio {
+        ", body_ratio"
+    } else {
+        ""
+    };
     format!(
         "SELECT time, open, high, low, close, volume, \
          gap_candidate_body_bottom AS body_bottom, \
@@ -240,9 +244,8 @@ fn decode_zone_row(
 /// instead of truncating: silent rounding would attach a zone to the wrong
 /// candle, so the check fails fast with the row index for debugging.
 fn decode_time(value: Option<f64>, row: usize) -> Result<i64, MarketError> {
-    let value = value.ok_or_else(|| {
-        MarketError::computation(format!("gap-zone row {row} has a null time"))
-    })?;
+    let value = value
+        .ok_or_else(|| MarketError::computation(format!("gap-zone row {row} has a null time")))?;
     if !value.is_finite()
         || value.fract() != 0.0
         || value < i64::MIN as f64
@@ -258,11 +261,7 @@ fn decode_time(value: Option<f64>, row: usize) -> Result<i64, MarketError> {
 /// Reads a required numeric field, rejecting nulls on qualifying rows.
 /// A qualifying zone without its body bounds or OHLCV metadata is corrupt
 /// input, not a defaultable gap — hence an error naming row and column.
-fn required_f64(
-    frame: &impl ComputedFrame,
-    column: &str,
-    row: usize,
-) -> Result<f64, MarketError> {
+fn required_f64(frame: &impl ComputedFrame, column: &str, row: usize) -> Result<f64, MarketError> {
     frame.f64_at(column, row)?.ok_or_else(|| {
         MarketError::computation(format!(
             "gap-zone row {row} has a null {column} on a qualifying zone"
@@ -309,11 +308,7 @@ mod tests {
         body_ratio: Option<f64>,
     }
 
-    fn spec(
-        time: i64,
-        qualifies: bool,
-        direction: Option<&'static str>,
-    ) -> RowSpec {
+    fn spec(time: i64, qualifies: bool, direction: Option<&'static str>) -> RowSpec {
         let (open, close) = if direction == Some("bearish") {
             (110.0, 100.0)
         } else {
@@ -339,7 +334,9 @@ mod tests {
             let mut columns = vec![
                 (
                     "time".into(),
-                    SourceColumnData::Number(rows.iter().map(|row| Some(row.time as f64)).collect()),
+                    SourceColumnData::Number(
+                        rows.iter().map(|row| Some(row.time as f64)).collect(),
+                    ),
                 ),
                 (
                     "open".into(),
@@ -489,8 +486,8 @@ mod tests {
 
     #[test]
     fn zero_max_zones_and_missing_columns_fail_fast() {
-        let zero = recent_gap_zones(empty_frame(true), 9_000, 0)
-            .expect_err("max_zones == 0 must fail");
+        let zero =
+            recent_gap_zones(empty_frame(true), 9_000, 0).expect_err("max_zones == 0 must fail");
         assert_eq!(zero.kind, crate::engine::error::ErrorKind::ValidationError);
 
         let missing = frame_from(&[spec(1_000, true, None)], true);

@@ -1,6 +1,10 @@
 //! Typed Kernel and indicator exports for application aggregates.
 
 pub use super::error::{TaError, TaErrorKind, TaResult};
+pub use super::iching::{
+    HexagramEnergy, IchingBarTrajectory, IchingSignal, LeapMonthPolicy, iching_bar_trajectory,
+    plum_blossom_signal, plum_blossom_signal_with_policy,
+};
 pub use super::kernel::{Kernel, KernelStep, PriorState};
 pub use super::ops::{
     Atr, AtrState, BandPoint, BandReversion, BandReversionPercent, BandReversionPercentState,

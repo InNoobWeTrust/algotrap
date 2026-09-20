@@ -15,7 +15,7 @@ use llm_tool::{ToolError, ToolRegistry, llm_tool};
 use tracing::warn;
 
 use crate::browserless::capture_chart_screenshot;
-use crate::chart::{gap_zones_to_chart_json, render_single_tf_chart_html};
+use crate::chart::render_single_tf_chart_html;
 use crate::config::{EnvConf, TickerConf};
 use algotrap::query::gap_zones::GapZoneRecord;
 
@@ -223,12 +223,8 @@ pub async fn execute_tool_call(
                     ));
                 }
             };
-            let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
-            let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
-            let gap_zones_json =
-                gap_zones_to_chart_json(gap_zones.get(&tf).map(Vec::as_slice).unwrap_or(&[]));
-            let chart_html =
-                render_single_tf_chart_html(&tf, df.as_ref(), ticker, &gap_zones_json, rssi_tint)?;
+            let zones = gap_zones.get(&tf).map(Vec::as_slice).unwrap_or(&[]);
+            let chart_html = render_single_tf_chart_html(&tf, df.as_ref(), ticker, zones)?;
 
             match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
                 Ok(_png) => Ok(format!(
@@ -312,6 +308,9 @@ fn extract_indicator_summary(
         "ema200",
         "atr_percent",
         "leverage",
+        "iching_original_energy",
+        "iching_transformed_energy",
+        "iching_nuclear_energy",
     ];
 
     for col_name in &cols {
@@ -406,11 +405,13 @@ fn build_multi_tf_overview(
 
             lines.push(format!(
                 "  {tf}: RSSI={rssi}, band_rev={band_rev}, \
-                 structure_pwr={pwr}, sharpe={sharpe}, close={close}",
+                 structure_pwr={pwr}, sharpe={sharpe}, iching_orig={ic_orig}, iching_trans={ic_trans}, close={close}",
                 rssi = get_val("rssi"),
                 band_rev = get_val("band_reversion"),
                 pwr = get_val("structure_power"),
                 sharpe = get_val("sharpe"),
+                ic_orig = get_val("iching_original_energy"),
+                ic_trans = get_val("iching_transformed_energy"),
                 close = get_val("close"),
             ));
         }
@@ -756,7 +757,10 @@ mod tests {
         // the parallel map entry (empty here) and always yields an envelope.
         let gap_zones: HashMap<Timeframe, Vec<GapZoneRecord>> =
             HashMap::from([(Timeframe::H1, vec![])]);
-        let zones = gap_zones.get(&Timeframe::H1).map(Vec::as_slice).unwrap_or(&[]);
+        let zones = gap_zones
+            .get(&Timeframe::H1)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let ctx = compute_gap_zone_context(zones).expect("envelope must exist");
         assert!(ctx.contains("Gap zones (0 returned"));
         assert!(ctx.contains("available=unknown"));
@@ -777,7 +781,27 @@ mod tests {
         let overview = build_multi_tf_overview(&all_dfs, &ticker, &ic, &gap_zones).unwrap();
 
         assert!(overview.contains("RSSI=N/A"));
+        assert!(overview.contains("iching_orig="));
+        assert!(overview.contains("iching_trans="));
         assert!(overview.contains("close="));
+    }
+
+    #[tokio::test]
+    async fn test_indicator_summary_includes_iching_energy_values() {
+        let ticker = sample_ticker();
+        let frame = crate::data::process_data(
+            &sample_klines(),
+            &ticker,
+            &crate::memory::IndicatorConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let summary = extract_indicator_summary(&*frame, &Timeframe::H1).unwrap();
+
+        assert!(summary.contains("iching_original_energy:"));
+        assert!(summary.contains("iching_transformed_energy:"));
+        assert!(summary.contains("iching_nuclear_energy:"));
     }
 
     #[test]
@@ -837,12 +861,19 @@ mod tests {
             .await
             .unwrap();
         let all_dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = HashMap::from([
-            (Timeframe::M15, crate::data::process_data(&sample_klines(), &ticker, &ic).await.unwrap()),
-            (Timeframe::H1, crate::data::process_data(&sample_klines(), &ticker, &ic).await.unwrap()),
             (
-                Timeframe::H4,
-                frame,
+                Timeframe::M15,
+                crate::data::process_data(&sample_klines(), &ticker, &ic)
+                    .await
+                    .unwrap(),
             ),
+            (
+                Timeframe::H1,
+                crate::data::process_data(&sample_klines(), &ticker, &ic)
+                    .await
+                    .unwrap(),
+            ),
+            (Timeframe::H4, frame),
         ]);
         // 30 zones per tf x 3 tfs = 90 raw -> aggregate must cap at 64.
         let mk = |base: i64| {
@@ -863,7 +894,10 @@ mod tests {
         // Count zone detail lines (contain " | " and a direction token).
         let zone_lines: Vec<&str> = overview
             .lines()
-            .filter(|l| l.contains(" | ") && (l.contains("bullish") || l.contains("bearish") || l.contains("flat")))
+            .filter(|l| {
+                l.contains(" | ")
+                    && (l.contains("bullish") || l.contains("bearish") || l.contains("flat"))
+            })
             .collect();
         assert_eq!(zone_lines.len(), 64, "aggregate ceiling must hold");
         // Highest-weight-first: H4 block appears before H1, H1 before M15.

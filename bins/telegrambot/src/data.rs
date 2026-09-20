@@ -106,10 +106,8 @@ async fn compute_telegram_frames(
     });
 
     let mut dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = HashMap::new();
-    let mut gap_zones: HashMap<
-        Timeframe,
-        Vec<algotrap::query::gap_zones::GapZoneRecord>,
-    > = HashMap::new();
+    let mut gap_zones: HashMap<Timeframe, Vec<algotrap::query::gap_zones::GapZoneRecord>> =
+        HashMap::new();
     for (timeframe, result) in join_all(computations).await {
         match result {
             Ok((frame, zones)) => {

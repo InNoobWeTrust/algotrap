@@ -51,21 +51,13 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             };
             println!("  📊 {} {} — {} candles", ticker.symbol, tf, df.len());
 
-            let last_rssi = telegrambot::chart::last_rssi_from_df(df.as_ref());
-            let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
-
             // Gap zones come from the parallel recent_gap_zones map.
             let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
-            let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(zones);
             println!("    gap zones: {}", zones.len());
 
-            let chart_html = telegrambot::chart::render_single_tf_chart_html(
-                tf,
-                df.as_ref(),
-                ticker,
-                &gap_zones_json,
-                rssi_tint,
-            )?;
+            let document =
+                telegrambot::chart::fixed_chart_document(tf, df.as_ref(), ticker, zones)?;
+            let chart_html = chartlib::render_fixed_html(&document)?;
 
             let filename = format!(
                 "{}_{}.html",

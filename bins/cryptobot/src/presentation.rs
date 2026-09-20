@@ -8,30 +8,28 @@ use algotrap::engine::validation::ValidatedTicker;
 use algotrap::prelude::Kline;
 use algotrap::query::RawQuery;
 use algotrap::query::duckdb::DuckDBQuery;
-use algotrap::query::gap_zones::{GapZoneRecord, recent_gap_zones};
+use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord, recent_gap_zones};
 use algotrap::ta::ops::{GapCandidateDirection, GapCandidateInput, gap_candidate_facts};
 use algotrap::ta::prelude::{
     Atr, AtrState, BandPoint, BandReversion, BandReversionPercent, BandReversionPercentState,
     BandReversionState, BarBias, BarBiasState, BiasReversion, BiasReversionInput,
     BiasReversionState, BodyRatio, BodyRatioState, Ema, EmaState, IsAtrGap, IsAtrGapState, Kernel,
-    KernelStep, PriorState, ReverseRsi, ReverseRsiState, Rma, RmaState, Rsi, RsiState, Sharpe,
-    SharpeState, Sma, SmaState, TaError, TaResult, atr, atr_percent, band_reversion,
-    band_reversion_percent, bar_bias, bias_reversion, body_ratio, ema, is_atr_gap, option_map2,
-    require_output, reverse_rsi, rma, rsi, sharpe, sma,
+    KernelStep, PriorState, ReverseRsi, ReverseRsiState, Rma, RmaState, Sma, SmaState, TaError,
+    TaResult, atr, atr_percent, band_reversion, band_reversion_percent, bar_bias, bias_reversion,
+    body_ratio, ema, is_atr_gap, option_map2, require_output, reverse_rsi, rma, sma,
 };
+use algotrap::ta::{LeapMonthPolicy, iching_bar_trajectory, plum_blossom_signal_with_policy};
+use chartlib::{DatasetKey, GapDirection, GapZone, InteractiveDataset};
 use futures::TryStreamExt;
 use std::convert::Infallible;
 
 const VOLUME_EMA_PERIOD: usize = 20;
 const EMA_PERIOD: usize = 200;
-const RSI_PERIOD: usize = 14;
-const RSI_SMOOTH_PERIOD: usize = 9;
 const REVERSE_RSI_PERIOD: usize = 14;
 const ATR_PERIOD: usize = 42;
 const BIAS_PERIOD: usize = 9;
 const STRUCTURE_PERIOD: usize = 9;
 const STRUCTURE_SMA_PERIOD: usize = 16;
-const SHARPE_PERIOD: usize = 200;
 
 /// App-level default body-ratio threshold for gap-candidate qualification.
 ///
@@ -51,11 +49,8 @@ pub(crate) struct CryptoIndicators {
     neutral_revrsi: ReverseRsi,
     bullish_revrsi: ReverseRsi,
     bearish_revrsi: ReverseRsi,
-    rsi: Rsi,
-    rsi_ma: Ema,
     structure_power: Rma,
     structure_power_sma: Sma,
-    sharpe: Sharpe,
     body_ratio: BodyRatio,
     band_reversion: BandReversion,
     band_reversion_percent: BandReversionPercent,
@@ -73,18 +68,15 @@ pub(crate) struct CryptoIndicatorState {
     neutral_revrsi: ReverseRsiState,
     bullish_revrsi: ReverseRsiState,
     bearish_revrsi: ReverseRsiState,
-    rsi: RsiState,
-    rsi_ma: EmaState,
     structure_power: RmaState,
     structure_power_sma: SmaState,
-    sharpe: SharpeState,
     body_ratio: BodyRatioState,
     band_reversion: BandReversionState,
     band_reversion_percent: BandReversionPercentState,
     is_atr_gap: IsAtrGapState,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CryptoIndicatorRow {
     pub atr: Option<f64>,
     pub volume_sma: Option<f64>,
@@ -95,14 +87,14 @@ pub(crate) struct CryptoIndicatorRow {
     pub bearish_revrsi: Option<f64>,
     pub atr_upperband: Option<f64>,
     pub atr_lowerband: Option<f64>,
-    pub rssi: Option<f64>,
-    pub rssi_ma: Option<f64>,
+    pub iching_original_energy: Option<f64>,
+    pub iching_transformed_energy: Option<f64>,
+    pub iching_nuclear_energy: Option<f64>,
     pub structure_power: Option<f64>,
     pub structure_power_sma: Option<f64>,
     pub atr_percent: Option<f64>,
     pub atr_reversion_percent: Option<f64>,
     pub band_reversion: Option<f64>,
-    pub sharpe: Option<f64>,
     pub body_ratio: Option<f64>,
     pub is_atr_gap: Option<bool>,
     pub gap_candidate_qualifies: bool,
@@ -122,11 +114,8 @@ impl CryptoIndicators {
             neutral_revrsi: reverse_rsi(REVERSE_RSI_PERIOD, 50.0),
             bullish_revrsi: reverse_rsi(REVERSE_RSI_PERIOD, 70.0),
             bearish_revrsi: reverse_rsi(REVERSE_RSI_PERIOD, 30.0),
-            rsi: rsi(RSI_PERIOD),
-            rsi_ma: ema(RSI_SMOOTH_PERIOD),
             structure_power: rma(STRUCTURE_PERIOD),
             structure_power_sma: sma(STRUCTURE_SMA_PERIOD),
-            sharpe: sharpe(SHARPE_PERIOD),
             body_ratio: body_ratio(),
             band_reversion: band_reversion(ATR_BAND_MULTIPLIER),
             band_reversion_percent: band_reversion_percent(ATR_BAND_MULTIPLIER),
@@ -147,6 +136,13 @@ impl Kernel for CryptoIndicators {
         prior: PriorState<'_, Self::State>,
         kline: &Kline,
     ) -> TaResult<KernelStep<Self::Output, Self::State>> {
+        let datetime = chrono::DateTime::from_timestamp_millis(kline.time).ok_or_else(|| {
+            TaError::validation(format!("Kline time {} is out of range", kline.time))
+        })?;
+        let signal = plum_blossom_signal_with_policy(datetime, LeapMonthPolicy::Allow)?;
+        let transformed = signal
+            .transformed
+            .ok_or_else(|| TaError::computation("Plum Blossom transformed channel is missing"))?;
         let bias_step = self
             .bar_bias
             .transition(child_prior(&prior, |state| &state.bar_bias), kline)?;
@@ -181,14 +177,6 @@ impl Kernel for CryptoIndicators {
             child_prior(&prior, |state| &state.bearish_revrsi),
             &kline.low,
         )?;
-        let rsi_step = self.rsi.transition(
-            child_prior(&prior, |state| &state.rsi),
-            &(kline.open + bias),
-        )?;
-        let rsi_value = require_output("RSI", rsi_step.output)?;
-        let rsi_ma_step = self
-            .rsi_ma
-            .transition(child_prior(&prior, |state| &state.rsi_ma), &rsi_value)?;
         let structure_step = self
             .structure_power
             .transition(child_prior(&prior, |state| &state.structure_power), &bias)?;
@@ -197,24 +185,22 @@ impl Kernel for CryptoIndicators {
             child_prior(&prior, |state| &state.structure_power_sma),
             &structure_value,
         )?;
-        let sharpe_step = self
-            .sharpe
-            .transition(child_prior(&prior, |state| &state.sharpe), &kline.close)?;
         let body_step = self
             .body_ratio
             .transition(child_prior(&prior, |state| &state.body_ratio), kline)?;
-        let band_input = BandPoint {
+        let bias_reversion_value = require_output("bias reversion", bias_reversion_step.output)?;
+        let band_point = BandPoint {
             open: kline.open,
             atr,
-            signal: kline.open,
+            signal: bias_reversion_value,
         };
         let band_step = self.band_reversion.transition(
             child_prior(&prior, |state| &state.band_reversion),
-            &band_input,
+            &band_point,
         )?;
         let band_percent_step = self.band_reversion_percent.transition(
             child_prior(&prior, |state| &state.band_reversion_percent),
-            &band_input,
+            &band_point,
         )?;
         let gap_step = self.is_atr_gap.transition(
             child_prior(&prior, |state| &state.is_atr_gap),
@@ -249,14 +235,14 @@ impl Kernel for CryptoIndicators {
             atr_lowerband: option_map2(Some(kline.open), Some(atr), |open, atr| {
                 open - atr * self.atr_multiplier
             })?,
-            rssi: Some(rsi_value),
-            rssi_ma: rsi_ma_step.output,
+            iching_original_energy: Some(signal.original.energy),
+            iching_transformed_energy: Some(transformed.energy),
+            iching_nuclear_energy: Some(signal.nuclear.energy),
             structure_power: Some(structure_value),
             structure_power_sma: structure_sma_step.output,
             atr_percent: option_map2(Some(atr), Some(kline.open), atr_percent)?,
             atr_reversion_percent: band_percent_step.output,
             band_reversion: band_step.output,
-            sharpe: sharpe_step.output,
             body_ratio: Some(body_ratio),
             is_atr_gap: Some(is_atr_gap),
             gap_candidate_qualifies: candidate.qualifies,
@@ -273,11 +259,8 @@ impl Kernel for CryptoIndicators {
             neutral_revrsi: neutral_revrsi_step.next_state,
             bullish_revrsi: bullish_revrsi_step.next_state,
             bearish_revrsi: bearish_revrsi_step.next_state,
-            rsi: rsi_step.next_state,
-            rsi_ma: rsi_ma_step.next_state,
             structure_power: structure_step.next_state,
             structure_power_sma: structure_sma_step.next_state,
-            sharpe: sharpe_step.next_state,
             body_ratio: body_step.next_state,
             band_reversion: band_step.next_state,
             band_reversion_percent: band_percent_step.next_state,
@@ -296,6 +279,7 @@ fn child_prior<'a, Parent, Child>(
         PriorState::Existing(state) => PriorState::Existing(select(state)),
     }
 }
+
 async fn collect_crypto_rows(klines: &[Kline]) -> Result<Vec<CryptoIndicatorRow>, MarketError> {
     let source =
         futures::stream::iter(klines.iter().cloned().enumerate().map(|(id, value)| {
@@ -353,6 +337,15 @@ fn crypto_output_frame(
         ));
     }
 
+    let trajectories = klines
+        .iter()
+        .enumerate()
+        .map(|(index, kline)| {
+            let bar_close_time = klines.get(index + 1).map_or(kline.time, |next| next.time);
+            iching_bar_trajectory(kline.time, bar_close_time).map_err(MarketError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     let numbers = |select: fn(&CryptoIndicatorRow) -> Option<f64>| {
         SourceColumnData::Number(rows.iter().map(select).collect())
     };
@@ -394,8 +387,96 @@ fn crypto_output_frame(
         ("bearish_revrsi".into(), numbers(|row| row.bearish_revrsi)),
         ("atr_upperband".into(), numbers(|row| row.atr_upperband)),
         ("atr_lowerband".into(), numbers(|row| row.atr_lowerband)),
-        ("rssi".into(), numbers(|row| row.rssi)),
-        ("rssi_ma".into(), numbers(|row| row.rssi_ma)),
+        (
+            "iching_original_energy".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_transformed_energy".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.transformed_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_nuclear_energy".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.nuclear_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_open".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_high".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_high))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_low".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_low))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_close".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_moving_line".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| trajectory.moving_line.map(f64::from))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_transformed_close".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.transformed_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_nuclear_close".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.nuclear_close))
+                    .collect(),
+            ),
+        ),
         ("structure_power".into(), numbers(|row| row.structure_power)),
         (
             "structure_power_sma".into(),
@@ -407,7 +488,6 @@ fn crypto_output_frame(
             numbers(|row| row.atr_reversion_percent),
         ),
         ("band_reversion".into(), numbers(|row| row.band_reversion)),
-        ("sharpe".into(), numbers(|row| row.sharpe)),
         ("body_ratio".into(), numbers(|row| row.body_ratio)),
         (
             "is_atr_gap".into(),
@@ -455,7 +535,12 @@ pub async fn compute_crypto_frame(
 ) -> Result<(Box<dyn ComputedFrame>, Vec<GapZoneRecord>), MarketError> {
     let decision_time_ms = klines.last().map(|kline| kline.time).unwrap_or(i64::MAX);
     let rows = collect_crypto_rows(&klines).await?;
-    let source = crypto_output_frame(rows, &klines)?;
+    if rows.len() != klines.len() {
+        return Err(MarketError::computation(
+            "indicator row count does not match market row count",
+        ));
+    }
+    let source = crypto_output_frame(rows.clone(), &klines)?;
     let (sl_percent, tol_percent) = ticker.risk_percentages();
     let query = RawQuery::source_controlled(build_crypto_sql(sl_percent, tol_percent));
 
@@ -464,6 +549,40 @@ pub async fn compute_crypto_frame(
         .map(|frame| Box::new(frame) as Box<dyn ComputedFrame>)?;
     let zones = recent_gap_zones(source, decision_time_ms, 64)?.zones;
     Ok((projected, zones))
+}
+
+/// Adapts one projected Cryptobot frame without dropping its chart columns or color fields.
+pub(crate) fn adapt_chartlib_dataset(
+    ticker: &str,
+    timeframe: &str,
+    display_symbol: &str,
+    frame: &dyn ComputedFrame,
+    zones: &[GapZoneRecord],
+) -> Result<InteractiveDataset, MarketError> {
+    Ok(InteractiveDataset {
+        key: DatasetKey::new(ticker, timeframe),
+        display_symbol: display_symbol.to_owned(),
+        records: frame.to_json_records()?,
+        gap_zones: zones
+            .iter()
+            .map(|zone| GapZone {
+                time_ms: zone.time_ms,
+                open: zone.open,
+                high: zone.high,
+                low: zone.low,
+                close: zone.close,
+                volume: zone.volume,
+                body_bottom: zone.body_bottom,
+                body_top: zone.body_top,
+                body_ratio: zone.body_ratio,
+                direction: match zone.direction {
+                    GapZoneDirection::Bullish => GapDirection::Bullish,
+                    GapZoneDirection::Bearish => GapDirection::Bearish,
+                    GapZoneDirection::Flat => GapDirection::Flat,
+                },
+            })
+            .collect(),
+    })
 }
 
 fn build_crypto_sql(sl_percent: f64, tol_percent: f64) -> String {
@@ -481,18 +600,15 @@ fn crypto_select_expressions(risk_adjustment: &str) -> Vec<String> {
         "volume_sma", "bias_reversion", "'rgba(178, 181, 190, 0.2)' AS bias_reversion_color", "ema200", "'rgba(156, 39, 176, 0.5)' AS ema200_color",
         "neutral_revrsi", "'rgba(178,181,190,0.2)' AS neutral_revrsi_color", "bullish_revrsi", "'rgba(33,150,243,0.2)' AS bullish_revrsi_color",
         "bearish_revrsi", "'rgba(255,152,0,0.2)' AS bearish_revrsi_color", "atr_upperband", "'rgba(76, 175, 80, 0.2)' AS atr_upperband_color",
-        "atr_lowerband", "'rgba(242, 54, 69, 0.2)' AS atr_lowerband_color", "rssi",
-        "CASE WHEN rssi > 59.0 THEN 'rgba(76, 175, 79, 1)' WHEN rssi < 41.0 THEN 'rgba(242, 54, 70, 1)' ELSE 'rgba(191, 54, 207, 0.7)' END AS rssi_color",
-        "rssi_ma", "3.0 * rssi - 2.0 * rssi_ma AS rssi_direction", "structure_power",
+        "atr_lowerband", "'rgba(242, 54, 69, 0.2)' AS atr_lowerband_color", "iching_original_energy",
+        "iching_transformed_energy", "iching_nuclear_energy", "structure_power",
+        "iching_open", "iching_high", "iching_low", "iching_close", "iching_moving_line",
+        "iching_transformed_close", "iching_nuclear_close",
         "CASE WHEN structure_power >= 0.0 THEN 'rgba(0, 137, 123, 1)' ELSE 'rgba(136, 14, 79, 1)' END AS structure_power_color",
         "structure_power_sma", "3.0 * structure_power - 2.0 * structure_power_sma AS structure_power_direction", "atr_percent", "atr_reversion_percent",
         "CASE WHEN atr_reversion_percent > 50.0 THEN 'rgba(76, 175, 80, 0.5)' WHEN atr_reversion_percent < -50.0 THEN 'rgba(242, 54, 69, 0.5)' ELSE 'rgba(41, 98, 255, 0.2)' END AS atr_reversion_percent_color",
         &format!("CASE WHEN atr - atr = 0 AND atr <> 0.0 THEN {risk_adjustment} * open / atr ELSE NULL END AS leverage"),
-        "CASE WHEN rssi > 54.0 AND atr_reversion_percent < -50.0 THEN 1 WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN -1 ELSE 0 END AS climax_signal",
-        "CASE WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN 'belowBar' ELSE 'aboveBar' END AS climax_signal_pos",
-        "CASE WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN 'rgba(33, 150, 243, 1)' ELSE 'rgba(233, 30, 99, 1)' END AS climax_signal_color",
-        "CASE WHEN rssi < 46.0 AND atr_reversion_percent > 50.0 THEN 'arrowUp' ELSE 'arrowDown' END AS climax_signal_shape",
-        "sharpe", "CASE WHEN sharpe > 0.0 THEN 'rgba(76, 175, 79, 0.5)' ELSE 'rgba(242, 54, 70, 0.5)' END AS sharpe_color", "is_atr_gap", "body_ratio",
+        "is_atr_gap", "body_ratio",
     ]
     .into_iter()
     .map(str::to_string)
@@ -540,14 +656,8 @@ mod tests {
             "AS volume_color",
             "AS bias_reversion_color",
             "AS ema200_color",
-            "AS rssi_direction",
             "AS structure_power_direction",
             "AS leverage",
-            "AS climax_signal",
-            "AS climax_signal_pos",
-            "AS climax_signal_color",
-            "AS climax_signal_shape",
-            "AS sharpe_color",
         ];
         let positions = ordered_aliases
             .iter()
@@ -557,6 +667,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        for present in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+        ] {
+            assert!(sql.contains(present), "{present} must appear in SQL");
+        }
+        for removed in [
+            "rssi",
+            "rssi_ma",
+            "rssi_direction",
+            "rssi_color",
+            "climax_signal",
+            "sharpe",
+            "sharpe_color",
+            "trust",
+        ] {
+            assert!(!sql.contains(removed), "{removed} must be absent from SQL");
+        }
     }
 
     #[tokio::test]
@@ -584,7 +713,8 @@ mod tests {
         assert_eq!(one.len(), 1);
         assert_rows_match(&direct_aggregate_rows(&candles[..1])[0], &one[0]);
         assert!(
-            (one[0].atr_upperband.unwrap() - one[0].atr.unwrap() * super::ATR_BAND_MULTIPLIER
+            (one[0].atr_upperband.unwrap()
+                - one[0].atr.unwrap() * super::ATR_BAND_MULTIPLIER
                 - candles[0].open)
                 .abs()
                 <= 1e-12
@@ -602,7 +732,8 @@ mod tests {
         for (position, (expected, actual)) in direct.iter().zip(&collected).enumerate() {
             assert_rows_match(expected, actual);
             assert!(
-                (actual.atr_upperband.unwrap() - actual.atr.unwrap() * super::ATR_BAND_MULTIPLIER
+                (actual.atr_upperband.unwrap()
+                    - actual.atr.unwrap() * super::ATR_BAND_MULTIPLIER
                     - supplied[position].open)
                     .abs()
                     <= 1e-12,
@@ -672,14 +803,21 @@ mod tests {
             ("bearish_revrsi", "number"),
             ("atr_upperband", "number"),
             ("atr_lowerband", "number"),
-            ("rssi", "number"),
-            ("rssi_ma", "number"),
+            ("iching_original_energy", "number"),
+            ("iching_transformed_energy", "number"),
+            ("iching_nuclear_energy", "number"),
+            ("iching_open", "number"),
+            ("iching_high", "number"),
+            ("iching_low", "number"),
+            ("iching_close", "number"),
+            ("iching_moving_line", "number"),
+            ("iching_transformed_close", "number"),
+            ("iching_nuclear_close", "number"),
             ("structure_power", "number"),
             ("structure_power_sma", "number"),
             ("atr_percent", "number"),
             ("atr_reversion_percent", "number"),
             ("band_reversion", "number"),
-            ("sharpe", "number"),
             ("body_ratio", "number"),
             ("is_atr_gap", "boolean"),
             ("gap_candidate_qualifies", "boolean"),
@@ -752,11 +890,17 @@ mod tests {
             "atr_upperband_color",
             "atr_lowerband",
             "atr_lowerband_color",
-            "rssi",
-            "rssi_color",
-            "rssi_ma",
-            "rssi_direction",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
             "structure_power",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_nuclear_close",
             "structure_power_color",
             "structure_power_sma",
             "structure_power_direction",
@@ -764,17 +908,40 @@ mod tests {
             "atr_reversion_percent",
             "atr_reversion_percent_color",
             "leverage",
+            "is_atr_gap",
+            "body_ratio",
+        ];
+        assert_eq!(frame.columns(), expected_schema);
+        assert_eq!(frame.len(), candles.len());
+        for present in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_nuclear_close",
+        ] {
+            assert!(frame.has_column(present), "{present} must be projected");
+        }
+        for removed in [
+            "rssi",
+            "rssi_ma",
+            "rssi_direction",
+            "rssi_color",
             "climax_signal",
             "climax_signal_pos",
             "climax_signal_color",
             "climax_signal_shape",
             "sharpe",
             "sharpe_color",
-            "is_atr_gap",
-            "body_ratio",
-        ];
-        assert_eq!(frame.columns(), expected_schema);
-        assert_eq!(frame.len(), candles.len());
+            "trust",
+        ] {
+            assert!(!frame.has_column(removed), "{removed} must be absent");
+        }
         for source_only in [
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
@@ -811,19 +978,24 @@ mod tests {
             "atr",
         );
         assert_option_f64_close(
-            frame.f64_at("rssi", mature).unwrap(),
-            direct[mature].rssi,
-            "rssi",
+            frame.f64_at("iching_original_energy", mature).unwrap(),
+            direct[mature].iching_original_energy,
+            "iching_original_energy",
+        );
+        assert_option_f64_close(
+            frame.f64_at("iching_transformed_energy", mature).unwrap(),
+            direct[mature].iching_transformed_energy,
+            "iching_transformed_energy",
+        );
+        assert_option_f64_close(
+            frame.f64_at("iching_nuclear_energy", mature).unwrap(),
+            direct[mature].iching_nuclear_energy,
+            "iching_nuclear_energy",
         );
         assert_option_f64_close(
             frame.f64_at("body_ratio", mature).unwrap(),
             direct[mature].body_ratio,
             "body_ratio",
-        );
-        assert_option_f64_close(
-            frame.f64_at("rssi_direction", mature).unwrap(),
-            Some(3.0 * direct[mature].rssi.unwrap() - 2.0 * direct[mature].rssi_ma.unwrap()),
-            "rssi_direction",
         );
         assert_option_f64_close(
             frame.f64_at("structure_power_direction", mature).unwrap(),
@@ -852,14 +1024,11 @@ mod tests {
     fn u4_1_reuses_u1_owned_exact_19_field_row_and_fixed_periods() {
         assert_eq!(super::VOLUME_EMA_PERIOD, 20);
         assert_eq!(super::EMA_PERIOD, 200);
-        assert_eq!(super::RSI_PERIOD, 14);
-        assert_eq!(super::RSI_SMOOTH_PERIOD, 9);
         assert_eq!(super::REVERSE_RSI_PERIOD, 14);
         assert_eq!(super::ATR_PERIOD, 42);
         assert_eq!(super::BIAS_PERIOD, 9);
         assert_eq!(super::STRUCTURE_PERIOD, 9);
         assert_eq!(super::STRUCTURE_SMA_PERIOD, 16);
-        assert_eq!(super::SHARPE_PERIOD, 200);
 
         fn number(_: Option<f64>) {}
         fn boolean(_: Option<bool>) {}
@@ -878,14 +1047,14 @@ mod tests {
         number(row.bearish_revrsi);
         number(row.atr_upperband);
         number(row.atr_lowerband);
-        number(row.rssi);
-        number(row.rssi_ma);
+        number(row.iching_original_energy);
+        number(row.iching_transformed_energy);
+        number(row.iching_nuclear_energy);
         number(row.structure_power);
         number(row.structure_power_sma);
         number(row.atr_percent);
         number(row.atr_reversion_percent);
         number(row.band_reversion);
-        number(row.sharpe);
         number(row.body_ratio);
         boolean(row.is_atr_gap);
         candidate_bool(row.gap_candidate_qualifies);
@@ -910,14 +1079,14 @@ mod tests {
                 bearish_revrsi: Some(7.0),
                 atr_upperband: Some(8.0),
                 atr_lowerband: Some(9.0),
-                rssi: Some(10.0),
-                rssi_ma: Some(11.0),
+                iching_original_energy: Some(10.0),
+                iching_transformed_energy: Some(11.0),
+                iching_nuclear_energy: Some(11.5),
                 structure_power: Some(12.0),
                 structure_power_sma: Some(13.0),
                 atr_percent: Some(14.0),
                 atr_reversion_percent: Some(15.0),
                 band_reversion: Some(16.0),
-                sharpe: Some(17.0),
                 body_ratio: Some(18.0),
                 is_atr_gap: Some(true),
                 gap_candidate_qualifies: true,
@@ -935,14 +1104,14 @@ mod tests {
                 bearish_revrsi: Some(27.0),
                 atr_upperband: Some(28.0),
                 atr_lowerband: Some(29.0),
-                rssi: Some(30.0),
-                rssi_ma: Some(31.0),
+                iching_original_energy: Some(30.0),
+                iching_transformed_energy: Some(31.0),
+                iching_nuclear_energy: Some(-31.5),
                 structure_power: Some(32.0),
                 structure_power_sma: Some(33.0),
                 atr_percent: Some(34.0),
                 atr_reversion_percent: Some(35.0),
                 band_reversion: Some(36.0),
-                sharpe: Some(37.0),
                 body_ratio: Some(38.0),
                 is_atr_gap: None,
                 gap_candidate_qualifies: false,
@@ -951,6 +1120,12 @@ mod tests {
                 gap_candidate_direction: None,
             },
         ];
+        let trajectories = candles
+            .iter()
+            .map(|candle| {
+                algotrap::ta::iching_bar_trajectory(candle.time, candle.time + 60_000).unwrap()
+            })
+            .collect::<Vec<_>>();
 
         let expected_columns = vec![
             (
@@ -975,13 +1150,19 @@ mod tests {
             ),
             (
                 "time".to_string(),
-                SourceColumnData::Number(vec![Some(1_700_000_000_000.0), Some(1_700_000_060_000.0)]),
+                SourceColumnData::Number(vec![
+                    Some(1_700_000_000_000.0),
+                    Some(1_700_000_060_000.0),
+                ]),
             ),
             (
                 "adj_close".to_string(),
                 SourceColumnData::Number(vec![Some(100.25), None]),
             ),
-            ("atr".to_string(), SourceColumnData::Number(vec![Some(1.0), None])),
+            (
+                "atr".to_string(),
+                SourceColumnData::Number(vec![Some(1.0), None]),
+            ),
             (
                 "volume_sma".to_string(),
                 SourceColumnData::Number(vec![Some(2.0), Some(22.0)]),
@@ -1015,12 +1196,94 @@ mod tests {
                 SourceColumnData::Number(vec![Some(9.0), Some(29.0)]),
             ),
             (
-                "rssi".to_string(),
-                SourceColumnData::Number(vec![Some(10.0), Some(30.0)]),
+                "iching_original_energy".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.energy_open))
+                        .collect(),
+                ),
             ),
             (
-                "rssi_ma".to_string(),
-                SourceColumnData::Number(vec![Some(11.0), Some(31.0)]),
+                "iching_transformed_energy".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.transformed_open))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_nuclear_energy".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.nuclear_open))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_open".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.energy_open))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_high".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.energy_high))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_low".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.energy_low))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_close".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.energy_close))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_moving_line".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| trajectory.moving_line.map(f64::from))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_transformed_close".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.transformed_close))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_nuclear_close".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.nuclear_close))
+                        .collect(),
+                ),
             ),
             (
                 "structure_power".to_string(),
@@ -1041,10 +1304,6 @@ mod tests {
             (
                 "band_reversion".to_string(),
                 SourceColumnData::Number(vec![Some(16.0), Some(36.0)]),
-            ),
-            (
-                "sharpe".to_string(),
-                SourceColumnData::Number(vec![Some(17.0), Some(37.0)]),
             ),
             (
                 "body_ratio".to_string(),
@@ -1090,8 +1349,12 @@ mod tests {
                 .column(&name)
                 .unwrap_or_else(|| panic!("missing {name}"));
             match expected {
-                SourceColumnData::Number(_) => assert!(matches!(actual, SourceColumnData::Number(_))),
-                SourceColumnData::Boolean(_) => assert!(matches!(actual, SourceColumnData::Boolean(_))),
+                SourceColumnData::Number(_) => {
+                    assert!(matches!(actual, SourceColumnData::Number(_)))
+                }
+                SourceColumnData::Boolean(_) => {
+                    assert!(matches!(actual, SourceColumnData::Boolean(_)))
+                }
                 SourceColumnData::Text(_) => assert!(matches!(actual, SourceColumnData::Text(_))),
             }
             assert_eq!(actual, &expected, "{name}");
@@ -1111,20 +1374,21 @@ mod tests {
                 bearish_revrsi,
                 atr_upperband,
                 atr_lowerband,
-                rssi,
-                rssi_ma,
+                iching_original_energy,
+                iching_transformed_energy,
+                iching_nuclear_energy,
                 structure_power,
                 structure_power_sma,
                 atr_percent,
                 atr_reversion_percent,
                 band_reversion,
-                sharpe,
                 body_ratio,
                 is_atr_gap,
                 gap_candidate_qualifies,
                 gap_candidate_body_bottom,
                 gap_candidate_body_top,
                 gap_candidate_direction,
+                ..
             } = row;
             let _ = (
                 atr,
@@ -1136,14 +1400,14 @@ mod tests {
                 bearish_revrsi,
                 atr_upperband,
                 atr_lowerband,
-                rssi,
-                rssi_ma,
+                iching_original_energy,
+                iching_transformed_energy,
+                iching_nuclear_energy,
                 structure_power,
                 structure_power_sma,
                 atr_percent,
                 atr_reversion_percent,
                 band_reversion,
-                sharpe,
                 body_ratio,
                 is_atr_gap,
                 gap_candidate_qualifies,
@@ -1163,11 +1427,8 @@ mod tests {
                 neutral_revrsi,
                 bullish_revrsi,
                 bearish_revrsi,
-                rsi,
-                rsi_ma,
                 structure_power,
                 structure_power_sma,
-                sharpe,
                 body_ratio,
                 band_reversion,
                 band_reversion_percent,
@@ -1182,11 +1443,8 @@ mod tests {
                 neutral_revrsi,
                 bullish_revrsi,
                 bearish_revrsi,
-                rsi,
-                rsi_ma,
                 structure_power,
                 structure_power_sma,
-                sharpe,
                 body_ratio,
                 band_reversion,
                 band_reversion_percent,
@@ -1204,7 +1462,9 @@ mod tests {
         for kline in klines().iter().take(3) {
             let row = processor.process(kline).unwrap();
             assert!(row.atr.is_some());
-            assert!(row.rssi.is_some());
+            assert!(row.iching_original_energy.is_some());
+            assert!(row.iching_transformed_energy.is_some());
+            assert!(row.iching_nuclear_energy.is_some());
             assert!(row.structure_power.is_some());
         }
     }
@@ -1215,7 +1475,9 @@ mod tests {
         let row = processor.process(&klines()[0]).unwrap();
 
         assert!(row.atr.is_some());
-        assert!(row.rssi.is_some());
+        assert!(row.iching_original_energy.is_some());
+        assert!(row.iching_transformed_energy.is_some());
+        assert!(row.iching_nuclear_energy.is_some());
         assert!(row.structure_power.is_some());
         assert!(row.bias_reversion.is_some());
     }
@@ -1382,8 +1644,21 @@ mod tests {
             actual.atr_lowerband,
             "atr_lowerband",
         );
-        assert_option_f64(expected.rssi, actual.rssi, "rssi");
-        assert_option_f64(expected.rssi_ma, actual.rssi_ma, "rssi_ma");
+        assert_option_f64(
+            expected.iching_original_energy,
+            actual.iching_original_energy,
+            "iching_original_energy",
+        );
+        assert_option_f64(
+            expected.iching_transformed_energy,
+            actual.iching_transformed_energy,
+            "iching_transformed_energy",
+        );
+        assert_option_f64(
+            expected.iching_nuclear_energy,
+            actual.iching_nuclear_energy,
+            "iching_nuclear_energy",
+        );
         assert_option_f64(
             expected.structure_power,
             actual.structure_power,
@@ -1405,7 +1680,6 @@ mod tests {
             actual.band_reversion,
             "band_reversion",
         );
-        assert_option_f64(expected.sharpe, actual.sharpe, "sharpe");
         assert_option_f64(expected.body_ratio, actual.body_ratio, "body_ratio");
         assert_eq!(expected.is_atr_gap, actual.is_atr_gap);
         assert_eq!(
@@ -1516,12 +1790,12 @@ mod tests {
         let mut saw_qualifying = false;
         let mut saw_non_qualifying = false;
         for (position, (kline, row)) in supplied.iter().zip(&collected).enumerate() {
-            let body_ratio = row.body_ratio.unwrap_or_else(|| {
-                panic!("row {position} must preserve upstream body_ratio")
-            });
-            let is_atr_gap = row.is_atr_gap.unwrap_or_else(|| {
-                panic!("row {position} must preserve upstream is_atr_gap")
-            });
+            let body_ratio = row
+                .body_ratio
+                .unwrap_or_else(|| panic!("row {position} must preserve upstream body_ratio"));
+            let is_atr_gap = row
+                .is_atr_gap
+                .unwrap_or_else(|| panic!("row {position} must preserve upstream is_atr_gap"));
             let expected = gap_candidate_facts(GapCandidateInput {
                 open: kline.open,
                 close: kline.close,
@@ -1639,9 +1913,9 @@ mod tests {
             (oscillation - 2.0).abs() <= f64::EPSILON,
             "ATR_GAP_MULTIPLIER 1.0 must give oscillation 2.0 for atr 2.0"
         );
-        let mut gap = algotrap::ta::prelude::Processor::new(
-            algotrap::ta::prelude::is_atr_gap(super::ATR_GAP_MULTIPLIER),
-        );
+        let mut gap = algotrap::ta::prelude::Processor::new(algotrap::ta::prelude::is_atr_gap(
+            super::ATR_GAP_MULTIPLIER,
+        ));
         assert_eq!(
             gap.process(&algotrap::ta::prelude::BandPoint {
                 open,
@@ -1718,8 +1992,7 @@ mod tests {
         let run_with_threshold = |threshold: f64| {
             let mut indicators = CryptoIndicators::new();
             indicators.body_ratio_threshold = threshold;
-            let mut processor =
-                algotrap::ta::prelude::Processor::new(indicators);
+            let mut processor = algotrap::ta::prelude::Processor::new(indicators);
             let mut last = None;
             for candle in &klines[..=position] {
                 last = Some(processor.process(candle).unwrap());
@@ -1755,8 +2028,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            default_rows[position].gap_candidate_qualifies,
-            expected_default.qualifies,
+            default_rows[position].gap_candidate_qualifies, expected_default.qualifies,
             "default transition must match pure facts with the app default at position {position}"
         );
         assert_eq!(
@@ -1869,14 +2141,14 @@ mod tests {
                 bearish_revrsi: None,
                 atr_upperband: None,
                 atr_lowerband: None,
-                rssi: None,
-                rssi_ma: None,
+                iching_original_energy: None,
+                iching_transformed_energy: None,
+                iching_nuclear_energy: None,
                 structure_power: None,
                 structure_power_sma: None,
                 atr_percent: None,
                 atr_reversion_percent: None,
                 band_reversion: None,
-                sharpe: None,
                 body_ratio: Some(0.5 + index as f64),
                 is_atr_gap: Some(index != 3),
                 gap_candidate_qualifies: candidate.qualifies,
@@ -1904,14 +2176,21 @@ mod tests {
             "bearish_revrsi",
             "atr_upperband",
             "atr_lowerband",
-            "rssi",
-            "rssi_ma",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_nuclear_close",
             "structure_power",
             "structure_power_sma",
             "atr_percent",
             "atr_reversion_percent",
             "band_reversion",
-            "sharpe",
             "body_ratio",
             "is_atr_gap",
             "gap_candidate_qualifies",
@@ -1971,19 +2250,13 @@ mod tests {
         }
         match frame.column("gap_candidate_body_bottom") {
             Some(SourceColumnData::Number(values)) => {
-                assert_eq!(
-                    *values,
-                    vec![Some(100.0), Some(100.0), Some(100.0), None]
-                );
+                assert_eq!(*values, vec![Some(100.0), Some(100.0), Some(100.0), None]);
             }
             other => panic!("gap_candidate_body_bottom must be Number, got {other:?}"),
         }
         match frame.column("gap_candidate_body_top") {
             Some(SourceColumnData::Number(values)) => {
-                assert_eq!(
-                    *values,
-                    vec![Some(105.0), Some(105.0), Some(100.0), None]
-                );
+                assert_eq!(*values, vec![Some(105.0), Some(105.0), Some(100.0), None]);
             }
             other => panic!("gap_candidate_body_top must be Number, got {other:?}"),
         }
@@ -2013,14 +2286,14 @@ mod tests {
             bearish_revrsi: None,
             atr_upperband: None,
             atr_lowerband: None,
-            rssi: None,
-            rssi_ma: None,
+            iching_original_energy: None,
+            iching_transformed_energy: None,
+            iching_nuclear_energy: None,
             structure_power: None,
             structure_power_sma: None,
             atr_percent: None,
             atr_reversion_percent: None,
             band_reversion: None,
-            sharpe: None,
             body_ratio: Some(0.8),
             is_atr_gap: Some(true),
             gap_candidate_qualifies: bullish.qualifies,
@@ -2032,9 +2305,508 @@ mod tests {
         assert_eq!(one_frame.len(), 1);
         assert_eq!(one_frame.column_names(), expected_names);
         assert_eq!(
-            one_frame.string_at("gap_candidate_direction", 0).unwrap().as_deref(),
+            one_frame
+                .string_at("gap_candidate_direction", 0)
+                .unwrap()
+                .as_deref(),
             Some("bullish")
         );
+    }
+
+    #[test]
+    fn iching_replaces_rssi_sharpe_in_source_and_projection() {
+        let frame = crypto_output_frame(vec![], &[]).unwrap();
+        for present in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_nuclear_close",
+        ] {
+            assert!(
+                frame.column_names().contains(&present),
+                "{present} must be present in source frame"
+            );
+        }
+        for removed in [
+            "rssi",
+            "rssi_ma",
+            "rssi_direction",
+            "rssi_color",
+            "sharpe",
+            "sharpe_color",
+            "trust",
+        ] {
+            assert!(
+                !frame.column_names().contains(&removed),
+                "{removed} must be absent from source frame"
+            );
+            assert!(
+                frame.column(removed).is_none(),
+                "{removed} column must be absent"
+            );
+        }
+        let sql = build_crypto_sql(0.02, 0.01);
+        for present in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+        ] {
+            assert!(sql.contains(present), "{present} must appear in SQL");
+        }
+        for removed in [
+            "rssi",
+            "rssi_ma",
+            "rssi_direction",
+            "rssi_color",
+            "climax_signal",
+            "sharpe",
+            "sharpe_color",
+            "trust",
+        ] {
+            assert!(!sql.contains(removed), "{removed} must be absent from SQL");
+        }
+    }
+
+    #[tokio::test]
+    async fn iching_values_equal_direct_allow_facade_within_energy_bounds() {
+        let candles = klines();
+        let collected = collect_crypto_rows(&candles).await.unwrap();
+        assert_eq!(collected.len(), candles.len());
+        for (position, (kline, row)) in candles.iter().zip(&collected).enumerate() {
+            let datetime = chrono::DateTime::from_timestamp_millis(kline.time)
+                .unwrap_or_else(|| panic!("fixture time at {position} must convert"));
+            let expected = algotrap::ta::plum_blossom_signal_with_policy(
+                datetime,
+                algotrap::ta::LeapMonthPolicy::Allow,
+            )
+            .unwrap_or_else(|_| panic!("fixture time at {position} must succeed under Allow"));
+            let transformed = expected
+                .transformed
+                .unwrap_or_else(|| panic!("Plum Blossom must supply transformed at {position}"));
+            for (label, value) in [
+                ("iching_original_energy", row.iching_original_energy),
+                ("iching_transformed_energy", row.iching_transformed_energy),
+                ("iching_nuclear_energy", row.iching_nuclear_energy),
+            ] {
+                let value = value.unwrap_or_else(|| panic!("row {position} {label} must be Some"));
+                assert!(
+                    value.is_finite(),
+                    "row {position} {label} must be finite, got {value}"
+                );
+                assert!(
+                    (-31.5..=31.5).contains(&value),
+                    "row {position} {label} must be within [-31.5, 31.5], got {value}"
+                );
+            }
+            assert!(
+                (row.iching_original_energy.unwrap() - expected.original.energy).abs() <= 1e-12,
+                "row {position} original mismatch"
+            );
+            assert!(
+                (row.iching_transformed_energy.unwrap() - transformed.energy).abs() <= 1e-12,
+                "row {position} transformed mismatch"
+            );
+            assert!(
+                (row.iching_nuclear_energy.unwrap() - expected.nuclear.energy).abs() <= 1e-12,
+                "row {position} nuclear mismatch"
+            );
+        }
+        let (frame, _zones) = compute_crypto_frame(candles.clone(), ticker())
+            .await
+            .unwrap();
+        assert_eq!(frame.len(), candles.len());
+        for present in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_nuclear_energy",
+        ] {
+            assert!(frame.has_column(present), "{present} must be projected");
+        }
+        for removed in [
+            "rssi",
+            "rssi_ma",
+            "rssi_direction",
+            "rssi_color",
+            "climax_signal",
+            "climax_signal_pos",
+            "climax_signal_color",
+            "climax_signal_shape",
+            "sharpe",
+            "sharpe_color",
+            "trust",
+        ] {
+            assert!(!frame.has_column(removed), "{removed} must be absent");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_timestamp_fails_presentation_transformation() {
+        assert!(
+            chrono::DateTime::from_timestamp_millis(i64::MAX).is_none(),
+            "i64::MAX must be an out-of-range timestamp"
+        );
+        let mut klines = klines();
+        klines.truncate(2);
+        klines[1].time = i64::MAX;
+        let mut processor = algotrap::ta::prelude::Processor::new(CryptoIndicators::new());
+        processor.process(&klines[0]).unwrap();
+        assert!(
+            processor.process(&klines[1]).is_err(),
+            "out-of-range timestamp must fail transformation"
+        );
+        assert!(
+            collect_crypto_rows(&klines).await.is_err(),
+            "collection must fail on invalid timestamp rather than skip or null"
+        );
+        assert!(
+            compute_crypto_frame(klines, ticker()).await.is_err(),
+            "compute must fail without a frame on invalid timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn facade_failure_propagates_without_serialized_substitution() {
+        use chrono::{TimeZone, Utc};
+        let mut facade_failure: Option<(chrono::DateTime<Utc>, algotrap::ta::TaError)> = None;
+        for year in [0, 10_000, 20_000] {
+            let Some(datetime) = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single() else {
+                continue;
+            };
+            if chrono::DateTime::from_timestamp_millis(datetime.timestamp_millis()).is_none() {
+                continue;
+            }
+            if let Err(error) = algotrap::ta::plum_blossom_signal_with_policy(
+                datetime,
+                algotrap::ta::LeapMonthPolicy::Allow,
+            ) {
+                facade_failure = Some((datetime, error));
+                break;
+            }
+        }
+        let (datetime, expected) =
+            facade_failure.expect("a valid-chrono but facade-failing date must exist");
+        let failing_kline = Kline {
+            open: 100.0,
+            high: 102.0,
+            low: 99.0,
+            close: 100.5,
+            volume: 1_000.0,
+            time: datetime.timestamp_millis(),
+            adjclose: None,
+        };
+        let mut processor = algotrap::ta::prelude::Processor::new(CryptoIndicators::new());
+        let error = processor
+            .process(&failing_kline)
+            .expect_err("facade failure must propagate, not serialize");
+        assert_eq!(error.kind, expected.kind);
+        assert_eq!(error.message, expected.message);
+        let collection_error = collect_crypto_rows(std::slice::from_ref(&failing_kline))
+            .await
+            .expect_err("collection must propagate facade failure");
+        assert_eq!(
+            collection_error.message, expected.message,
+            "collection must preserve facade message rather than substitute"
+        );
+        assert!(
+            compute_crypto_frame(vec![failing_kline], ticker())
+                .await
+                .is_err(),
+            "compute must fail without a frame on facade failure"
+        );
+    }
+
+    #[test]
+    fn atr_reversion_is_bias_reversion_band_distance_normalized_by_atr_band() {
+        assert_eq!(super::ATR_PERIOD, 42);
+        assert!(
+            (super::ATR_BAND_MULTIPLIER - 1.618).abs() <= f64::EPSILON,
+            "ATR band multiplier must remain 1.618"
+        );
+        let mut candles = Vec::with_capacity(82);
+        let mut time = 1_700_000_000_000_i64;
+        for _ in 0..60 {
+            candles.push(Kline {
+                open: 100.0,
+                high: 100.5,
+                low: 99.5,
+                close: 100.1,
+                volume: 1_000.0,
+                time,
+                adjclose: None,
+            });
+            time += 60_000;
+        }
+        // Upward open jump: close stays near open (ATR gap false) while the
+        // smoothed bias lags far below the lower band (large negative).
+        candles.push(Kline {
+            open: 300.0,
+            high: 301.0,
+            low: 299.0,
+            close: 300.1,
+            volume: 1_000.0,
+            time,
+            adjclose: None,
+        });
+        time += 60_000;
+        for _ in 0..20 {
+            candles.push(Kline {
+                open: 300.0,
+                high: 300.5,
+                low: 299.5,
+                close: 300.1,
+                volume: 1_000.0,
+                time,
+                adjclose: None,
+            });
+            time += 60_000;
+        }
+        // Downward open jump: close stays near open (ATR gap false) while the
+        // smoothed bias lags far above the upper band (large positive).
+        candles.push(Kline {
+            open: 100.0,
+            high: 100.5,
+            low: 99.5,
+            close: 100.1,
+            volume: 1_000.0,
+            time,
+            adjclose: None,
+        });
+
+        let rows = direct_aggregate_rows(&candles);
+        assert_eq!(rows.len(), candles.len());
+
+        // Zero-oscillation branch of the percent kernel (ATR == 0) must be 0.
+        {
+            use algotrap::ta::prelude::{BandPoint, Kernel, PriorState};
+            let zero_point = BandPoint {
+                open: 100.0,
+                atr: 0.0,
+                signal: 100.0,
+            };
+            let reversion = algotrap::ta::prelude::band_reversion(super::ATR_BAND_MULTIPLIER)
+                .transition(PriorState::Initial, &zero_point)
+                .unwrap()
+                .output
+                .unwrap();
+            assert_eq!(reversion, 0.0, "zero-width band must revert 0");
+            let percent = algotrap::ta::prelude::band_reversion_percent(super::ATR_BAND_MULTIPLIER)
+                .transition(PriorState::Initial, &zero_point)
+                .unwrap()
+                .output
+                .unwrap();
+            assert_eq!(percent, 0.0, "zero oscillation percent must be 0");
+        }
+
+        let mut saw_in_band = false;
+        let mut saw_above = false;
+        let mut saw_below = false;
+        let mut saw_bias_not_close = false;
+        let mut saw_gap_diverges_from_reversion = false;
+
+        for (position, (kline, row)) in candles.iter().zip(&rows).enumerate() {
+            let atr = row
+                .atr
+                .unwrap_or_else(|| panic!("row {position} ATR must be available"));
+            assert!(
+                atr.is_finite() && atr != 0.0,
+                "row {position} ATR must be nonzero finite, got {atr}"
+            );
+            let bias = row
+                .bias_reversion
+                .unwrap_or_else(|| panic!("row {position} bias_reversion must be available"));
+            assert!(
+                bias.is_finite(),
+                "row {position} bias must be finite, got {bias}"
+            );
+            let band = row
+                .band_reversion
+                .unwrap_or_else(|| panic!("row {position} band_reversion must be available"));
+            let percent = row.atr_reversion_percent.unwrap_or_else(|| {
+                panic!("row {position} atr_reversion_percent must be available")
+            });
+            assert!(
+                band.is_finite(),
+                "row {position} band must be finite, got {band}"
+            );
+            assert!(
+                percent.is_finite(),
+                "row {position} percent must be finite, got {percent}"
+            );
+
+            // Locked metric: signal is bias_reversion, not close.
+            let oscillation = atr * super::ATR_BAND_MULTIPLIER;
+            assert!(
+                oscillation.is_finite() && oscillation != 0.0,
+                "row {position} oscillation must be nonzero finite, got {oscillation}"
+            );
+            let upper = kline.open + oscillation;
+            let lower = kline.open - oscillation;
+            let expected_band = if lower <= bias && bias <= upper {
+                0.0
+            } else if bias > upper {
+                bias - upper
+            } else {
+                bias - lower
+            };
+            let expected_percent = if oscillation == 0.0 {
+                0.0
+            } else {
+                100.0 * expected_band / oscillation
+            };
+            assert!(
+                (band - expected_band).abs() <= 1e-12,
+                "row {position} band {band} must equal bias-based distance {expected_band} (open {}, atr {atr}, bias {bias})",
+                kline.open,
+            );
+            assert!(
+                (percent - expected_percent).abs() <= 1e-12,
+                "row {position} percent {percent} must equal 100*band/osc {expected_percent}"
+            );
+
+            // Field values must equal existing TA kernel outputs with same BandPoint.
+            {
+                use algotrap::ta::prelude::{BandPoint, Kernel, PriorState};
+                let point = BandPoint {
+                    open: kline.open,
+                    atr,
+                    signal: bias,
+                };
+                let kernel_band = algotrap::ta::prelude::band_reversion(super::ATR_BAND_MULTIPLIER)
+                    .transition(PriorState::Initial, &point)
+                    .unwrap()
+                    .output
+                    .unwrap();
+                let kernel_percent =
+                    algotrap::ta::prelude::band_reversion_percent(super::ATR_BAND_MULTIPLIER)
+                        .transition(PriorState::Initial, &point)
+                        .unwrap()
+                        .output
+                        .unwrap();
+                assert!(
+                    (band - kernel_band).abs() <= 1e-12,
+                    "row {position} band {band} must equal TA kernel {kernel_band}"
+                );
+                assert!(
+                    (percent - kernel_percent).abs() <= 1e-12,
+                    "row {position} percent {percent} must equal TA kernel {kernel_percent}"
+                );
+            }
+
+            // ATR gap must still use close against open±ATR (not bias), and must
+            // not conflate with ATR reversion.
+            let expected_gap = kline.close > kline.open + atr * super::ATR_GAP_MULTIPLIER
+                || kline.close < kline.open - atr * super::ATR_GAP_MULTIPLIER;
+            assert_eq!(
+                row.is_atr_gap,
+                Some(expected_gap),
+                "row {position} is_atr_gap must use close against open±ATR"
+            );
+
+            if expected_band == 0.0 {
+                assert_eq!(band, 0.0, "row {position} in-band must be numeric 0");
+                assert_eq!(
+                    percent, 0.0,
+                    "row {position} in-band percent must be numeric 0"
+                );
+                saw_in_band = true;
+            } else if expected_band > 0.0 {
+                assert!(
+                    band > 0.0 && percent > 0.0,
+                    "row {position} above upper must be positive"
+                );
+                assert!(
+                    (band - (bias - upper)).abs() <= 1e-12,
+                    "row {position} above must equal signal-upper"
+                );
+                saw_above = true;
+            } else {
+                assert!(
+                    band < 0.0 && percent < 0.0,
+                    "row {position} below lower must be negative"
+                );
+                assert!(
+                    (band - (bias - lower)).abs() <= 1e-12,
+                    "row {position} below must equal signal-lower"
+                );
+                saw_below = true;
+            }
+
+            // Prove signal is bias, not close: close-based continuous metric
+            // must visibly differ on lag rows, while bias-based matches.
+            let close_based = kline.close - kline.open;
+            if (close_based - band).abs() > 1.0 {
+                saw_bias_not_close = true;
+            }
+            if expected_gap != (band != 0.0) {
+                saw_gap_diverges_from_reversion = true;
+            }
+        }
+
+        assert!(
+            saw_in_band,
+            "fixture must include at least one in-band (0) row"
+        );
+        assert!(
+            saw_above,
+            "fixture must include at least one above-upper (positive) row"
+        );
+        assert!(
+            saw_below,
+            "fixture must include at least one below-lower (negative) row"
+        );
+        assert!(
+            saw_bias_not_close,
+            "fixture must prove signal is bias_reversion, not close (close-open differs from band)"
+        );
+        assert!(
+            saw_gap_diverges_from_reversion,
+            "ATR gap (close-based) must diverge from ATR reversion (bias-based) on at least one row"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_and_projected_schemas_omit_rssi_and_trust() {
+        use algotrap::query::gap_zones::recent_gap_zones;
+
+        let candles = klines();
+        let rows = collect_crypto_rows(&candles).await.unwrap();
+        let source = crypto_output_frame(rows, &candles).unwrap();
+        for removed in ["rssi", "rssi_ma", "rssi_direction", "rssi_color", "trust"] {
+            assert!(
+                !source.column_names().contains(&removed),
+                "{removed} must be absent from source frame"
+            );
+            assert!(
+                source.column(removed).is_none(),
+                "{removed} column must be absent from source"
+            );
+        }
+        let (projected, zones) = compute_crypto_frame(candles.clone(), ticker())
+            .await
+            .unwrap();
+        for removed in ["rssi", "rssi_ma", "rssi_direction", "rssi_color", "trust"] {
+            assert!(
+                !projected.has_column(removed),
+                "{removed} must be absent from projected frame"
+            );
+        }
+        let expected_zones = recent_gap_zones(source, candles.last().unwrap().time, 64)
+            .unwrap()
+            .zones;
+        assert_eq!(
+            zones, expected_zones,
+            "gap zones must remain raw and ordered"
+        );
+        let sql = build_crypto_sql(0.02, 0.01);
+        for removed in ["rssi", "rssi_ma", "trust"] {
+            assert!(!sql.contains(removed), "{removed} must be absent from SQL");
+        }
     }
 
     fn klines() -> Vec<Kline> {
