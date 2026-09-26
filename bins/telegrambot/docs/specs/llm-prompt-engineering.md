@@ -33,8 +33,8 @@ analysis mode selection, output schema contract, and chat history compression.
 
 - **Given** the scan loop calls `run_agent` with `AnalysisMode::AlertScan`
 - **When** the system loads prompt files
-- **Then** `system_adaptive.txt` is loaded as the system prompt
-- **And** `user_adaptive.txt` is loaded as the user message
+- **Then** `system_alert.txt` is loaded as the system prompt
+- **And** `user_alert.txt` is loaded as the user message
 - **And** `tools.json` is loaded (shared across all modes, includes `read_kb`/`write_kb`)
 - **And** the full analysis mode (`FullAnalysis`) continues to use `system.txt` / `user.txt`
 
@@ -42,7 +42,7 @@ analysis mode selection, output schema contract, and chat history compression.
 
 - **Given** BTC-USDT memory exists with 3 predictions (1 scored, 2 unscored)
 - **And** current weights are `{ "rssi": 0.30, "structure_power": 0.25, ... }`
-- **When** the system renders `system_adaptive.txt`
+- **When** the system renders `system_alert.txt`
 - **Then** `{{symbol}}` → `BTC-USDT`
 - **And** `{{time}}` → current UTC timestamp
 - **And** `{{tfs}}` → comma-separated canonical timeframe list (e.g., `15m, 1h, 4h`)
@@ -58,7 +58,7 @@ analysis mode selection, output schema contract, and chat history compression.
 ### Scenario: Template variable rendering — cold start (no memory)
 
 - **Given** BTC-USDT has no memory file (first run)
-- **When** the system renders `system_adaptive.txt`
+- **When** the system renders `system_alert.txt`
 - **Then** `{{memory_context}}` → `No previous predictions. This is a cold start.`
 - **And** `{{weights_context}}` → `No previous weights. Use equal attention across all indicators.`
 - **And** `{{outcome_summary}}` → `No past predictions to evaluate yet.`
@@ -149,7 +149,7 @@ analysis mode selection, output schema contract, and chat history compression.
 
 ### Scenario: Prompt files are externalized (ConfigMap compatible)
 
-- **Given** the prompt directory contains `system_adaptive.txt` and `user_adaptive.txt`
+- **Given** the prompt directory contains `system_alert.txt` and `user_alert.txt`
 - **When** the operator modifies prompt wording and applies via `kubectl apply`
 - **Then** the next scan cycle uses the updated prompts
 - **And** no recompilation or Docker rebuild is required
@@ -193,7 +193,7 @@ analysis mode selection, output schema contract, and chat history compression.
 
 | # | Vector | Challenge | Response | Verdict |
 |---|--------|-----------|----------|---------|
-| 1 | Assumptions | `AlertScan` → `system_adaptive.txt` is a breaking change from `AlertScan` → `system_alert.txt`. What about the old prompt? | Old prompt stays in ConfigMap for rollback. This is a deliberate upgrade, not an accidental break. | author-won |
+| 1 | Assumptions | `AlertScan` → `system_alert.txt` is a breaking change from `AlertScan` → `system_alert.txt`. What about the old prompt? | Old prompt stays in ConfigMap for rollback. This is a deliberate upgrade, not an accidental break. | author-won |
 | 2 | Edge cases | Chat history compression says "compressed into a single summary message" — who writes the summary? The LLM can't summarize its own context. | A separate LLM call with fresh context summarizes the old messages. This preserves semantic meaning (indicator trends, cross-TF signals) that code-based truncation would lose. | author-won (fixed) |
 | 3 | Evidence | "≤ 400 tokens (~1600 characters)" — is this mapping accurate? | Approximate guideline, not a hard assert. Code truncates by character limit. Token count is model-dependent. | author-won |
 | 4 | Alternatives | Outcome summary "if accuracy is low, be more conservative" could create a death spiral (low accuracy → lower confidence → fewer alerts → less data → stays low). | Fixed: reworded to "High accuracy means reliable signals. Low accuracy suggests re-weighting indicators — do not simply suppress confidence." | author-won (fixed) |

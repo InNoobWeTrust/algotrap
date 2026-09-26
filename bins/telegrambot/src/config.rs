@@ -67,7 +67,7 @@ pub struct EnvConf {
     /// Browserless service URL.
     pub browserless_url: String,
 
-    // Prompt config directory (system.txt, user.txt, system_adaptive.txt, user_adaptive.txt)
+    // Prompt config directory (system.txt, user.txt, system_alert.txt, user_alert.txt)
     #[serde(default = "default_prompts_dir")]
     /// Directory containing prompt templates.
     pub prompts_dir: String,

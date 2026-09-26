@@ -56,7 +56,7 @@ pub struct TradePlanOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradePlan {
     /// Human-readable option label (for example, "A").
-    pub label: String,     // "A", "B", "C"
+    pub label: String, // "A", "B", "C"
     /// Planned direction: "LONG", "SHORT", or "WAIT".
     pub direction: String, // "LONG" | "SHORT" | "WAIT"
     /// Entry price, if specified.
@@ -781,8 +781,10 @@ impl IndicatorConfig {
                 Some("gap_zones") => {
                     gap_zone_atr_fallback = params.period.clone().or(gap_zone_atr_fallback);
                     if let Some(spec) = params.smooth.clone() {
-                        config.gap_zones.max_zones.value =
-                            spec.value.clamp(config.gap_zones.max_zones.min, config.gap_zones.max_zones.max);
+                        config.gap_zones.max_zones.value = spec.value.clamp(
+                            config.gap_zones.max_zones.min,
+                            config.gap_zones.max_zones.max,
+                        );
                     }
                     config.migrate_legacy_state(LEGACY_GAP_ZONE_OUTPUTS, &params);
                 }

@@ -11,7 +11,7 @@ use duckdb::{Connection, Row};
 use serde_json::{Map, Number, Value};
 
 use crate::engine::error::MarketError;
-use crate::engine::traits::ComputedFrame;
+use crate::engine::traits::{ColumnDType, ComputedFrame};
 
 /// Nullable column data exchanged across engine frame boundaries.
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +112,20 @@ impl ComputedFrame for SourceFrame {
         self.columns.iter().map(|(name, _)| name.clone()).collect()
     }
 
+    fn column_dtypes(&self) -> Vec<(String, ColumnDType)> {
+        self.columns
+            .iter()
+            .map(|(name, column)| {
+                let dtype = match column {
+                    SourceColumnData::Number(_) => ColumnDType::Number,
+                    SourceColumnData::Boolean(_) => ColumnDType::Boolean,
+                    SourceColumnData::Text(_) => ColumnDType::Text,
+                };
+                (name.clone(), dtype)
+            })
+            .collect()
+    }
+
     fn slice_last(&self, count: usize) -> Result<Box<dyn ComputedFrame>, MarketError> {
         let start = self.len.saturating_sub(count);
         let columns = self
@@ -119,9 +133,15 @@ impl ComputedFrame for SourceFrame {
             .iter()
             .map(|(name, column)| {
                 let values = match column {
-                    SourceColumnData::Number(values) => SourceColumnData::Number(values[start..].to_vec()),
-                    SourceColumnData::Boolean(values) => SourceColumnData::Boolean(values[start..].to_vec()),
-                    SourceColumnData::Text(values) => SourceColumnData::Text(values[start..].to_vec()),
+                    SourceColumnData::Number(values) => {
+                        SourceColumnData::Number(values[start..].to_vec())
+                    }
+                    SourceColumnData::Boolean(values) => {
+                        SourceColumnData::Boolean(values[start..].to_vec())
+                    }
+                    SourceColumnData::Text(values) => {
+                        SourceColumnData::Text(values[start..].to_vec())
+                    }
                 };
                 (name.clone(), values)
             })
@@ -168,7 +188,9 @@ impl ComputedFrame for SourceFrame {
                         }
                         None => Value::Null,
                     },
-                    SourceColumnData::Boolean(values) => values[row].map_or(Value::Null, Value::Bool),
+                    SourceColumnData::Boolean(values) => {
+                        values[row].map_or(Value::Null, Value::Bool)
+                    }
                     SourceColumnData::Text(values) => {
                         values[row].clone().map_or(Value::Null, Value::String)
                     }
@@ -343,7 +365,10 @@ impl QueryResultFrame {
         Self::from_parts(columns, values)
     }
 
-    fn from_parts(columns: Vec<String>, values: Vec<QueryResultColumn>) -> Result<Self, MarketError> {
+    fn from_parts(
+        columns: Vec<String>,
+        values: Vec<QueryResultColumn>,
+    ) -> Result<Self, MarketError> {
         if columns.len() != values.len() {
             return Err(MarketError::computation(format!(
                 "result has {} column names but {} decoded columns",
@@ -387,6 +412,24 @@ impl ComputedFrame for QueryResultFrame {
 
     fn columns(&self) -> Vec<String> {
         self.columns.clone()
+    }
+
+    fn column_dtypes(&self) -> Vec<(String, ColumnDType)> {
+        self.columns
+            .iter()
+            .zip(&self.values)
+            .map(|(name, column)| {
+                let dtype = match column {
+                    QueryResultColumn::Float64(_)
+                    | QueryResultColumn::Int64(_)
+                    | QueryResultColumn::UInt64(_) => ColumnDType::Number,
+                    QueryResultColumn::Boolean(_) => ColumnDType::Boolean,
+                    QueryResultColumn::Utf8(_) => ColumnDType::Text,
+                    QueryResultColumn::Null(_) => ColumnDType::Null,
+                };
+                (name.clone(), dtype)
+            })
+            .collect()
     }
 
     fn slice_last(&self, count: usize) -> Result<Box<dyn ComputedFrame>, MarketError> {
@@ -438,8 +481,66 @@ mod tests {
     use duckdb::Connection;
     use serde_json::json;
 
-    use super::{SourceColumnData, SourceFrame, QueryResultFrame};
+    use super::{QueryResultFrame, SourceColumnData, SourceFrame};
+    use crate::engine::traits::ColumnDType;
     use crate::engine::{ComputedFrame, ErrorKind, MarketError};
+
+    #[test]
+    fn lists_mixed_source_column_dtypes_in_frame_order() {
+        let frame = SourceFrame::from_columns(vec![
+            ("text".into(), SourceColumnData::Text(vec![None])),
+            ("number".into(), SourceColumnData::Number(vec![Some(1.0)])),
+            (
+                "boolean".into(),
+                SourceColumnData::Boolean(vec![Some(true)]),
+            ),
+        ])
+        .unwrap();
+
+        let expected = vec![
+            ("text".into(), ColumnDType::Text),
+            ("number".into(), ColumnDType::Number),
+            ("boolean".into(), ColumnDType::Boolean),
+        ];
+        assert_eq!(frame.column_dtypes(), expected);
+        assert_eq!(frame.slice_last(0).unwrap().column_dtypes(), expected);
+    }
+
+    #[test]
+    fn lists_projected_duckdb_column_dtypes_in_frame_order() {
+        let frame = decode(
+            "SELECT 'text'::VARCHAR AS text_value, true AS bool_value, \
+             1.5::DOUBLE AS float_value, (-2)::BIGINT AS int_value, \
+             3::UBIGINT AS uint_value, NULL AS null_value",
+        );
+
+        let expected = vec![
+            ("text_value".into(), ColumnDType::Text),
+            ("bool_value".into(), ColumnDType::Boolean),
+            ("float_value".into(), ColumnDType::Number),
+            ("int_value".into(), ColumnDType::Number),
+            ("uint_value".into(), ColumnDType::Number),
+            ("null_value".into(), ColumnDType::Number),
+        ];
+        assert_eq!(frame.column_dtypes(), expected);
+        assert_eq!(frame.slice_last(0).unwrap().column_dtypes(), expected);
+    }
+
+    #[test]
+    fn lists_decoded_null_column_dtype() {
+        use super::QueryResultColumn;
+
+        let frame = QueryResultFrame::from_parts(
+            vec!["null_value".into()],
+            vec![QueryResultColumn::Null(vec![None])],
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame.column_dtypes(),
+            vec![("null_value".into(), ColumnDType::Null)]
+        );
+    }
 
     #[test]
     fn exposes_engine_owned_paths_and_locked_constructor_signatures() {
@@ -447,12 +548,12 @@ mod tests {
             fn(Vec<(String, ModuleSourceColumnData)>) -> Result<ModuleSourceFrame, MarketError>;
 
         use algotrap::engine::frame::{
-            SourceColumnData as ModuleSourceColumnData, SourceFrame as ModuleSourceFrame,
-            QueryResultFrame as ModuleQueryResultFrame,
+            QueryResultFrame as ModuleQueryResultFrame, SourceColumnData as ModuleSourceColumnData,
+            SourceFrame as ModuleSourceFrame,
         };
         use algotrap::engine::{
-            SourceColumnData as ReexportSourceColumnData, SourceFrame as ReexportSourceFrame,
             QueryResultFrame as ReexportQueryResultFrame,
+            SourceColumnData as ReexportSourceColumnData, SourceFrame as ReexportSourceFrame,
         };
 
         let _: SourceFrameConstructor = ModuleSourceFrame::from_columns;
@@ -525,8 +626,14 @@ mod tests {
     #[test]
     fn rejects_mixed_variant_inconsistent_lengths() {
         let error = SourceFrame::from_columns(vec![
-            ("number".into(), SourceColumnData::Number(vec![Some(1.0), None])),
-            ("boolean".into(), SourceColumnData::Boolean(vec![Some(true)])),
+            (
+                "number".into(),
+                SourceColumnData::Number(vec![Some(1.0), None]),
+            ),
+            (
+                "boolean".into(),
+                SourceColumnData::Boolean(vec![Some(true)]),
+            ),
             (
                 "text".into(),
                 SourceColumnData::Text(vec![Some("value".into()), None]),
@@ -540,7 +647,10 @@ mod tests {
     #[test]
     fn preserves_mixed_column_order_nulls_and_access() {
         let frame = SourceFrame::from_columns(vec![
-            ("number".into(), SourceColumnData::Number(vec![Some(1.5), None])),
+            (
+                "number".into(),
+                SourceColumnData::Number(vec![Some(1.5), None]),
+            ),
             (
                 "boolean".into(),
                 SourceColumnData::Boolean(vec![Some(true), None]),
@@ -563,7 +673,10 @@ mod tests {
             frame.column("boolean"),
             Some(SourceColumnData::Boolean(_))
         ));
-        assert!(matches!(frame.column("text"), Some(SourceColumnData::Text(_))));
+        assert!(matches!(
+            frame.column("text"),
+            Some(SourceColumnData::Text(_))
+        ));
         assert_eq!(frame.f64_at("number", 0).unwrap(), Some(1.5));
         assert_eq!(frame.f64_at("number", 1).unwrap(), None);
         assert_eq!(
@@ -603,7 +716,10 @@ mod tests {
     #[test]
     fn serializes_mixed_columns_and_rejects_non_finite_numbers() {
         let frame = SourceFrame::from_columns(vec![
-            ("number".into(), SourceColumnData::Number(vec![Some(1.5), None])),
+            (
+                "number".into(),
+                SourceColumnData::Number(vec![Some(1.5), None]),
+            ),
             (
                 "boolean".into(),
                 SourceColumnData::Boolean(vec![Some(false), None]),
@@ -645,8 +761,14 @@ mod tests {
     fn reports_data_access_errors_for_missing_wrong_type_and_out_of_bounds_output_access() {
         let frame = SourceFrame::from_columns(vec![
             ("number".into(), SourceColumnData::Number(vec![Some(1.0)])),
-            ("boolean".into(), SourceColumnData::Boolean(vec![Some(true)])),
-            ("text".into(), SourceColumnData::Text(vec![Some("value".into())])),
+            (
+                "boolean".into(),
+                SourceColumnData::Boolean(vec![Some(true)]),
+            ),
+            (
+                "text".into(),
+                SourceColumnData::Text(vec![Some("value".into())]),
+            ),
         ])
         .expect("one-row mixed columns must be valid");
 
@@ -764,9 +886,11 @@ mod tests {
     #[test]
     fn rejects_unsupported_result_type() {
         let connection = Connection::open_in_memory().expect("test connection must open");
-        let error =
-            QueryResultFrame::from_connection(&connection, "SELECT DATE '2026-01-01' AS date_value")
-                .expect_err("DATE must not decode into the owned MVP frame");
+        let error = QueryResultFrame::from_connection(
+            &connection,
+            "SELECT DATE '2026-01-01' AS date_value",
+        )
+        .expect_err("DATE must not decode into the owned MVP frame");
 
         assert!(error.message.contains("unsupported DuckDB result type"));
     }
@@ -796,5 +920,4 @@ mod tests {
         assert_eq!(tail.columns(), vec!["value".to_owned(), "value".to_owned()]);
         assert_eq!(tail.f64_at("value", 0).unwrap(), Some(1.0));
     }
-
 }

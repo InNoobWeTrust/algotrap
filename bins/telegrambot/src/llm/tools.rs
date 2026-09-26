@@ -5,21 +5,30 @@
 //! execution and data extraction logic.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::prelude::*;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionTool, ChatCompletionTools, FunctionObjectArgs,
 };
-use llm_tool::{ToolError, ToolRegistry, llm_tool};
-use tracing::warn;
+use llm_tool::{ToolContext, ToolError, ToolRegistry, llm_tool};
 
-use crate::browserless::capture_chart_screenshot;
-use crate::chart::{gap_zones_to_chart_json, render_single_tf_chart_html};
 use crate::config::{EnvConf, TickerConf};
 use algotrap::query::gap_zones::GapZoneRecord;
 
-use super::AnalysisMode;
+struct ToolRuntime {
+    all_dfs: Arc<HashMap<Timeframe, Box<dyn ComputedFrame>>>,
+    gap_zones: Arc<HashMap<Timeframe, Vec<GapZoneRecord>>>,
+    conf: Arc<EnvConf>,
+    ticker: Arc<TickerConf>,
+    ic: Arc<crate::memory::IndicatorConfig>,
+}
+
+fn ext<T: Send + Sync + 'static>(ctx: &ToolContext) -> Result<Arc<T>, ToolError> {
+    ctx.get_ext::<Arc<T>>()
+        .ok_or_else(|| ToolError::new("Missing tool runtime"))
+}
 
 /// Format configured timeframes using their canonical display values for LLM-facing text.
 fn format_available_timeframes(timeframes: &[Timeframe]) -> String {
@@ -32,88 +41,190 @@ fn format_available_timeframes(timeframes: &[Timeframe]) -> String {
 
 // ─── Tool Declarations (Schemas automatically derived via llm_tool) ─────────
 
-/// Get a summary of technical indicator values for a specific timeframe. Returns the last 3 candles of key indicators: RSSI, ATR %, structure power, Sharpe ratio, EMA200, leverage, gap zones.
+/// Fetch ONE column of indicator/price data for a timeframe over a row range.
+/// Returns values oldest→newest ("null" for missing cells). Always-present
+/// columns: open,high,low,close,volume,time,adj_close,Date (number*7 + text),
+/// iching_original_energy,iching_transformed_energy,iching_mutual_energy,
+/// iching_open,iching_high,iching_low,iching_close,iching_moving_line,
+/// iching_transformed_close,iching_mutual_close,iching_mutual_high,
+/// iching_mutual_low,iching_mutual_mean (all number), plus per-config active
+/// outputs (rssi, structure_power, band_reversion, atr_percent, sharpe, ...).
+/// On unknown column the error lists ALL live columns with dtypes (number/boolean/text).
 #[llm_tool]
-fn get_indicator_summary(
-    /// The timeframe to get indicators for (e.g., '1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M')
+fn get_indicator_column(
+    ctx: &ToolContext,
+    /// The timeframe to get data for (e.g., '1h', '4h', '1d')
     timeframe: Timeframe,
+    /// The exact column name to fetch
+    column: String,
+    /// Number of rows to return (default 5, max 50)
+    last_rows: Option<usize>,
+    /// Number of newest rows to skip (default 0, max 500)
+    skip_rows: Option<usize>,
 ) -> Result<String, ToolError> {
-    Ok(timeframe.to_string())
+    let runtime = ext::<ToolRuntime>(ctx)?;
+    match runtime.all_dfs.get(&timeframe) {
+        Some(df) => {
+            if !df.has_column(&column) {
+                let available = df
+                    .column_dtypes()
+                    .iter()
+                    .map(|(name, dtype)| format!("{name}({})", format!("{dtype:?}").to_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Ok(format!(
+                    "Column '{column}' not found. Available columns: {available}"
+                ));
+            }
+            let len = df.len();
+            let skip = skip_rows.unwrap_or(0).min(500);
+            if skip >= len {
+                return Ok(format!("Out of range: frame has {len} rows"));
+            }
+            let end = len - skip;
+            let start = end.saturating_sub(last_rows.unwrap_or(5).min(50));
+            if start == end {
+                return Ok("No rows in range.".to_string());
+            }
+            let values = (start..end)
+                .map(|i| format_cell(&**df, &column, i))
+                .collect::<Vec<_>>();
+            Ok(format!("{timeframe} {column}: [{}]", values.join(", ")))
+        }
+        None => Ok(format!(
+            "Timeframe {timeframe} not available. Available: {}",
+            format_available_timeframes(&runtime.ticker.tfs)
+        )),
+    }
 }
 
 /// Get OHLCV price action data for a specific timeframe. Returns the last N candles with open, high, low, close, volume.
 #[llm_tool]
 fn get_price_action(
+    ctx: &ToolContext,
     /// The timeframe (e.g., '1h', '4h', '1d')
     timeframe: Timeframe,
     /// Number of recent candles to return (max 20, default 5)
     num_candles: Option<usize>,
 ) -> Result<String, ToolError> {
-    let _ = num_candles;
-    Ok(timeframe.to_string())
+    let runtime = ext::<ToolRuntime>(ctx)?;
+    let num = num_candles.unwrap_or(5).min(20);
+    match runtime.all_dfs.get(&timeframe) {
+        Some(df) => {
+            let rows = df
+                .slice_last(num)
+                .map_err(|e| ToolError::new(e.to_string()))?;
+            extract_price_action(&*rows).map_err(|e| ToolError::new(e.to_string()))
+        }
+        None => Ok(format!(
+            "Timeframe {timeframe} not available. Available: {}",
+            format_available_timeframes(&runtime.ticker.tfs)
+        )),
+    }
 }
 
-/// Capture a screenshot of the multi-timeframe chart. Returns a chart image that you can analyze visually. Call this when you need to see the chart patterns, support/resistance levels, or visual confirmation of indicators.
+/// Get a quick overview across ALL configured timeframes. Returns the last 5 rows of every live column and gap zones for each timeframe.
 #[llm_tool]
-fn capture_chart(
-    /// Which timeframe to focus the chart on (e.g., '4h'). Defaults to ticker's default timeframe.
-    timeframe: Option<Timeframe>,
-) -> Result<String, ToolError> {
-    Ok(timeframe.map(|tf| tf.to_string()).unwrap_or_default())
-}
-
-/// Get a quick overview across ALL configured timeframes. Returns the latest RSSI, ATR %, structure power, Sharpe, and gap zones for each timeframe. Useful for getting a bird's eye view of the market.
-#[llm_tool]
-fn get_multi_tf_overview() -> Result<String, ToolError> {
-    Ok(String::new())
+fn get_multi_tf_overview(ctx: &ToolContext) -> Result<String, ToolError> {
+    let runtime = ext::<ToolRuntime>(ctx)?;
+    build_multi_tf_overview(
+        &runtime.all_dfs,
+        &runtime.ticker,
+        &runtime.ic,
+        &runtime.gap_zones,
+    )
+    .map_err(|e| ToolError::new(e.to_string()))
 }
 
 /// Read a knowledge base topic. The KB stores persistent insights across scan cycles. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.
 #[llm_tool]
 fn read_kb(
+    ctx: &ToolContext,
     /// The KB topic slug to read (e.g., 'market-regimes', 'lessons-learned')
     topic: String,
 ) -> Result<String, ToolError> {
-    Ok(topic)
+    let runtime = ext::<ToolRuntime>(ctx)?;
+    let content = crate::kb::read_topic(&runtime.conf.memory_dir, &topic);
+    if content.is_empty() {
+        Ok(format!("KB topic '{topic}' is empty."))
+    } else {
+        Ok(content)
+    }
 }
 
 /// Write or append content to a knowledge base topic. Use markdown format. Content is appended to existing content. Max 2000 chars per write. Valid topics: market-regimes, indicator-quirks, ticker-personalities, false-signal-patterns, successful-setups, weight-tuning-log, risk-conditions, cross-ticker-signals, timeframe-biases, lessons-learned.
 #[llm_tool]
 fn write_kb(
+    ctx: &ToolContext,
     /// The KB topic slug to write to (e.g., 'lessons-learned')
     topic: String,
     /// The markdown content to append to the topic file (max 2000 chars)
     content: String,
 ) -> Result<String, ToolError> {
-    Ok(format!("{topic}: {content}"))
+    let runtime = ext::<ToolRuntime>(ctx)?;
+    match crate::kb::write_topic(&runtime.conf.memory_dir, &topic, &content) {
+        Ok(msg) => Ok(msg),
+        Err(e) => Ok(format!("Failed to write KB: {e}")),
+    }
 }
 
 /// Save analysis notes to your in-session scratchpad. Use this to record key observations, conflicts, or intermediate conclusions as you analyze. Notes persist across context resets within this session but are discarded at scan end. Overwrites existing content for the same key.
 #[llm_tool]
 fn write_notes(
+    ctx: &ToolContext,
     /// A short label for this note (e.g., 'observations', 'conflicts', 'handoff')
     key: String,
     /// The note content to save
     content: String,
 ) -> Result<String, ToolError> {
-    Ok(format!("{key}: {content}"))
+    let _ = ext::<ToolRuntime>(ctx)?;
+    let mut notes = ctx.get_state("notes", serde_json::json!({}));
+    let entries = notes
+        .as_object_mut()
+        .ok_or_else(|| ToolError::new("Invalid notes state"))?;
+    entries.insert(key, serde_json::Value::String(content));
+    ctx.set_state("notes", notes)?;
+    Ok("Noted.".to_string())
 }
 
 /// Read your analysis notes from the in-session scratchpad. Call with a specific key to read one note, or omit the key to read all notes.
 #[llm_tool]
 fn read_notes(
+    ctx: &ToolContext,
     /// Optional: specific note key to read. Omit to read all notes.
     key: Option<String>,
 ) -> Result<String, ToolError> {
-    Ok(key.unwrap_or_default())
+    let _ = ext::<ToolRuntime>(ctx)?;
+    let notes = ctx.get_state("notes", serde_json::json!({}));
+    let entries = notes
+        .as_object()
+        .ok_or_else(|| ToolError::new("Invalid notes state"))?;
+    match key.as_deref() {
+        Some(k) => match entries.get(k).and_then(|v| v.as_str()) {
+            Some(content) => Ok(content.to_string()),
+            None => Ok(format!("No notes found for key '{k}'.")),
+        },
+        None => {
+            let mut keys: Vec<_> = entries.keys().collect();
+            if keys.is_empty() {
+                Ok("No notes saved yet.".to_string())
+            } else {
+                keys.sort();
+                let lines: Vec<String> = keys
+                    .iter()
+                    .map(|k| format!("[{k}]: {}", entries[*k].as_str().unwrap_or_default()))
+                    .collect();
+                Ok(lines.join("\n"))
+            }
+        }
+    }
 }
 
 /// Build the full `ToolRegistry` containing all available LLM tools.
 pub fn create_tool_registry() -> ToolRegistry {
     ToolRegistry::new()
-        .with_tool(GetIndicatorSummary)
+        .with_tool(GetIndicatorColumn)
         .with_tool(GetPriceAction)
-        .with_tool(CaptureChart)
         .with_tool(GetMultiTfOverview)
         .with_tool(ReadKb)
         .with_tool(WriteKb)
@@ -121,27 +232,39 @@ pub fn create_tool_registry() -> ToolRegistry {
         .with_tool(ReadNotes)
 }
 
+pub fn create_tool_context(
+    all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
+    gap_zones: &HashMap<Timeframe, Vec<GapZoneRecord>>,
+    conf: &EnvConf,
+    ticker: &TickerConf,
+    ic: &crate::memory::IndicatorConfig,
+    scratchpad: &HashMap<String, String>,
+) -> Result<ToolContext, Box<dyn core::error::Error + Send + Sync>> {
+    let frames = all_dfs
+        .iter()
+        .map(|(tf, df)| Ok((*tf, df.slice_last(df.len())?)))
+        .collect::<Result<HashMap<_, _>, Box<dyn core::error::Error + Send + Sync>>>()?;
+    let ctx = ToolContext::new();
+    ctx.set_ext(Arc::new(ToolRuntime {
+        all_dfs: Arc::new(frames),
+        gap_zones: Arc::new(gap_zones.clone()),
+        conf: Arc::new(conf.clone()),
+        ticker: Arc::new(ticker.clone()),
+        ic: Arc::new(ic.clone()),
+    }))?;
+    ctx.set_state("notes", serde_json::to_value(scratchpad)?)?;
+    Ok(ctx)
+}
+
 /// Build LLM tool definitions derived automatically from `llm_tool`.
-///
-/// In `AlertScan` mode, `capture_chart` is excluded to avoid wasteful
-/// Browserless calls for below-threshold tickers.
 pub fn build_tools(
     _conf: &EnvConf,
-    mode: AnalysisMode,
 ) -> Result<Vec<ChatCompletionTools>, Box<dyn core::error::Error + Send + Sync>> {
     let registry = create_tool_registry();
     let definitions = registry.definitions();
 
     let tools = definitions
         .into_iter()
-        .filter(|def| {
-            // In alert scan mode, exclude capture_chart (ADR-5)
-            if mode == AnalysisMode::AlertScan {
-                def.name != "capture_chart"
-            } else {
-                true
-            }
-        })
         .map(|def| {
             ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObjectArgs::default()
@@ -164,192 +287,43 @@ pub async fn execute_tool_call(
     gap_zones: &HashMap<Timeframe, Vec<GapZoneRecord>>,
     conf: &EnvConf,
     ticker: &TickerConf,
-    _ic: &crate::memory::IndicatorConfig,
+    ic: &crate::memory::IndicatorConfig,
     scratchpad: &mut HashMap<String, String>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
-    match tool_call.function.name.as_str() {
-        "get_indicator_summary" => {
-            let params: GetIndicatorSummaryParams =
-                serde_json::from_str(&tool_call.function.arguments)?;
-            let tf = params.timeframe;
-            let tf_str = tf.to_string();
-            match all_dfs.get(&tf) {
-                Some(df) => {
-                    let last_rows = df.slice_last(3)?;
-                    let mut summary = extract_indicator_summary(&*last_rows, &tf)?;
-                    let zones = gap_zones.get(&tf).map(Vec::as_slice).unwrap_or(&[]);
-                    if let Some(gap_ctx) = compute_gap_zone_context(zones) {
-                        summary.push('\n');
-                        summary.push_str(&gap_ctx);
-                    }
-                    Ok(summary)
-                }
-                None => Ok(format!(
-                    "Timeframe {tf_str} not available. Available: {}",
-                    format_available_timeframes(&ticker.tfs)
-                )),
-            }
-        }
-        "get_price_action" => {
-            let params: GetPriceActionParams = serde_json::from_str(&tool_call.function.arguments)?;
-            let tf = params.timeframe;
-            let tf_str = tf.to_string();
-            let num = params.num_candles.unwrap_or(5).min(20);
-            match all_dfs.get(&tf) {
-                Some(df) => {
-                    let rows = df.slice_last(num)?;
-                    let price_data = extract_price_action(&*rows)?;
-                    Ok(price_data)
-                }
-                None => Ok(format!(
-                    "Timeframe {tf_str} not available. Available: {}",
-                    format_available_timeframes(&ticker.tfs)
-                )),
-            }
-        }
-        "capture_chart" => {
-            let params: CaptureChartParams = serde_json::from_str(&tool_call.function.arguments)
-                .unwrap_or(CaptureChartParams { timeframe: None });
-            let tf = params.timeframe.unwrap_or(ticker.default_tf);
-            let tf_str = tf.to_string();
+    let ctx = create_tool_context(all_dfs, gap_zones, conf, ticker, ic, scratchpad)?;
+    let result = dispatch_tool_call(tool_call, &ctx).await?;
+    *scratchpad = serde_json::from_value(ctx.get_state("notes", serde_json::json!({})))?;
+    Ok(result)
+}
 
-            // Render per-TF chart HTML
-            let df = match all_dfs.get(&tf) {
-                Some(df) => df,
-                None => {
-                    return Ok(format!(
-                        "Timeframe {tf_str} not available. Available: {}",
-                        format_available_timeframes(&ticker.tfs)
-                    ));
-                }
-            };
-            let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
-            let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
-            let gap_zones_json =
-                gap_zones_to_chart_json(gap_zones.get(&tf).map(Vec::as_slice).unwrap_or(&[]));
-            let chart_html =
-                render_single_tf_chart_html(&tf, df.as_ref(), ticker, &gap_zones_json, rssi_tint)?;
-
-            match capture_chart_screenshot(&chart_html, &conf.browserless_url).await {
-                Ok(_png) => Ok(format!(
-                    "[Chart screenshot for {tf_str} captured — see attached image]"
-                )),
-                Err(e) => {
-                    warn!("Failed to capture chart screenshot: {e}");
-                    Ok(format!(
-                        "Failed to capture chart: {e}. Proceeding with data-only analysis."
-                    ))
-                }
-            }
-        }
-        "get_multi_tf_overview" => {
-            let overview = build_multi_tf_overview(all_dfs, ticker, _ic, gap_zones)?;
-            Ok(overview)
-        }
-        "read_kb" => {
-            let params: ReadKbParams = serde_json::from_str(&tool_call.function.arguments)?;
-            let content = crate::kb::read_topic(&conf.memory_dir, &params.topic);
-            if content.is_empty() {
-                Ok(format!("KB topic '{}' is empty.", params.topic))
-            } else {
-                Ok(content)
-            }
-        }
-        "write_kb" => {
-            let params: WriteKbParams = serde_json::from_str(&tool_call.function.arguments)?;
-            match crate::kb::write_topic(&conf.memory_dir, &params.topic, &params.content) {
-                Ok(msg) => Ok(msg),
-                Err(e) => Ok(format!("Failed to write KB: {e}")),
-            }
-        }
-        "write_notes" => {
-            let params: WriteNotesParams = serde_json::from_str(&tool_call.function.arguments)?;
-            scratchpad.insert(params.key, params.content);
-            Ok("Noted.".to_string())
-        }
-        "read_notes" => {
-            let params: ReadNotesParams = serde_json::from_str(&tool_call.function.arguments)
-                .unwrap_or(ReadNotesParams { key: None });
-            match params.key.as_deref() {
-                Some(k) => match scratchpad.get(k) {
-                    Some(content) => Ok(content.clone()),
-                    None => Ok(format!("No notes found for key '{k}'.")),
-                },
-                None => {
-                    if scratchpad.is_empty() {
-                        Ok("No notes saved yet.".to_string())
-                    } else {
-                        let mut keys: Vec<&String> = scratchpad.keys().collect();
-                        keys.sort(); // Deterministic order
-                        let entries: Vec<String> = keys
-                            .iter()
-                            .map(|k| format!("[{}]: {}", k, scratchpad[k.as_str()]))
-                            .collect();
-                        Ok(entries.join("\n"))
-                    }
-                }
-            }
-        }
-        _ => Ok(format!("Unknown tool: {}", tool_call.function.name)),
+pub async fn dispatch_tool_call(
+    tool_call: &ChatCompletionMessageToolCall,
+    ctx: &ToolContext,
+) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
+    let registry = create_tool_registry();
+    if !registry
+        .definitions()
+        .iter()
+        .any(|def| def.name == tool_call.function.name)
+    {
+        return Ok(format!("Unknown tool: {}", tool_call.function.name));
     }
+    Ok(registry
+        .dispatch_str(&tool_call.function.name, &tool_call.function.arguments, ctx)
+        .await?
+        .to_string())
 }
 
 // ─── Data Extraction Helpers ─────────────────────────────────────────────────
 
-fn extract_indicator_summary(
-    df: &dyn ComputedFrame,
-    tf: &Timeframe,
-) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
-    let mut lines = vec![format!("=== {tf} Indicator Summary (last 3 candles) ===")];
-
-    let cols = [
-        "rssi",
-        "rssi_ma",
-        "band_reversion",
-        "structure_power",
-        "structure_power_sma",
-        "sharpe",
-        "ema200",
-        "atr_percent",
-        "leverage",
-    ];
-
-    for col_name in &cols {
-        if df.has_column(col_name) {
-            let rows = df.len();
-            let mut values = Vec::new();
-            for i in 0..rows {
-                if let Ok(Some(v)) = df.f64_at(col_name, i) {
-                    values.push(format!("{}", v));
-                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
-                    values.push(v);
-                } else {
-                    values.push("null".to_string());
-                }
-            }
-            lines.push(format!("  {col_name}: [{}]", values.join(", ")));
-        }
+fn format_cell(df: &dyn ComputedFrame, column: &str, row: usize) -> String {
+    if let Ok(Some(value)) = df.f64_at(column, row) {
+        value.to_string()
+    } else if let Ok(Some(value)) = df.string_at(column, row) {
+        value
+    } else {
+        "null".to_string()
     }
-
-    // Also include latest OHLC for context
-    for col_name in ["open", "high", "low", "close", "volume"] {
-        if df.has_column(col_name) {
-            let rows = df.len();
-            let mut values = Vec::new();
-            for i in 0..rows {
-                if let Ok(Some(v)) = df.f64_at(col_name, i) {
-                    values.push(format!("{}", v));
-                } else if let Ok(Some(v)) = df.string_at(col_name, i) {
-                    values.push(v);
-                } else {
-                    values.push("null".to_string());
-                }
-            }
-            lines.push(format!("  {col_name}: [{}]", values.join(", ")));
-        }
-    }
-
-    Ok(lines.join("\n"))
 }
 
 fn extract_price_action(
@@ -388,55 +362,41 @@ fn build_multi_tf_overview(
     let mut tfs: Vec<Timeframe> = all_dfs.keys().cloned().collect();
     tfs.sort_by_key(|tf| tf.weight());
 
-    // Indicator lines keep the existing ascending-weight order.
+    // Column blocks keep ascending-weight order.
     for tf in &tfs {
         if let Some(df) = all_dfs.get(tf) {
-            let last = df.slice_last(1)?;
-            let get_val = |name: &str| -> String {
-                if last.has_column(name) {
-                    last.f64_at(name, 0)
-                        .ok()
-                        .flatten()
-                        .map(|v| format!("{v}"))
-                        .unwrap_or_else(|| "N/A".to_string())
-                } else {
-                    "N/A".to_string()
-                }
-            };
-
-            lines.push(format!(
-                "  {tf}: RSSI={rssi}, band_rev={band_rev}, \
-                 structure_pwr={pwr}, sharpe={sharpe}, close={close}",
-                rssi = get_val("rssi"),
-                band_rev = get_val("band_reversion"),
-                pwr = get_val("structure_power"),
-                sharpe = get_val("sharpe"),
-                close = get_val("close"),
-            ));
+            let last = df.slice_last(5)?;
+            lines.push(format!("  --- {tf} (last 5 rows) ---"));
+            for column in df.columns() {
+                let values = (0..last.len())
+                    .map(|i| format_cell(&*last, &column, i))
+                    .collect::<Vec<_>>();
+                lines.push(format!("  {column}: [{}]", values.join(", ")));
+            }
         }
     }
 
-    // Zone blocks iterate highest weight first with a combined ~64 zone-line
-    // ceiling. Indicator-line order above is unchanged.
+    // Zone blocks iterate highest weight first with a combined 16 zone-line
+    // ceiling. Column-block order above is unchanged.
     let mut tfs_desc = tfs.clone();
     tfs_desc.sort_by_key(|tf| std::cmp::Reverse(tf.weight()));
     let mut emitted_zone_lines: usize = 0;
     for tf in &tfs_desc {
-        if emitted_zone_lines >= 64 {
+        if emitted_zone_lines >= 16 {
             break;
         }
         let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
         if zones.is_empty() {
             continue;
         }
-        // Per-timeframe hard cap (newest 32) then aggregate-budget truncation
-        // (newest `remaining`) so the combined digest never exceeds 64 lines.
-        let capped: &[GapZoneRecord] = if zones.len() > 32 {
-            &zones[zones.len() - 32..]
+        // Per-timeframe hard cap (newest 8) then aggregate-budget truncation
+        // (newest `remaining`) so the combined digest never exceeds 16 lines.
+        let capped: &[GapZoneRecord] = if zones.len() > 8 {
+            &zones[zones.len() - 8..]
         } else {
             zones
         };
-        let remaining = 64 - emitted_zone_lines;
+        let remaining = 16 - emitted_zone_lines;
         let emit: &[GapZoneRecord] = if capped.len() > remaining {
             &capped[capped.len() - remaining..]
         } else {
@@ -459,9 +419,9 @@ fn build_multi_tf_overview(
 
 fn compute_gap_zone_context(zones: &[GapZoneRecord]) -> Option<String> {
     // Zones arrive pre-budgeted by `recent_gap_zones` SQL LIMIT; enforce the
-    // hard 32/timeframe cap here regardless of config, keeping the newest.
-    let capped: &[GapZoneRecord] = if zones.len() > 32 {
-        &zones[zones.len() - 32..]
+    // hard 8/timeframe cap here regardless of config, keeping the newest.
+    let capped: &[GapZoneRecord] = if zones.len() > 8 {
+        &zones[zones.len() - 8..]
     } else {
         zones
     };
@@ -542,16 +502,129 @@ mod tests {
         envy::from_iter(env).unwrap()
     }
 
+    async fn call_column_tool(
+        all_dfs: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
+        column: &str,
+        last_rows: Option<usize>,
+        skip_rows: Option<usize>,
+    ) -> String {
+        let call: ChatCompletionMessageToolCall = serde_json::from_value(serde_json::json!({
+            "id": "test", "type": "function",
+            "function": {
+                "name": "get_indicator_column",
+                "arguments": serde_json::json!({
+                    "timeframe": "1h", "column": column,
+                    "last_rows": last_rows, "skip_rows": skip_rows
+                }).to_string()
+            }
+        }))
+        .unwrap();
+        execute_tool_call(
+            &call,
+            all_dfs,
+            &HashMap::new(),
+            &dummy_env_conf(),
+            &sample_ticker(),
+            &crate::memory::IndicatorConfig::default(),
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_registry_dispatch_matches_column_and_overview_strings() {
+        let ticker = sample_ticker();
+        let ic = crate::memory::IndicatorConfig::default();
+        let frame = crate::data::process_data(&sample_klines(), &ticker, &ic)
+            .await
+            .unwrap();
+        let expected_column = format!(
+            "1h close: [{}]",
+            (frame.len() - 2..frame.len())
+                .map(|i| format_cell(&*frame, "close", i))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let frames = HashMap::from([(Timeframe::H1, frame)]);
+        let zones = HashMap::new();
+        let expected_overview = build_multi_tf_overview(&frames, &ticker, &ic, &zones).unwrap();
+        let ctx = create_tool_context(
+            &frames,
+            &zones,
+            &dummy_env_conf(),
+            &ticker,
+            &ic,
+            &HashMap::new(),
+        )
+        .unwrap();
+        let registry = create_tool_registry();
+
+        let column = registry
+            .dispatch_str(
+                "get_indicator_column",
+                r#"{"timeframe":"1h","column":"close","last_rows":2}"#,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(column.to_string(), expected_column);
+
+        let overview = registry
+            .dispatch_str("get_multi_tf_overview", "{}", &ctx)
+            .await
+            .unwrap();
+        assert_eq!(overview.to_string(), expected_overview);
+    }
+
+    #[tokio::test]
+    async fn test_notes_share_state_across_dispatches() {
+        let scratchpad = HashMap::from([("seed".to_string(), "existing".to_string())]);
+        let ctx = create_tool_context(
+            &HashMap::new(),
+            &HashMap::new(),
+            &dummy_env_conf(),
+            &sample_ticker(),
+            &crate::memory::IndicatorConfig::default(),
+            &scratchpad,
+        )
+        .unwrap();
+        let registry = create_tool_registry();
+        assert_eq!(
+            registry
+                .dispatch_str("read_notes", "{}", &ctx)
+                .await
+                .unwrap()
+                .to_string(),
+            "[seed]: existing"
+        );
+        assert_eq!(
+            registry
+                .dispatch_str("write_notes", r#"{"key":"next","content":"saved"}"#, &ctx)
+                .await
+                .unwrap()
+                .to_string(),
+            "Noted."
+        );
+        assert_eq!(
+            registry
+                .dispatch_str("read_notes", "{}", &ctx)
+                .await
+                .unwrap()
+                .to_string(),
+            "[next]: saved\n[seed]: existing"
+        );
+    }
+
     #[test]
     fn test_registry_contains_all_tools() {
         let registry = create_tool_registry();
         let defs = registry.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_ref()).collect();
 
-        assert_eq!(names.len(), 8);
-        assert!(names.contains(&"get_indicator_summary"));
+        assert_eq!(names.len(), 7);
+        assert!(names.contains(&"get_indicator_column"));
         assert!(names.contains(&"get_price_action"));
-        assert!(names.contains(&"capture_chart"));
         assert!(names.contains(&"get_multi_tf_overview"));
         assert!(names.contains(&"read_kb"));
         assert!(names.contains(&"write_kb"));
@@ -560,23 +633,34 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tools_full_analysis_mode() {
+    fn test_build_tools_returns_seven_tools() {
         let conf = dummy_env_conf();
-        let tools = build_tools(&conf, AnalysisMode::FullAnalysis).unwrap();
-        assert_eq!(tools.len(), 8);
+        let tools = build_tools(&conf).unwrap();
+        assert_eq!(tools.len(), 7);
     }
 
     #[test]
-    fn test_build_tools_alert_scan_mode_excludes_capture_chart() {
+    fn test_build_tools_has_seven_expected_names() {
         let conf = dummy_env_conf();
-        let tools = build_tools(&conf, AnalysisMode::AlertScan).unwrap();
-        assert_eq!(tools.len(), 7);
-
-        for tool in &tools {
-            if let ChatCompletionTools::Function(func) = tool {
-                assert_ne!(func.function.name, "capture_chart");
-            }
-        }
+        let mut names = build_tools(&conf)
+            .unwrap()
+            .into_iter()
+            .filter_map(|tool| match tool {
+                ChatCompletionTools::Function(func) => Some(func.function.name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        let expected = vec![
+            "get_indicator_column",
+            "get_multi_tf_overview",
+            "get_price_action",
+            "read_kb",
+            "read_notes",
+            "write_kb",
+            "write_notes",
+        ];
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -595,20 +679,22 @@ mod tests {
         let registry = create_tool_registry();
         let defs = registry.definitions();
 
-        // 1. get_indicator_summary
+        // 1. get_indicator_column
         let ind_def = defs
             .iter()
-            .find(|d| d.name == "get_indicator_summary")
+            .find(|d| d.name == "get_indicator_column")
             .unwrap();
-        assert!(ind_def.description.contains("technical indicator values"));
+        assert!(ind_def.description.contains("column"));
+        assert!(ind_def.description.contains("row range"));
         assert!(
             ind_def.parameter_schema["properties"]["timeframe"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("timeframe to get indicators for")
+                .contains("timeframe to get data for")
         );
         let req = ind_def.parameter_schema["required"].as_array().unwrap();
         assert!(req.contains(&serde_json::json!("timeframe")));
+        assert!(req.contains(&serde_json::json!("column")));
 
         // 2. get_price_action
         let pa_def = defs.iter().find(|d| d.name == "get_price_action").unwrap();
@@ -668,7 +754,7 @@ mod tests {
     #[test]
     fn test_timeframe_params_bundled_with_canonical_enum_schema() {
         let conf = dummy_env_conf();
-        let tools = build_tools(&conf, AnalysisMode::FullAnalysis).unwrap();
+        let tools = build_tools(&conf).unwrap();
 
         let canonical: Vec<serde_json::Value> = Timeframe::ALL_CANONICAL
             .iter()
@@ -679,18 +765,12 @@ mod tests {
             let ChatCompletionTools::Function(func) = tool else {
                 continue;
             };
-            if !["get_indicator_summary", "get_price_action", "capture_chart"]
-                .contains(&func.function.name.as_str())
+            if !["get_indicator_column", "get_price_action"].contains(&func.function.name.as_str())
             {
                 continue;
             }
 
-            // `capture_chart` accepts `Option<Timeframe>`, so schemars appends `null`.
-            let mut expected = canonical.clone();
-            if func.function.name == "capture_chart" {
-                expected.push(serde_json::Value::Null);
-            }
-            let expected = serde_json::Value::Array(expected);
+            let expected = serde_json::Value::Array(canonical.clone());
 
             let tf_schema = &func
                 .function
@@ -756,14 +836,17 @@ mod tests {
         // the parallel map entry (empty here) and always yields an envelope.
         let gap_zones: HashMap<Timeframe, Vec<GapZoneRecord>> =
             HashMap::from([(Timeframe::H1, vec![])]);
-        let zones = gap_zones.get(&Timeframe::H1).map(Vec::as_slice).unwrap_or(&[]);
+        let zones = gap_zones
+            .get(&Timeframe::H1)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let ctx = compute_gap_zone_context(zones).expect("envelope must exist");
         assert!(ctx.contains("Gap zones (0 returned"));
         assert!(ctx.contains("available=unknown"));
     }
 
     #[tokio::test]
-    async fn test_multi_tf_overview_formats_unavailable_indicator_values_as_na() {
+    async fn test_multi_tf_overview_lists_every_live_column() {
         let ticker = sample_ticker();
         let mut ic = crate::memory::IndicatorConfig::default();
         ic.outputs.rssi.active = false;
@@ -771,20 +854,107 @@ mod tests {
         let frame = crate::data::process_data(&sample_klines(), &ticker, &ic)
             .await
             .unwrap();
+        let columns = frame.columns();
         let all_dfs = HashMap::from([(Timeframe::H1, frame)]);
         let gap_zones: HashMap<Timeframe, Vec<GapZoneRecord>> = HashMap::new();
 
         let overview = build_multi_tf_overview(&all_dfs, &ticker, &ic, &gap_zones).unwrap();
 
-        assert!(overview.contains("RSSI=N/A"));
-        assert!(overview.contains("close="));
+        assert!(overview.contains("  --- 1h (last 5 rows) ---"));
+        assert!(!overview.contains("  rssi:"));
+        for column in columns {
+            assert!(
+                overview.contains(&format!("  {column}: [")),
+                "missing {column}"
+            );
+        }
+        assert!(overview.contains("  iching_mutual_mean: ["));
+        let close_values = (all_dfs[&Timeframe::H1].len() - 5..all_dfs[&Timeframe::H1].len())
+            .map(|i| format_cell(&*all_dfs[&Timeframe::H1], "close", i))
+            .collect::<Vec<_>>();
+        assert!(overview.contains(&format!("  close: [{}]", close_values.join(", "))));
+    }
+
+    #[tokio::test]
+    async fn test_multi_tf_overview_with_fewer_than_five_rows() {
+        let ticker = sample_ticker();
+        let ic = crate::memory::IndicatorConfig::default();
+        let frame = crate::data::process_data(&sample_klines(), &ticker, &ic)
+            .await
+            .unwrap();
+        let last_four = frame.slice_last(4).unwrap();
+        let close_values = (0..last_four.len())
+            .map(|i| format_cell(&*last_four, "close", i))
+            .collect::<Vec<_>>();
+        let all_dfs = HashMap::from([(Timeframe::H1, last_four)]);
+
+        let overview = build_multi_tf_overview(&all_dfs, &ticker, &ic, &HashMap::new()).unwrap();
+        assert!(overview.contains("  --- 1h (last 5 rows) ---"));
+        assert!(overview.contains(&format!("  close: [{}]", close_values.join(", "))));
+    }
+
+    #[tokio::test]
+    async fn test_indicator_column_includes_iching_energy_values() {
+        let ticker = sample_ticker();
+        let frame = crate::data::process_data(
+            &sample_klines(),
+            &ticker,
+            &crate::memory::IndicatorConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let all_dfs = HashMap::from([(Timeframe::H1, frame)]);
+        for column in [
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_mutual_energy",
+        ] {
+            let result = call_column_tool(&all_dfs, column, None, None).await;
+            assert!(result.contains(&format!("{column}: [")));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_indicator_column_range_and_errors() {
+        let ticker = sample_ticker();
+        let frame = crate::data::process_data(
+            &sample_klines(),
+            &ticker,
+            &crate::memory::IndicatorConfig::default(),
+        )
+        .await
+        .unwrap();
+        let len = frame.len();
+        let expected = (len - 3..len)
+            .map(|i| format_cell(&*frame, "close", i))
+            .collect::<Vec<_>>();
+        let all_dfs = HashMap::from([(Timeframe::H1, frame)]);
+
+        assert_eq!(
+            call_column_tool(&all_dfs, "close", Some(3), None).await,
+            format!("1h close: [{}]", expected.join(", "))
+        );
+        assert!(
+            call_column_tool(&all_dfs, "bad_column", None, None)
+                .await
+                .contains("close(number)")
+        );
+        assert_eq!(
+            call_column_tool(&all_dfs, "close", None, Some(len)).await,
+            format!("Out of range: frame has {len} rows")
+        );
+        assert_eq!(
+            call_column_tool(&all_dfs, "close", Some(0), None).await,
+            "No rows in range."
+        );
     }
 
     #[test]
     fn test_gap_zone_digest_budget_envelope_ordering_and_no_legacy_wording() {
         use algotrap::query::gap_zones::GapZoneDirection;
 
-        // Per-tf hard cap: 40 zones in -> 32 lines out + envelope.
+        // Per-tf hard cap: 40 zones in -> 8 lines out + envelope.
         let many: Vec<GapZoneRecord> = (0..40)
             .map(|i| {
                 gap_record(
@@ -796,12 +966,12 @@ mod tests {
             .collect();
         let ctx = compute_gap_zone_context(&many).unwrap();
         let lines: Vec<&str> = ctx.lines().collect();
-        assert!(lines[0].contains("Gap zones (32 returned"));
+        assert!(lines[0].contains("Gap zones (8 returned"));
         assert!(lines[0].contains("available=unknown"));
         assert!(lines[0].contains("truncated=unknown"));
-        assert_eq!(lines.len(), 1 + 32);
-        // Newest 32 retained (ascending tail: indices 8..39).
-        assert!(lines[1].contains("1700000480000"));
+        assert_eq!(lines.len(), 1 + 8);
+        // Newest 8 retained (ascending tail: indices 32..39).
+        assert!(lines[1].contains("1700001920000"));
         assert!(lines[lines.len() - 1].contains("1700002340000"));
         assert!(!ctx.contains("trust"));
         assert!(!ctx.contains("nearest"));
@@ -822,7 +992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multi_tf_overview_aggregate_caps_at_64_highest_weight_first() {
+    async fn test_multi_tf_overview_aggregate_caps_at_16_highest_weight_first() {
         use algotrap::query::gap_zones::GapZoneDirection;
 
         let ticker = TickerConf {
@@ -837,14 +1007,21 @@ mod tests {
             .await
             .unwrap();
         let all_dfs: HashMap<Timeframe, Box<dyn ComputedFrame>> = HashMap::from([
-            (Timeframe::M15, crate::data::process_data(&sample_klines(), &ticker, &ic).await.unwrap()),
-            (Timeframe::H1, crate::data::process_data(&sample_klines(), &ticker, &ic).await.unwrap()),
             (
-                Timeframe::H4,
-                frame,
+                Timeframe::M15,
+                crate::data::process_data(&sample_klines(), &ticker, &ic)
+                    .await
+                    .unwrap(),
             ),
+            (
+                Timeframe::H1,
+                crate::data::process_data(&sample_klines(), &ticker, &ic)
+                    .await
+                    .unwrap(),
+            ),
+            (Timeframe::H4, frame),
         ]);
-        // 30 zones per tf x 3 tfs = 90 raw -> aggregate must cap at 64.
+        // 30 zones per tf x 3 tfs = 90 raw -> 8 each, aggregate caps at 16.
         let mk = |base: i64| {
             (0..30)
                 .map(|i| gap_record(base + i * 60_000, GapZoneDirection::Bullish, Some(0.8)))
@@ -863,17 +1040,22 @@ mod tests {
         // Count zone detail lines (contain " | " and a direction token).
         let zone_lines: Vec<&str> = overview
             .lines()
-            .filter(|l| l.contains(" | ") && (l.contains("bullish") || l.contains("bearish") || l.contains("flat")))
+            .filter(|l| {
+                l.contains(" | ")
+                    && (l.contains("bullish") || l.contains("bearish") || l.contains("flat"))
+            })
             .collect();
-        assert_eq!(zone_lines.len(), 64, "aggregate ceiling must hold");
-        // Highest-weight-first: H4 block appears before H1, H1 before M15.
+        assert_eq!(zone_lines.len(), 16, "aggregate ceiling must hold");
+        // Highest-weight-first: H4 and H1 use the budget before M15.
         let pos_h4 = overview.find("4h Gap zones (").expect("H4 block");
         let pos_h1 = overview.find("1h Gap zones (").expect("H1 block");
-        let pos_m15 = overview.find("15m Gap zones (").expect("M15 block");
-        assert!(pos_h4 < pos_h1 && pos_h1 < pos_m15);
-        // Indicator-line order stays ascending (existing contract).
-        let ind_h4 = overview.find("4h: RSSI=").unwrap_or(usize::MAX);
-        let ind_m15 = overview.find("15m: RSSI=").expect("M15 indicator line");
+        assert!(pos_h4 < pos_h1);
+        assert!(!overview.contains("15m Gap zones ("));
+        assert!(overview.contains("4h Gap zones (8 returned"));
+        assert!(overview.contains("1h Gap zones (8 returned"));
+        // Column-block order stays ascending.
+        let ind_h4 = overview.find("--- 4h (last 5 rows) ---").unwrap();
+        let ind_m15 = overview.find("--- 15m (last 5 rows) ---").unwrap();
         assert!(ind_m15 < ind_h4);
     }
 }

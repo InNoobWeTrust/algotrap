@@ -16,8 +16,8 @@ use algotrap::ta::prelude::{
     BiasReversionState, BodyRatio, BodyRatioState, Ema, EmaState, IsAtrGap, IsAtrGapState, Kernel,
     KernelStep, PriorState, ReverseRsi, ReverseRsiState, Rma, RmaState, Rsi, RsiState, Sharpe,
     SharpeState, Sma, SmaState, TaError, TaResult, atr, atr_percent, band_reversion,
-    band_reversion_percent, bar_bias, bias_reversion, body_ratio, ema, is_atr_gap, option_map2,
-    require_output, reverse_rsi, rma, rsi, sharpe, sma,
+    band_reversion_percent, bar_bias, bias_reversion, body_ratio, ema, iching_bar_trajectory,
+    is_atr_gap, option_map2, require_output, reverse_rsi, rma, rsi, sharpe, sma,
 };
 use futures::TryStreamExt;
 use std::convert::Infallible;
@@ -33,7 +33,21 @@ const BASE_COLUMNS: [&str; 8] = [
     "Date",
 ];
 
-
+const ICHING_ENERGY_COLUMNS: [&str; 13] = [
+    "iching_original_energy",
+    "iching_transformed_energy",
+    "iching_mutual_energy",
+    "iching_open",
+    "iching_high",
+    "iching_low",
+    "iching_close",
+    "iching_moving_line",
+    "iching_transformed_close",
+    "iching_mutual_close",
+    "iching_mutual_high",
+    "iching_mutual_low",
+    "iching_mutual_mean",
+];
 
 pub(crate) struct TelegramIndicators {
     bar_bias: BarBias,
@@ -167,6 +181,7 @@ impl Kernel for TelegramIndicators {
                 bias,
             },
         )?;
+        let bias_reversion_value = require_output("bias reversion", bias_reversion_step.output)?;
         let neutral_revrsi_step = self.neutral_revrsi.transition(
             child_prior(&prior, |state| &state.neutral_revrsi),
             &(kline.open + bias),
@@ -204,7 +219,7 @@ impl Kernel for TelegramIndicators {
         let band_input = BandPoint {
             open: kline.open,
             atr,
-            signal: kline.open,
+            signal: bias_reversion_value,
         };
         let band_step = self.band_reversion.transition(
             child_prior(&prior, |state| &state.band_reversion),
@@ -237,7 +252,7 @@ impl Kernel for TelegramIndicators {
             atr: Some(atr),
             volume_sma: volume_step.output,
             ema200: ema_step.output,
-            bias_reversion: bias_reversion_step.output,
+            bias_reversion: Some(bias_reversion_value),
             neutral_revrsi: neutral_revrsi_step.output,
             bullish_revrsi: bullish_revrsi_step.output,
             bearish_revrsi: bearish_revrsi_step.output,
@@ -315,9 +330,9 @@ async fn collect_telegram_rows(
             atr_gap_multiplier,
         ),
     )
-            .try_collect()
-            .await
-            .map_err(map_telegram_stream_error)?;
+    .try_collect()
+    .await
+    .map_err(map_telegram_stream_error)?;
 
     if stamped_rows.len() != klines.len()
         || stamped_rows
@@ -366,6 +381,15 @@ fn telegram_output_frame(
         ));
     }
 
+    let trajectories = klines
+        .iter()
+        .enumerate()
+        .map(|(index, kline)| {
+            let bar_close_time = klines.get(index + 1).map_or(kline.time, |next| next.time);
+            iching_bar_trajectory(kline.time, bar_close_time).map_err(MarketError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut columns = vec![
         (
             "open".into(),
@@ -396,6 +420,126 @@ fn telegram_output_frame(
             SourceColumnData::Number(klines.iter().map(|row| row.adjclose).collect()),
         ),
     ];
+
+    columns.extend([
+        (
+            "iching_original_energy".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_transformed_energy".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.transformed_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_energy".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_open".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_open))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_high".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_high))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_low".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_low))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_close".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.energy_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_moving_line".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| trajectory.moving_line.map(f64::from))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_transformed_close".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.transformed_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_close".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_high".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_high))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_low".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_low))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_mean".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_mean))
+                    .collect(),
+            ),
+        ),
+    ]);
 
     let number = |select: fn(&TelegramIndicatorRow) -> Option<f64>| {
         SourceColumnData::Number(rows.iter().map(select).collect())
@@ -480,7 +624,11 @@ fn telegram_output_frame(
     ));
     columns.push((
         "gap_candidate_body_bottom".into(),
-        SourceColumnData::Number(rows.iter().map(|row| row.gap_candidate_body_bottom).collect()),
+        SourceColumnData::Number(
+            rows.iter()
+                .map(|row| row.gap_candidate_body_bottom)
+                .collect(),
+        ),
     ));
     columns.push((
         "gap_candidate_body_top".into(),
@@ -634,6 +782,12 @@ fn telegram_output_columns(outputs: &crate::memory::TelegramOutputConfig) -> Vec
         .map(|column| (*column).to_string())
         .collect::<Vec<_>>();
 
+    columns.extend(
+        ICHING_ENERGY_COLUMNS
+            .iter()
+            .map(|column| (*column).to_string()),
+    );
+
     if outputs.atr.active {
         columns.push("atr".to_string());
     }
@@ -720,9 +874,9 @@ fn sql_double(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_COLUMNS, TelegramIndicatorRow, TelegramIndicatorState, TelegramIndicators,
-        build_telegram_sql, child_prior, collect_telegram_rows, compute_telegram_frame,
-        indicator_periods, telegram_output_columns, telegram_output_frame,
+        BASE_COLUMNS, ICHING_ENERGY_COLUMNS, TelegramIndicatorRow, TelegramIndicatorState,
+        TelegramIndicators, build_telegram_sql, child_prior, collect_telegram_rows,
+        compute_telegram_frame, indicator_periods, telegram_output_columns, telegram_output_frame,
         telegram_select_expressions,
     };
     use crate::memory::{IndicatorConfig, ParamSpec};
@@ -735,7 +889,9 @@ mod tests {
     use algotrap::query::RawQuery;
     use algotrap::query::duckdb::DuckDBQuery;
     use algotrap::ta::ops::{GapCandidateInput, gap_candidate_facts};
-    use algotrap::ta::prelude::PriorState;
+    use algotrap::ta::prelude::{
+        BandPoint, Kernel, PriorState, band_reversion, band_reversion_percent, is_atr_gap,
+    };
     use futures::TryStreamExt;
     use std::collections::HashSet;
     use std::convert::Infallible;
@@ -846,6 +1002,19 @@ mod tests {
                 "\"time\"".to_string(),
                 "\"adj_close\"".to_string(),
                 "\"Date\"".to_string(),
+                "\"iching_original_energy\"".to_string(),
+                "\"iching_transformed_energy\"".to_string(),
+                "\"iching_mutual_energy\"".to_string(),
+                "\"iching_open\"".to_string(),
+                "\"iching_high\"".to_string(),
+                "\"iching_low\"".to_string(),
+                "\"iching_close\"".to_string(),
+                "\"iching_moving_line\"".to_string(),
+                "\"iching_transformed_close\"".to_string(),
+                "\"iching_mutual_close\"".to_string(),
+                "\"iching_mutual_high\"".to_string(),
+                "\"iching_mutual_low\"".to_string(),
+                "\"iching_mutual_mean\"".to_string(),
                 "\"atr\"".to_string(),
                 "\"rssi_ma\"".to_string(),
                 "\"atr_percent\"".to_string(),
@@ -934,10 +1103,10 @@ mod tests {
                     band,
                     gap,
                 )
-                    .await
-                    .unwrap()
-                    .pop()
-                    .unwrap()
+                .await
+                .unwrap()
+                .pop()
+                .unwrap()
             }
         };
 
@@ -1008,6 +1177,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregate_atr_reversion_uses_bias_signal_while_gap_uses_close_signal() {
+        let candles = klines();
+        let config = IndicatorConfig::default();
+        let periods = indicator_periods(&config.periods).unwrap();
+        let body_ratio_threshold = config.gap_zones.body_ratio_threshold.clamped();
+        let atr_band_multiplier = config.gap_zones.atr_band_multiplier.clamped();
+        let atr_gap_multiplier = config.gap_zones.atr_gap_multiplier.clamped();
+        let rows = collect_telegram_rows(
+            &candles,
+            periods,
+            body_ratio_threshold,
+            atr_band_multiplier,
+            atr_gap_multiplier,
+        )
+        .await
+        .unwrap();
+
+        let mut saw_out_of_band_bias_reversion = false;
+        let mut saw_in_band_bias_reversion = false;
+        for (position, (candle, row)) in candles.iter().zip(&rows).enumerate() {
+            let atr = row.atr.unwrap();
+            let bias_reversion = row.bias_reversion.unwrap();
+            let bias_point = BandPoint {
+                open: candle.open,
+                atr,
+                signal: bias_reversion,
+            };
+            let expected_percent = band_reversion_percent(atr_band_multiplier)
+                .transition(PriorState::Initial, &bias_point)
+                .unwrap()
+                .output
+                .unwrap();
+            let expected_reversion = band_reversion(atr_band_multiplier)
+                .transition(PriorState::Initial, &bias_point)
+                .unwrap()
+                .output
+                .unwrap();
+            assert_close(
+                row.atr_reversion_percent.unwrap(),
+                expected_percent,
+                "atr_reversion_percent must use bias_reversion",
+            );
+            assert_close(
+                row.band_reversion.unwrap(),
+                expected_reversion,
+                "band_reversion must use bias_reversion",
+            );
+
+            if expected_percent.abs() <= 1e-12 {
+                saw_in_band_bias_reversion = true;
+                assert_eq!(row.atr_reversion_percent, Some(0.0));
+                assert_eq!(row.band_reversion, Some(0.0));
+            } else {
+                saw_out_of_band_bias_reversion = true;
+                let open_signal_percent = band_reversion_percent(atr_band_multiplier)
+                    .transition(
+                        PriorState::Initial,
+                        &BandPoint {
+                            open: candle.open,
+                            atr,
+                            signal: candle.open,
+                        },
+                    )
+                    .unwrap()
+                    .output
+                    .unwrap();
+                assert_eq!(
+                    open_signal_percent, 0.0,
+                    "row {position} open signal is in-band"
+                );
+                assert!(
+                    row.atr_reversion_percent.unwrap().abs() > 1e-12,
+                    "row {position} bias signal must be distinguishably out-of-band"
+                );
+            }
+        }
+        assert!(
+            saw_in_band_bias_reversion,
+            "controlled candles must include an in-band bias reversion"
+        );
+        assert!(
+            saw_out_of_band_bias_reversion,
+            "controlled candles must include an out-of-band bias reversion"
+        );
+
+        let gap_candle = Kline {
+            open: 400.0,
+            high: 415.0,
+            low: 400.0,
+            close: 412.0,
+            volume: 1_000.0,
+            time: 1_700_000_000_000 + candles.len() as i64 * 60_000,
+            adjclose: None,
+        };
+        let mut gap_candles = candles;
+        gap_candles.push(gap_candle);
+        let gap_rows = collect_telegram_rows(
+            &gap_candles,
+            periods,
+            body_ratio_threshold,
+            atr_band_multiplier,
+            0.5,
+        )
+        .await
+        .unwrap();
+        let gap_row = gap_rows.last().unwrap();
+        let atr = gap_row.atr.unwrap();
+        let close_gap = is_atr_gap(0.5)
+            .transition(
+                PriorState::Initial,
+                &BandPoint {
+                    open: gap_candle.open,
+                    atr,
+                    signal: gap_candle.close,
+                },
+            )
+            .unwrap()
+            .output;
+        let open_gap = is_atr_gap(0.5)
+            .transition(
+                PriorState::Initial,
+                &BandPoint {
+                    open: gap_candle.open,
+                    atr,
+                    signal: gap_candle.open,
+                },
+            )
+            .unwrap()
+            .output;
+        assert_eq!(gap_row.is_atr_gap, close_gap);
+        assert_eq!(close_gap, Some(true));
+        assert_eq!(open_gap, Some(false));
+    }
+
+    #[tokio::test]
     async fn aggregate_rows_match_static_23_field_early_and_mature_fixtures() {
         let default_config = IndicatorConfig::default();
         let rows = collect_telegram_rows(
@@ -1065,8 +1369,8 @@ mod tests {
                 structure_power: Some(1.5),
                 structure_power_sma: Some(1.5),
                 atr_percent: Some(0.007_518_796_992_481_203),
-                atr_reversion_percent: Some(0.0),
-                band_reversion: Some(0.0),
+                atr_reversion_percent: Some(-13.308_611_454_470_85),
+                band_reversion: Some(-0.646),
                 sharpe: Some(1.505_290_731_575_520_2),
                 body_ratio: Some(0.166_666_666_666_666_66),
                 is_atr_gap: Some(false),
@@ -1146,12 +1450,12 @@ mod tests {
         let mut saw_qualifying = false;
         let mut saw_non_qualifying = false;
         for (position, (kline, row)) in supplied.iter().zip(&rows).enumerate() {
-            let body_ratio = row.body_ratio.unwrap_or_else(|| {
-                panic!("row {position} must preserve upstream body_ratio")
-            });
-            let is_atr_gap = row.is_atr_gap.unwrap_or_else(|| {
-                panic!("row {position} must preserve upstream is_atr_gap")
-            });
+            let body_ratio = row
+                .body_ratio
+                .unwrap_or_else(|| panic!("row {position} must preserve upstream body_ratio"));
+            let is_atr_gap = row
+                .is_atr_gap
+                .unwrap_or_else(|| panic!("row {position} must preserve upstream is_atr_gap"));
             let expected = gap_candidate_facts(GapCandidateInput {
                 open: kline.open,
                 close: kline.close,
@@ -1188,7 +1492,10 @@ mod tests {
             }
         }
         assert!(saw_qualifying, "fixture must include a qualifying row");
-        assert!(saw_non_qualifying, "fixture must include a non-qualifying row");
+        assert!(
+            saw_non_qualifying,
+            "fixture must include a non-qualifying row"
+        );
     }
 
     #[tokio::test]
@@ -1214,10 +1521,15 @@ mod tests {
         let periods = indicator_periods(&default_config.periods).unwrap();
         let default_band = default_config.gap_zones.atr_band_multiplier.clamped();
         let default_gap = default_config.gap_zones.atr_gap_multiplier.clamped();
-        let default_rows =
-            collect_telegram_rows(&candles, periods, default_threshold, default_band, default_gap)
-                .await
-                .unwrap();
+        let default_rows = collect_telegram_rows(
+            &candles,
+            periods,
+            default_threshold,
+            default_band,
+            default_gap,
+        )
+        .await
+        .unwrap();
         assert_eq!(default_rows.len(), candles.len());
         let default_tail = &default_rows[tail];
         let body_ratio = default_tail
@@ -1240,8 +1552,7 @@ mod tests {
         );
 
         let mut custom_config = IndicatorConfig::default();
-        custom_config.gap_zones.body_ratio_threshold =
-            ParamSpec::new(0.5, 0.0, 1.0);
+        custom_config.gap_zones.body_ratio_threshold = ParamSpec::new(0.5, 0.0, 1.0);
         let custom_threshold = custom_config.gap_zones.body_ratio_threshold.clamped();
         assert!(
             (custom_threshold - 0.5).abs() <= 1e-12,
@@ -1299,8 +1610,7 @@ mod tests {
             "0.6 must qualify under customized persisted 0.5"
         );
         assert_ne!(
-            default_tail.gap_candidate_qualifies,
-            custom_tail.gap_candidate_qualifies,
+            default_tail.gap_candidate_qualifies, custom_tail.gap_candidate_qualifies,
             "customized persisted threshold must flip tail qualifies"
         );
         assert_eq!(custom_tail.gap_candidate_body_bottom, Some(400.0));
@@ -1419,8 +1729,14 @@ mod tests {
         .await
         .unwrap();
         let position = candles.len() - 1;
-        let default_upper = default_frame.f64_at("atr_upperband", position).unwrap().unwrap();
-        let custom_upper = custom_frame.f64_at("atr_upperband", position).unwrap().unwrap();
+        let default_upper = default_frame
+            .f64_at("atr_upperband", position)
+            .unwrap()
+            .unwrap();
+        let custom_upper = custom_frame
+            .f64_at("atr_upperband", position)
+            .unwrap()
+            .unwrap();
         assert!(
             (default_upper - custom_upper).abs() > 1e-12,
             "compute_telegram_frame must thread persisted band multiplier"
@@ -1449,14 +1765,12 @@ mod tests {
             (default_gap - 1.0).abs() <= 1e-12,
             "persisted default gap must remain 1.0, got {default_gap}"
         );
-        let narrow_rows =
-            collect_telegram_rows(&candles, periods, threshold, band, 0.5)
-                .await
-                .unwrap();
-        let wide_rows =
-            collect_telegram_rows(&candles, periods, threshold, band, 5.0)
-                .await
-                .unwrap();
+        let narrow_rows = collect_telegram_rows(&candles, periods, threshold, band, 0.5)
+            .await
+            .unwrap();
+        let wide_rows = collect_telegram_rows(&candles, periods, threshold, band, 5.0)
+            .await
+            .unwrap();
         assert_eq!(narrow_rows.len(), candles.len());
         assert_eq!(wide_rows.len(), candles.len());
         let narrow_tail = &narrow_rows[tail];
@@ -1699,6 +2013,19 @@ mod tests {
                 "volume",
                 "time",
                 "adj_close",
+                "iching_original_energy",
+                "iching_transformed_energy",
+                "iching_mutual_energy",
+                "iching_open",
+                "iching_high",
+                "iching_low",
+                "iching_close",
+                "iching_moving_line",
+                "iching_transformed_close",
+                "iching_mutual_close",
+                "iching_mutual_high",
+                "iching_mutual_low",
+                "iching_mutual_mean",
                 "gap_candidate_qualifies",
                 "gap_candidate_body_bottom",
                 "gap_candidate_body_top",
@@ -1749,7 +2076,7 @@ mod tests {
 
     #[test]
     fn source_frame_preserves_raw_source_fields_at_each_position() {
-        for length in [1, 3] {
+        for length in [2, 3] {
             let mut candles = klines()[..length].to_vec();
             if length > 1 {
                 candles[0].adjclose = Some(candles[0].open + 0.25);
@@ -1762,7 +2089,15 @@ mod tests {
             assert_eq!(frame.len(), length);
             assert_eq!(
                 &frame.column_names()[..7],
-                &["open", "high", "low", "close", "volume", "time", "adj_close"]
+                &[
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "time",
+                    "adj_close"
+                ]
             );
             let SourceColumnData::Number(adj_close) = frame.column("adj_close").unwrap() else {
                 panic!("adj_close must be Number");
@@ -1793,14 +2128,26 @@ mod tests {
         let default_config = IndicatorConfig::default();
         let inactive_config = only_active_outputs(&[]);
         let leverage_config = only_active_outputs(&["leverage"]);
-        let candles = &klines()[..1];
+        let candles = &klines()[..2];
 
-        let default_frame =
-            telegram_output_frame(vec![sample_row()], candles, &default_config.outputs).unwrap();
-        let inactive_frame =
-            telegram_output_frame(vec![sample_row()], candles, &inactive_config.outputs).unwrap();
-        let leverage_frame =
-            telegram_output_frame(vec![sample_row()], candles, &leverage_config.outputs).unwrap();
+        let default_frame = telegram_output_frame(
+            vec![sample_row(), sample_row()],
+            candles,
+            &default_config.outputs,
+        )
+        .unwrap();
+        let inactive_frame = telegram_output_frame(
+            vec![sample_row(), sample_row()],
+            candles,
+            &inactive_config.outputs,
+        )
+        .unwrap();
+        let leverage_frame = telegram_output_frame(
+            vec![sample_row(), sample_row()],
+            candles,
+            &leverage_config.outputs,
+        )
+        .unwrap();
 
         let default_names = vec![
             "open",
@@ -1810,6 +2157,19 @@ mod tests {
             "volume",
             "time",
             "adj_close",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_mutual_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "atr",
             "volume_sma",
             "ema200",
@@ -1842,6 +2202,19 @@ mod tests {
             "volume",
             "time",
             "adj_close",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_mutual_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
             "gap_candidate_body_top",
@@ -1855,6 +2228,19 @@ mod tests {
             "volume",
             "time",
             "adj_close",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_mutual_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "__leverage_atr",
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
@@ -1871,9 +2257,9 @@ mod tests {
         assert_eq!(default_frame.column_names(), default_names);
         assert_eq!(inactive_frame.column_names(), inactive_names);
         assert_eq!(leverage_frame.column_names(), leverage_names);
-        assert_eq!(default_frame.len(), 1);
-        assert_eq!(inactive_frame.len(), 1);
-        assert_eq!(leverage_frame.len(), 1);
+        assert_eq!(default_frame.len(), 2);
+        assert_eq!(inactive_frame.len(), 2);
+        assert_eq!(leverage_frame.len(), 2);
 
         for frame in [&default_frame, &inactive_frame, &leverage_frame] {
             let names = frame.column_names();
@@ -1928,6 +2314,19 @@ mod tests {
             "volume",
             "time",
             "adj_close",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_mutual_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "atr",
             "volume_sma",
             "ema200",
@@ -1960,6 +2359,19 @@ mod tests {
             "volume",
             "time",
             "adj_close",
+            "iching_original_energy",
+            "iching_transformed_energy",
+            "iching_mutual_energy",
+            "iching_open",
+            "iching_high",
+            "iching_low",
+            "iching_close",
+            "iching_moving_line",
+            "iching_transformed_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
             "gap_candidate_body_top",
@@ -1993,9 +2405,9 @@ mod tests {
 
     #[test]
     fn private_leverage_atr_is_added_only_to_the_source_frame_when_required() {
-        let candles = &klines()[..1];
+        let candles = &klines()[..2];
         let hidden_atr = telegram_output_frame(
-            vec![sample_row()],
+            vec![sample_row(), sample_row()],
             candles,
             &only_active_outputs(&["leverage"]).outputs,
         )
@@ -2007,7 +2419,7 @@ mod tests {
         assert!(!hidden_atr.column_names().contains(&"atr"));
 
         let visible_atr = telegram_output_frame(
-            vec![sample_row()],
+            vec![sample_row(), sample_row()],
             candles,
             &only_active_outputs(&["atr", "leverage"]).outputs,
         )
@@ -2016,7 +2428,7 @@ mod tests {
         assert!(visible_atr.column("__leverage_atr").is_none());
 
         let inactive_leverage = telegram_output_frame(
-            vec![sample_row()],
+            vec![sample_row(), sample_row()],
             candles,
             &only_active_outputs(&["atr"]).outputs,
         )
@@ -2051,7 +2463,9 @@ mod tests {
             let mut row = sample_row();
             row.atr = atr;
             let config = only_active_outputs(&["leverage"]);
-            let source = telegram_output_frame(vec![row], &klines()[..1], &config.outputs).unwrap();
+            let source =
+                telegram_output_frame(vec![row, sample_row()], &klines()[..2], &config.outputs)
+                    .unwrap();
 
             assert!(source.has_column("__leverage_atr"));
             assert!(!source.has_column("atr"));
@@ -2093,8 +2507,8 @@ mod tests {
         let error = DuckDBQuery::new()
             .project(
                 telegram_output_frame(
-                    vec![sample_row()],
-                    &klines()[..1],
+                    vec![sample_row(), sample_row()],
+                    &klines()[..2],
                     &only_active_outputs(&[]).outputs,
                 )
                 .unwrap(),
@@ -2213,13 +2627,12 @@ mod tests {
         let body_ratio_threshold = config.gap_zones.body_ratio_threshold.clamped();
         let atr_band_multiplier = config.gap_zones.atr_band_multiplier.clamped();
         let atr_gap_multiplier = config.gap_zones.atr_gap_multiplier.clamped();
-        let mut processor =
-            algotrap::ta::prelude::Processor::new(TelegramIndicators::new(
-                periods,
-                body_ratio_threshold,
-                atr_band_multiplier,
-                atr_gap_multiplier,
-            ));
+        let mut processor = algotrap::ta::prelude::Processor::new(TelegramIndicators::new(
+            periods,
+            body_ratio_threshold,
+            atr_band_multiplier,
+            atr_gap_multiplier,
+        ));
 
         for kline in klines().iter().take(3) {
             let row = processor.process(kline).unwrap();
@@ -2236,13 +2649,12 @@ mod tests {
         let body_ratio_threshold = config.gap_zones.body_ratio_threshold.clamped();
         let atr_band_multiplier = config.gap_zones.atr_band_multiplier.clamped();
         let atr_gap_multiplier = config.gap_zones.atr_gap_multiplier.clamped();
-        let mut processor =
-            algotrap::ta::prelude::Processor::new(TelegramIndicators::new(
-                periods,
-                body_ratio_threshold,
-                atr_band_multiplier,
-                atr_gap_multiplier,
-            ));
+        let mut processor = algotrap::ta::prelude::Processor::new(TelegramIndicators::new(
+            periods,
+            body_ratio_threshold,
+            atr_band_multiplier,
+            atr_gap_multiplier,
+        ));
         let row = processor.process(&klines()[0]).unwrap();
 
         assert!(row.atr.is_some());
@@ -2548,43 +2960,43 @@ mod tests {
             atr_reversion_percent,
             band_reversion,
             sharpe,
-                body_ratio,
-                is_atr_gap,
-                gap_candidate_qualifies,
-                gap_candidate_body_bottom,
-                gap_candidate_body_top,
-                gap_candidate_direction,
-                ..
-            } = row;
-            for (name, value) in [
-                ("atr", atr.unwrap()),
-                ("volume_sma", volume_sma.unwrap()),
-                ("ema200", ema200.unwrap()),
-                ("bias_reversion", bias_reversion.unwrap()),
-                ("neutral_revrsi", neutral_revrsi.unwrap()),
-                ("bullish_revrsi", bullish_revrsi.unwrap()),
-                ("bearish_revrsi", bearish_revrsi.unwrap()),
-                ("atr_upperband", atr_upperband.unwrap()),
-                ("atr_lowerband", atr_lowerband.unwrap()),
-                ("rssi", rssi.unwrap()),
-                ("rssi_ma", rssi_ma.unwrap()),
-                ("structure_power", structure_power.unwrap()),
-                ("structure_power_sma", structure_power_sma.unwrap()),
-                ("atr_percent", atr_percent.unwrap()),
-                ("atr_reversion_percent", atr_reversion_percent.unwrap()),
-                ("band_reversion", band_reversion.unwrap()),
-                ("sharpe", sharpe.unwrap()),
-                ("body_ratio", body_ratio.unwrap()),
-            ] {
-                assert!(value.is_finite(), "{name} must be finite");
-            }
-            assert!(is_atr_gap.is_some());
-            let _ = (
-                gap_candidate_qualifies,
-                gap_candidate_body_bottom,
-                gap_candidate_body_top,
-                gap_candidate_direction,
-            );
+            body_ratio,
+            is_atr_gap,
+            gap_candidate_qualifies,
+            gap_candidate_body_bottom,
+            gap_candidate_body_top,
+            gap_candidate_direction,
+            ..
+        } = row;
+        for (name, value) in [
+            ("atr", atr.unwrap()),
+            ("volume_sma", volume_sma.unwrap()),
+            ("ema200", ema200.unwrap()),
+            ("bias_reversion", bias_reversion.unwrap()),
+            ("neutral_revrsi", neutral_revrsi.unwrap()),
+            ("bullish_revrsi", bullish_revrsi.unwrap()),
+            ("bearish_revrsi", bearish_revrsi.unwrap()),
+            ("atr_upperband", atr_upperband.unwrap()),
+            ("atr_lowerband", atr_lowerband.unwrap()),
+            ("rssi", rssi.unwrap()),
+            ("rssi_ma", rssi_ma.unwrap()),
+            ("structure_power", structure_power.unwrap()),
+            ("structure_power_sma", structure_power_sma.unwrap()),
+            ("atr_percent", atr_percent.unwrap()),
+            ("atr_reversion_percent", atr_reversion_percent.unwrap()),
+            ("band_reversion", band_reversion.unwrap()),
+            ("sharpe", sharpe.unwrap()),
+            ("body_ratio", body_ratio.unwrap()),
+        ] {
+            assert!(value.is_finite(), "{name} must be finite");
+        }
+        assert!(is_atr_gap.is_some());
+        let _ = (
+            gap_candidate_qualifies,
+            gap_candidate_body_bottom,
+            gap_candidate_body_top,
+            gap_candidate_direction,
+        );
     }
 
     fn sample_row() -> TelegramIndicatorRow {
@@ -2619,6 +3031,11 @@ mod tests {
         BASE_COLUMNS
             .iter()
             .map(|column| (*column).to_string())
+            .chain(
+                ICHING_ENERGY_COLUMNS
+                    .iter()
+                    .map(|column| (*column).to_string()),
+            )
             .chain(active_outputs.iter().map(|column| (*column).to_string()))
             .collect()
     }

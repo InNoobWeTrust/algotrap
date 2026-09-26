@@ -12,6 +12,8 @@ COPY bins/etf_dashboard/Cargo.toml ./bins/etf_dashboard/Cargo.toml
 COPY bins/etf_dashboard/src ./bins/etf_dashboard/src
 COPY bins/telegrambot/Cargo.toml ./bins/telegrambot/Cargo.toml
 COPY bins/telegrambot/src ./bins/telegrambot/src
+COPY bins/chartlib/Cargo.toml ./bins/chartlib/Cargo.toml
+COPY bins/chartlib/src ./bins/chartlib/src
 COPY bins/cryptobot/Cargo.toml ./bins/cryptobot/Cargo.toml
 COPY bins/cryptobot/src ./bins/cryptobot/src
 
@@ -42,6 +44,8 @@ COPY bins/etf_dashboard/Cargo.toml ./bins/etf_dashboard/Cargo.toml
 COPY bins/etf_dashboard/src ./bins/etf_dashboard/src
 COPY bins/telegrambot/Cargo.toml ./bins/telegrambot/Cargo.toml
 COPY bins/telegrambot/src ./bins/telegrambot/src
+COPY bins/chartlib/Cargo.toml ./bins/chartlib/Cargo.toml
+COPY bins/chartlib/src ./bins/chartlib/src
 COPY bins/cryptobot/Cargo.toml ./bins/cryptobot/Cargo.toml
 COPY bins/cryptobot/src ./bins/cryptobot/src
 

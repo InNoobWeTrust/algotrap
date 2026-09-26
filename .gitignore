@@ -1,7 +1,7 @@
 /target
 .DS_Store
 .bacon-locations
-*.html
+/*.html
 *.log
 **/output/
 .env

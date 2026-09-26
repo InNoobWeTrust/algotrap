@@ -552,24 +552,15 @@ async fn capture_ticker_charts(
             Some(df) => df,
             None => continue,
         };
-        let last_rssi = telegrambot::chart::last_rssi_from_df(df.as_ref());
-        let rssi_tint = telegrambot::chart::rssi_tint_class(last_rssi);
-        let gap_zones_json = telegrambot::chart::gap_zones_to_chart_json(
-            gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]),
-        );
-        let chart_html = match telegrambot::chart::render_single_tf_chart_html(
-            tf,
-            df.as_ref(),
-            ticker,
-            &gap_zones_json,
-            rssi_tint,
-        ) {
-            Ok(html) => html,
-            Err(e) => {
-                error!(tf = %tf_label, "Failed to render chart: {e:#}");
-                continue;
-            }
-        };
+        let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
+        let chart_html =
+            match telegrambot::chart::render_single_tf_chart_html(tf, df.as_ref(), ticker, zones) {
+                Ok(html) => html,
+                Err(e) => {
+                    error!(tf = %tf_label, "Failed to render chart: {e:#}");
+                    continue;
+                }
+            };
         match telegrambot::browserless::capture_chart_screenshot(&chart_html, &conf.browserless_url)
             .await
         {
@@ -675,6 +666,16 @@ mod tests {
 
         fn columns(&self) -> Vec<String> {
             vec!["time".into(), "high".into(), "low".into()]
+        }
+
+        fn column_dtypes(&self) -> Vec<(String, algotrap::engine::traits::ColumnDType)> {
+            use algotrap::engine::traits::ColumnDType;
+
+            vec![
+                ("time".into(), ColumnDType::Number),
+                ("high".into(), ColumnDType::Number),
+                ("low".into(), ColumnDType::Number),
+            ]
         }
 
         fn slice_last(

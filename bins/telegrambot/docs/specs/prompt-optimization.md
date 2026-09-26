@@ -102,7 +102,7 @@ Valid ranges are `[1, 32]`, `[0.0, 1.0]`, `[0.5, 5.0]`, and `[0.5, 5.0]` respect
 - Add `reasoning_effort: high` under `litellm_params` for gpt-5-mini model
 - Add `max_completion_tokens: 4096` (or appropriate cap)
 
-### Prompt template (`config/prompts/system_adaptive.txt`)
+### Prompt template (`config/prompts/system_alert.txt`)
 
 - Compress JSON template from 38 to ~10 lines
 - Merge Weight rules + Indicator Tuning sections

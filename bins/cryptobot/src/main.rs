@@ -1,24 +1,23 @@
 use core::error::Error;
 use core::time::Duration;
+use std::collections::{BTreeMap, HashMap};
+
+use chartlib::{
+    ChartRegistry, InteractiveDataset, REGISTRY_SCHEMA_VERSION, RegistryEntryMeta,
+    render_interactive_html, validate_interactive_dataset,
+};
 use dotenv::dotenv;
 use futures::future::join_all;
-use minijinja::render;
-use rayon::prelude::*;
 use serde::Deserialize;
-use serde_json::Value;
-use std::collections::HashMap;
 
-use algotrap::engine::error::MarketError;
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::engine::validation::ValidatedTicker;
-use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
 use algotrap::ext::bingx::MAX_LIMIT;
 use algotrap::prelude::*;
+use algotrap::query::gap_zones::GapZoneRecord;
 use algotrap::time_utils::next_close_across_tfs;
 
 mod presentation;
-
-// ─── Per-Ticker Config ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
 struct TickerConf {
@@ -26,63 +25,48 @@ struct TickerConf {
     sl_percent: f64,
     tol_percent: f64,
     default_tf: Timeframe,
-    // Signal-only fields are ignored if present in existing TICKERS JSON.
-    // Serde silently drops unknown fields by default.
 }
-
-// ─── Global Config ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
 struct EnvConf {
     #[serde(deserialize_with = "deserialize_tickers")]
     tickers: Vec<TickerConf>,
     #[serde(deserialize_with = "deserialize_tfs")]
-    chart_tfs: Vec<Timeframe>, // shared chart display TFs
+    chart_tfs: Vec<Timeframe>,
     #[serde(default = "default_scan_interval")]
-    scan_interval_secs: u64, // only used in --loop mode
+    scan_interval_secs: u64,
     #[serde(default = "default_timeout_secs")]
-    timeout_secs: u64, // per-request timeout
+    timeout_secs: u64,
 }
 
-// ─── Serde helpers ───────────────────────────────────────────────────────────
-
-/// Deserialize `TICKERS` env var: a JSON array of TickerConf objects.
 fn deserialize_tickers<'de, D>(deserializer: D) -> Result<Vec<TickerConf>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let s = String::deserialize(deserializer)?;
-    let s = s.trim();
-    if s.is_empty() {
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
         return Err(serde::de::Error::custom(
             "TICKERS is required and must not be empty",
         ));
     }
-
-    serde_json::from_str(s).map_err(|json_err| {
-        serde::de::Error::custom(format!("failed to parse TICKERS as JSON: {json_err}"))
+    serde_json::from_str(&value).map_err(|error| {
+        serde::de::Error::custom(format!("failed to parse TICKERS as JSON: {error}"))
     })
 }
 
-/// Deserialize comma-separated timeframes (required field).
 fn deserialize_tfs<'de, D>(deserializer: D) -> Result<Vec<Timeframe>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let s = String::deserialize(deserializer)?;
-    let s = s.trim();
-    if s.is_empty() {
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
         return Err(serde::de::Error::custom(
             "CHART_TFS is required and must not be empty",
         ));
     }
-
-    s.split(',')
-        .map(|tf| {
-            tf.trim()
-                .parse::<Timeframe>()
-                .map_err(serde::de::Error::custom)
-        })
+    value
+        .split(',')
+        .map(|timeframe| timeframe.trim().parse().map_err(serde::de::Error::custom))
         .collect()
 }
 
@@ -100,14 +84,12 @@ fn require_non_empty_env(name: &str) -> Result<(), Box<dyn Error + Send + Sync>>
 }
 
 fn default_scan_interval() -> u64 {
-    900 // 15 minutes (used only in --loop mode)
+    900
 }
 
 fn default_timeout_secs() -> u64 {
     10
 }
-
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -115,952 +97,283 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     require_non_empty_env("TICKERS")?;
     require_non_empty_env("CHART_TFS")?;
     let conf: EnvConf = envy::from_env()?;
+    let loop_mode = std::env::args().any(|argument| argument == "--loop");
 
-    // --loop flag: re-enables the scheduled loop (e.g. for local/K8s use).
-    // Default behavior is one-shot: run once and exit (used by GH Actions cron).
-    let loop_mode = std::env::args().any(|a| a == "--loop");
-
-    eprintln!(
-        "Starting cryptobot — {} tickers, chart_tfs={:?}, mode={}",
-        conf.tickers.len(),
-        conf.chart_tfs,
-        if loop_mode { "loop" } else { "one-shot" },
-    );
-    for tc in &conf.tickers {
-        eprintln!("  ticker: {} (default_tf={})", tc.symbol, tc.default_tf);
-    }
-
-    eprintln!("─── Scan cycle start ───");
-    match run_cycle(&conf).await {
-        Ok(()) => eprintln!("─── Scan cycle complete ───"),
-        Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
-    }
-
-    if !loop_mode {
-        return Ok(());
-    }
-
-    // ─── Loop mode: re-run aligned to chart TF candle closes ─────────────────
-    // Lead time: wake this many seconds BEFORE candle close so data is fresh.
-    const LEAD_SECS: u64 = 5;
     loop {
-        let now = chrono::Utc::now();
-        let max_interval = Duration::from_secs(conf.scan_interval_secs);
-        let sleep_dur = match next_close_across_tfs(&conf.chart_tfs, now) {
-            Some((secs_until, tf)) => {
-                let target = secs_until.saturating_sub(LEAD_SECS);
-                let capped = target.min(max_interval.as_secs());
-                let dur = Duration::from_secs(capped.max(10)); // floor: 10s minimum
-                eprintln!(
-                    "Next close: {} in {}s — sleeping {:.0}s (lead={}s)",
-                    tf,
-                    secs_until,
-                    dur.as_secs_f64(),
-                    LEAD_SECS,
-                );
-                dur
-            }
-            None => {
-                eprintln!(
-                    "No upcoming close found — sleeping {}s",
-                    max_interval.as_secs()
-                );
-                max_interval
-            }
-        };
-        tokio::time::sleep(sleep_dur).await;
-
-        eprintln!("─── Scan cycle start ───");
-        match run_cycle(&conf).await {
-            Ok(()) => eprintln!("─── Scan cycle complete ───"),
-            Err(e) => eprintln!("─── Scan cycle failed: {e:#} ───"),
+        if let Err(error) = run_cycle(&conf).await {
+            eprintln!("Cryptobot scan cycle failed: {error:#}");
         }
+        if !loop_mode {
+            return Ok(());
+        }
+        let maximum = Duration::from_secs(conf.scan_interval_secs);
+        let delay = next_close_across_tfs(&conf.chart_tfs, chrono::Utc::now())
+            .map(|(seconds, _)| Duration::from_secs(seconds.saturating_sub(5).max(10)))
+            .unwrap_or(maximum)
+            .min(maximum);
+        tokio::time::sleep(delay).await;
     }
 }
 
-// ─── Scan Cycle ──────────────────────────────────────────────────────────────
+struct InteractivePublication {
+    registry: ChartRegistry,
+    datasets: BTreeMap<String, serde_json::Value>,
+}
 
 async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = ext::bingx::BingXClient::default();
     let timeout = Duration::from_secs(conf.timeout_secs);
+    let mut candidates = Vec::new();
 
-    // Prepare output directory
-    let output_dir = std::path::Path::new("output");
-    let data_dir = output_dir.join("data");
-    tokio::fs::create_dir_all(&data_dir).await?;
-
-    // Collect ticker metadata for the HTML template
-    let mut tickers_meta: Vec<TickerMeta> = Vec::new();
-
-    // Process each ticker
     for ticker in &conf.tickers {
         eprintln!("Processing {}...", ticker.symbol);
-
-        let result = tokio::time::timeout(
-            timeout * conf.chart_tfs.len() as u32, // scale timeout by number of TFs
+        match tokio::time::timeout(
+            timeout * conf.chart_tfs.len() as u32,
             process_ticker(ticker, &conf.chart_tfs, &client),
         )
-        .await;
-
-        match result {
-            Ok(Ok(chart_json)) => {
-                // Write chart data JSON
-                let json_path = data_dir.join(format!("{}.json", ticker.symbol));
-                tokio::fs::write(&json_path, &chart_json).await?;
-                eprintln!(
-                    "  Wrote {} ({} bytes)",
-                    json_path.display(),
-                    chart_json.len()
-                );
-
-                tickers_meta.push(TickerMeta {
-                    symbol: ticker.symbol.clone(),
-                    sl_percent: format!("{:.0}", ticker.sl_percent * 100.),
-                    tol_percent: format!("{:.2}", ticker.tol_percent * 100.),
-                    default_tf: ticker.default_tf.to_string(),
-                });
+        .await
+        {
+            Ok(Ok(datasets)) if !datasets.is_empty() => {
+                candidates.push((ticker_meta(ticker), datasets))
             }
-            Ok(Err(e)) => {
-                eprintln!("  Error processing {}: {e:#}", ticker.symbol);
-            }
-            Err(_) => {
-                eprintln!("  Timeout processing {}", ticker.symbol);
-            }
+            Ok(Ok(_)) => eprintln!("  No usable chart data for {}", ticker.symbol),
+            Ok(Err(error)) => eprintln!("  Error processing {}: {error:#}", ticker.symbol),
+            Err(_) => eprintln!("  Timeout processing {}", ticker.symbol),
         }
     }
 
-    // Render index.html (no data embedded — data loaded via fetch from same origin)
-    let tickers_json = serde_json::to_string(&tickers_meta)?;
-    let chart_tfs_json = serde_json::to_string(&conf.chart_tfs)?;
-    let html = render_tdv_html(&tickers_json, &chart_tfs_json);
-    let html_path = output_dir.join("index.html");
-    tokio::fs::write(&html_path, &html).await?;
-    eprintln!("Wrote {}", html_path.display());
-
-    // Upload to R2 is handled by the GH Actions workflow (wrangler r2 object put).
-    // Nothing to do here — just write output/ and exit.
-
-    Ok(())
+    let chart_tfs = conf.chart_tfs.iter().map(ToString::to_string).collect();
+    let publication = build_interactive_publication(candidates, chart_tfs)?;
+    write_interactive_publication(std::path::Path::new("output"), &publication).await
 }
 
-// ─── Per-Ticker Processing ───────────────────────────────────────────────────
+fn ticker_meta(ticker: &TickerConf) -> RegistryEntryMeta {
+    RegistryEntryMeta {
+        symbol: ticker.symbol.clone(),
+        sl_percent: format!("{:.0}", ticker.sl_percent * 100.0),
+        tol_percent: format!("{:.2}", ticker.tol_percent * 100.0),
+        default_tf: ticker.default_tf.to_string(),
+    }
+}
 
 async fn process_ticker(
     ticker: &TickerConf,
     chart_tfs: &[Timeframe],
     client: &ext::bingx::BingXClient,
-) -> Result<String, Box<dyn Error + Send + Sync>> {
-    // Fetch all chart TFs concurrently
-    let mut chart_tfs_ordered = Vec::with_capacity(chart_tfs.len());
+) -> Result<Vec<InteractiveDataset>, Box<dyn Error + Send + Sync>> {
+    let mut ordered = Vec::with_capacity(chart_tfs.len());
     for timeframe in chart_tfs {
-        if !chart_tfs_ordered.contains(timeframe) {
-            chart_tfs_ordered.push(*timeframe);
+        if !ordered.contains(timeframe) {
+            ordered.push(*timeframe);
         }
     }
+    let fetched = join_all(ordered.iter().map(|timeframe| {
+        let symbol = ticker.symbol.clone();
+        async move {
+            client
+                .get_futures_klines(&symbol, &timeframe.to_string(), MAX_LIMIT)
+                .await
+                .map(|klines| (*timeframe, klines))
+        }
+    }))
+    .await
+    .into_iter()
+    .filter_map(|result| match result {
+        Ok(frame) => Some(frame),
+        Err(error) => {
+            eprintln!("  Error fetching {}: {error:#?}", ticker.symbol);
+            None
+        }
+    })
+    .collect();
+    let mut frames = compute_crypto_frames(fetched, ticker).await;
+    let display_symbol = format!("BingX:{}", ticker.symbol);
 
-    let fetched = join_all(
-        chart_tfs_ordered
-            .iter()
-            .map(|tf| {
-                let symbol = ticker.symbol.clone();
-                async move {
-                    client
-                        .get_futures_klines(&symbol, &tf.to_string(), MAX_LIMIT)
-                        .await
-                        .map(|k| (*tf, k))
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
-    .await;
-    let fetched = fetched
+    Ok(ordered
         .into_iter()
-        .filter_map(|res| match res {
-            Ok(frame) => Some(frame),
-            Err(err) => {
-                eprintln!("  Error fetching {}: {err:#?}", ticker.symbol);
-                None
+        .filter_map(|timeframe| {
+            let (frame, zones) = frames.remove(&timeframe)?;
+            match presentation::adapt_chartlib_dataset(
+                &ticker.symbol,
+                &timeframe.to_string(),
+                &display_symbol,
+                frame.as_ref(),
+                &zones,
+            ) {
+                Ok(dataset) => Some(dataset),
+                Err(error) => {
+                    eprintln!(
+                        "  Error adapting {} {}: {error:#}",
+                        ticker.symbol, timeframe
+                    );
+                    None
+                }
             }
         })
-        .collect();
-    let all_dfs = compute_crypto_frames(fetched, ticker).await;
-
-    // Serialize all fetched TFs to JSON for the chart
-    let chart_dfs_serialized: HashMap<String, Value> = all_dfs
-        .par_iter()
-        .map(|(tf, (df, zones))| {
-            let records = df.to_json_records()?;
-            let candles_json = serde_json::Value::Array(
-                records.into_iter().map(serde_json::Value::Object).collect(),
-            );
-            let gap_zones_json = serde_json::Value::Array(
-                zones.iter().map(gap_zone_to_json).collect(),
-            );
-            let tf_json = serde_json::json!({
-                "candles": candles_json,
-                "gapZones": gap_zones_json,
-            });
-            Ok::<_, MarketError>((tf.to_string(), tf_json))
-        })
-        .collect::<Result<HashMap<_, _>, MarketError>>()?;
-    let chart_json = serde_json::to_string(&chart_dfs_serialized)?;
-
-    Ok(chart_json)
+        .collect())
 }
 
 async fn compute_crypto_frames(
     fetched: Vec<(Timeframe, Vec<Kline>)>,
     ticker: &TickerConf,
 ) -> HashMap<Timeframe, (Box<dyn ComputedFrame>, Vec<GapZoneRecord>)> {
-    let validated_ticker =
+    let validated =
         match ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent) {
-            Ok(validated_ticker) => validated_ticker,
-            Err(err) => {
-                for (timeframe, _) in fetched {
-                    eprintln!(
-                        "  Error computing indicators for {} {}: {err:#}",
-                        ticker.symbol, timeframe
-                    );
-                }
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("  Invalid ticker {}: {error:#}", ticker.symbol);
                 return HashMap::new();
             }
         };
-
-    let computations = fetched.into_iter().map(|(timeframe, klines)| {
-        let validated_ticker = validated_ticker.clone();
+    join_all(fetched.into_iter().map(|(timeframe, klines)| {
+        let validated = validated.clone();
         async move {
             (
                 timeframe,
-                presentation::compute_crypto_frame(klines, validated_ticker).await,
+                presentation::compute_crypto_frame(klines, validated).await,
             )
         }
-    });
-
-    join_all(computations)
-        .await
-        .into_iter()
-        .filter_map(|(timeframe, result)| match result {
-            Ok(frame) => Some((timeframe, frame)),
-            Err(err) => {
-                eprintln!(
-                    "  Error computing indicators for {} {}: {err:#}",
-                    ticker.symbol, timeframe
-                );
-                None
-            }
-        })
-        .collect()
+    }))
+    .await
+    .into_iter()
+    .filter_map(|(timeframe, result)| match result {
+        Ok(frame) => Some((timeframe, frame)),
+        Err(error) => {
+            eprintln!(
+                "  Error computing {} {}: {error:#}",
+                ticker.symbol, timeframe
+            );
+            None
+        }
+    })
+    .collect()
 }
 
-fn gap_zone_to_json(zone: &GapZoneRecord) -> Value {
-    serde_json::json!({
-        "time_ms": zone.time_ms,
-        "open": zone.open,
-        "high": zone.high,
-        "low": zone.low,
-        "close": zone.close,
-        "volume": zone.volume,
-        "body_bottom": zone.body_bottom,
-        "body_top": zone.body_top,
-        "body_ratio": zone.body_ratio,
-        "direction": match zone.direction {
-            GapZoneDirection::Bullish => "bullish",
-            GapZoneDirection::Bearish => "bearish",
-            GapZoneDirection::Flat => "flat",
+fn build_interactive_publication(
+    candidates: Vec<(RegistryEntryMeta, Vec<InteractiveDataset>)>,
+    chart_tfs: Vec<String>,
+) -> Result<InteractivePublication, Box<dyn Error + Send + Sync>> {
+    let mut tickers = Vec::new();
+    let mut datasets = BTreeMap::new();
+    for (ticker, datasets_for_ticker) in candidates {
+        let mut timeframes = BTreeMap::new();
+        for dataset in datasets_for_ticker {
+            validate_interactive_dataset(&dataset)?;
+            let payload = serde_json::json!({
+                "candles": dataset.records,
+                "gapZones": dataset.gap_zones.iter().map(chartlib::gap_zone_to_json).collect::<Vec<_>>(),
+            });
+            timeframes.insert(dataset.key.timeframe, payload);
+        }
+        if !timeframes.is_empty() {
+            datasets.insert(ticker.symbol.clone(), serde_json::to_value(timeframes)?);
+            tickers.push(ticker);
+        }
+    }
+    if tickers.is_empty() {
+        return Err("no valid chart datasets to publish".into());
+    }
+    Ok(InteractivePublication {
+        registry: ChartRegistry {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            tickers: serde_json::to_value(tickers)?,
+            chart_tfs: serde_json::to_value(chart_tfs)?,
         },
+        datasets,
     })
 }
 
-// ─── Ticker metadata for HTML template ───────────────────────────────────────
-
-#[derive(Debug, serde::Serialize)]
-struct TickerMeta {
-    symbol: String,
-    sl_percent: String,
-    tol_percent: String,
-    default_tf: String,
+async fn write_interactive_publication(
+    output_dir: &std::path::Path,
+    publication: &InteractivePublication,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let data_dir = output_dir.join("data");
+    tokio::fs::create_dir_all(&data_dir).await?;
+    for (symbol, dataset) in &publication.datasets {
+        let path = data_dir.join(format!("{symbol}.json"));
+        tokio::fs::write(&path, serde_json::to_string(dataset)?).await?;
+        eprintln!("  Wrote {}", path.display());
+    }
+    let html = render_interactive_html(&publication.registry)?;
+    let index = output_dir.join("index.html");
+    tokio::fs::write(&index, html).await?;
+    eprintln!("Wrote {}", index.display());
+    Ok(())
 }
-
-fn render_tdv_html(tickers_json: &str, chart_tfs_json: &str) -> String {
-    render!(
-        TDV_HTML_TEMPLATE,
-        tickers_json => tickers_json,
-        chart_tfs => chart_tfs_json,
-    )
-    .trim()
-    .to_string()
-}
-
-const TDV_HTML_TEMPLATE: &str = r#"
-<!DOCTYPE html>
-<html class="sl-theme-dark" style="font-size: 22px">
-  <head>
-    <meta charset="utf-8" />
-    <title>InNoobWeTrust™ CryptoBot</title>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
-    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
-    <style>
-        html, body {
-            height: 100%;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            min-height: 100%;
-            box-sizing: border-box;
-        }
-
-        #container {
-            height: 100%;
-        }
-        #container.rssi-bullish {
-            background: rgba(76,175,80,0.05);
-        }
-        #container.rssi-bearish {
-            background: rgba(242,54,69,0.05);
-        }
-
-        #overlay {
-            position: absolute;
-            top: 2.5%;
-            left: 2%;
-            z-index: 9999;
-        }
-        #ticker-select {
-            min-width: 200px;
-            margin-bottom: 0.25rem;
-        }
-        #tf-btns {
-            display: inline-block;
-        }
-        #fullscreen-btn {
-            position: absolute;
-            bottom: 15px;
-            left: -6px;
-            z-index: 9999;
-            font-size: 10px;
-        }
-        #loading-overlay {
-            position: fixed;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(0,0,0,0.6);
-            z-index: 99999;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.2s;
-        }
-        #loading-overlay.active {
-            opacity: 1;
-            pointer-events: auto;
-        }
-    </style>
-  </head>
-  <body>
-    <div id="container" data-symbol="" data-tf=""></div>
-    <div id="loading-overlay"><sl-spinner style="font-size: 3rem; --track-width: 4px;"></sl-spinner></div>
-    <div id="overlay">
-        <div id="badges">
-            <sl-badge id="sl-badge" variant="danger" pill>SL: -</sl-badge>
-            <sl-badge id="tol-badge" variant="success" pill>Tol: -</sl-badge>
-            <sl-badge id="atr-percent" variant="warning" pill>ATR: -</sl-badge>
-            <sl-badge id="leverage" variant="primary" pill>Lvrg: -</sl-badge>
-        </div>
-        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
-        <sl-select id="ticker-select" size="small" placeholder="Select ticker"></sl-select>
-        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
-        <sl-radio-group id="tf-btns"></sl-radio-group>
-    </div>
-    <sl-icon-button
-      id="fullscreen-btn"
-      name="fullscreen"
-      label="Toggle Fullscreen"
-      style="font-size: 2rem;"
-      onclick="toggleFullscreen()">
-    </sl-icon-button>
-    <script>
-      const fullscreenButton = document.getElementById('fullscreen-btn');
-
-      function toggleFullscreen() {
-        if (!document.fullscreenElement) {
-          const elem = document.documentElement;
-          elem.requestFullscreen?.();
-          elem.webkitRequestFullscreen?.();
-          elem.msRequestFullscreen?.();
-        } else {
-          document.exitFullscreen?.();
-          document.webkitExitFullscreen?.();
-          document.msExitFullscreen?.();
-        }
-      }
-
-      document.addEventListener('fullscreenchange', () => {
-        if (document.fullscreenElement) {
-          fullscreenButton.name = 'fullscreen-exit';
-        } else {
-          fullscreenButton.name = 'fullscreen';
-        }
-      });
-    </script>
-    <!-- Gap Zone Primitive classes (must be defined before onIntervalUpdate) -->
-    <script type="text/javascript">
-        class GapZoneBandRenderer {
-            constructor(zones, chartData) { this._zones = zones; this._data = chartData; this._series = null; this._chart = null; }
-            update(series, chart) { this._series = series; this._chart = chart; }
-            draw(target) {
-                const s = this._series; const c = this._chart;
-                if (!s || !c || !this._data.length) return;
-                target.useBitmapCoordinateSpace(scope => {
-                    const ctx = scope.context;
-                    const ts = c.timeScale();
-                    const firstTime = this._data[0]?.time;
-                    const lastTime = this._data[this._data.length - 1]?.time;
-                    if (!firstTime || !lastTime) return;
-                    const xLeft = ts.timeToCoordinate(firstTime);
-                    const xRight = ts.timeToCoordinate(lastTime);
-                    if (xLeft === null || xRight === null) return;
-                    const ratio = scope.horizontalPixelRatio;
-                    const vRatio = scope.verticalPixelRatio;
-                    this._zones.forEach(z => {
-                        const top = z.body_top ?? z.top;
-                        const bottom = z.body_bottom ?? z.bottom;
-                        const yTop = s.priceToCoordinate(top);
-                        const yBot = s.priceToCoordinate(bottom);
-                        if (yTop === null || yBot === null) return;
-                        const opacity = 0.12;
-                        const borderOpacity = 0.4;
-                        ctx.fillStyle = z.direction === 'bullish'
-                            ? `rgba(33,150,243,${opacity})`
-                            : z.direction === 'bearish'
-                                ? `rgba(255,152,0,${opacity})`
-                                : `rgba(158,158,158,${opacity})`;
-                        const x = Math.round(xLeft * ratio);
-                        const w = Math.round((xRight - xLeft + 40) * ratio);
-                        const y = Math.round(Math.min(yTop, yBot) * vRatio);
-                        const h = Math.round(Math.abs(yBot - yTop) * vRatio);
-                        ctx.fillRect(x, y, w, h);
-                        ctx.strokeStyle = z.direction === 'bullish'
-                            ? `rgba(33,150,243,${borderOpacity})`
-                            : z.direction === 'bearish'
-                                ? `rgba(255,152,0,${borderOpacity})`
-                                : `rgba(158,158,158,${borderOpacity})`;
-                        ctx.lineWidth = 1;
-                        ctx.setLineDash([4 * ratio, 4 * ratio]);
-                        ctx.beginPath();
-                        ctx.moveTo(x, y); ctx.lineTo(x + w, y);
-                        ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h);
-                        ctx.stroke();
-                        ctx.setLineDash([]);
-                    });
-                });
-            }
-        }
-        class GapZonePaneView {
-            constructor(renderer) { this._renderer = renderer; }
-            renderer() { return this._renderer; }
-        }
-        class GapZonePrimitive {
-            constructor(zones, chartData) {
-                this._renderer = new GapZoneBandRenderer(zones, chartData);
-                this._paneView = new GapZonePaneView(this._renderer);
-            }
-            attached({ series, chart }) { this._renderer.update(series, chart); }
-            detached() { this._renderer.update(null, null); }
-            paneViews() { return [this._paneView]; }
-            updateAllViews() {}
-        }
-    </script>
-    <script type="text/javascript">
-        // ─── Config from template ─────────────────────────────────────
-        const tickers = {{ tickers_json }};
-        const chartTfs = {{ chart_tfs }};
-
-        // ─── DOM refs ─────────────────────────────────────────────────
-        const tickerSelect = document.getElementById('ticker-select');
-        const tf_btns = document.getElementById('tf-btns');
-        const container = document.getElementById('container');
-        const slBadge = document.getElementById('sl-badge');
-        const tolBadge = document.getElementById('tol-badge');
-        const atr_badge = document.getElementById('atr-percent');
-        const lvrg_badge = document.getElementById('leverage');
-        const loadingOverlay = document.getElementById('loading-overlay');
-
-        // ─── Global state ─────────────────────────────────────────────
-        let dataset = {};
-        let currentTicker = null;
-
-        // ─── Populate ticker dropdown ─────────────────────────────────
-        tickers.forEach(t => {
-            const opt = document.createElement('sl-option');
-            opt.value = t.symbol;
-            opt.textContent = `BingX:${t.symbol}`;
-            tickerSelect.appendChild(opt);
-        });
-
-        // ─── Create chart ─────────────────────────────────────────────
-        const chart = LightweightCharts.createChart(container, {
-            autoSize: true,
-            layout: {
-                background: { color: '#22222240' },
-                textColor: '#DDD',
-            },
-            grid: {
-                vertLines: { color: '#44444440' },
-                horzLines: { color: '#44444440' },
-            },
-            timeScale: {
-                timeVisible: true,
-            },
-        });
-        const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
-            priceFormat: {
-                type: 'volume',
-            },
-            priceScaleId: '', // set as an overlay by setting a blank priceScaleId
-        });
-        volumeSeries.priceScale().applyOptions({
-            scaleMargins: {
-                top: 0.8,
-                bottom: 0,
-            },
-        });
-        const volumeSmaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
-            lineColor: '#00000000',
-            topColor: '#FDD8354C',
-            bottomColor: '#FDD8352F',
-            priceFormat: {
-                type: 'volume',
-            },
-            priceScaleId: '',
-        });
-        volumeSmaSeries.priceScale().applyOptions({
-            scaleMargins: {
-                top: 0.8,
-                bottom: 0,
-            },
-        });
-        const ema200Series = chart.addSeries(LightweightCharts.LineSeries, {});
-        const biasRevSeries = chart.addSeries(LightweightCharts.LineSeries, {});
-        const atrUpperBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
-        const atrLowerBandSeries = chart.addSeries(LightweightCharts.LineSeries, {});
-        const neutralRevRsiSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6, lineStyle: 2 });
-        const bullishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
-        const bearishBandSeries = chart.addSeries(LightweightCharts.LineSeries, { lineWidth: 6 });
-        const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries);
-        const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);
-        const structurePwrSmaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(76, 175, 80, 0.3)',
-            topFillColor1: 'rgba(76, 175, 80, 0.2)',
-            topFillColor2: 'rgba(76, 175, 80, 0.5)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.3)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.5)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
-        }, 1);
-        const structurePwrDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(76, 175, 80, 0.5)',
-            topFillColor1: 'rgba(76, 175, 80, 0.05)',
-            topFillColor2: 'rgba(76, 175, 80, 0.1)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.5)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
-        }, 1);
-        const rssiSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 2);
-        const rssiMaSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 50 },
-            topLineColor: 'rgba(76, 175, 80, 0.1)',
-            topFillColor1: 'rgba(76, 175, 80, 0.2)',
-            topFillColor2: 'rgba(76, 175, 80, 0.3)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.3)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.2)',
-        }, 2);
-        const rssiDirSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
-            baseValue: { type: 'price', price: 50 },
-            topLineColor: 'rgba(76, 175, 80, 0.2)',
-            topFillColor1: 'rgba(76, 175, 80, 0.05)',
-            topFillColor2: 'rgba(76, 175, 80, 0.1)',
-            bottomLineColor: 'rgba(242, 54, 69, 0.2)',
-            bottomFillColor1: 'rgba(242, 54, 69, 0.1)',
-            bottomFillColor2: 'rgba(242, 54, 69, 0.05)',
-        }, 2);
-        const atrRevSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 3);
-        const sharpeSeries = chart.addSeries(LightweightCharts.LineSeries, {}, 4);
-        const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
-        const textWatermarks = [
-            LightweightCharts.createTextWatermark(chart.panes()[0], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[1], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[2], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[3], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-            LightweightCharts.createTextWatermark(chart.panes()[4], {
-                horzAlign: 'left',
-                vertAlign: 'top',
-            }),
-        ];
-
-        // ─── Watermark update ─────────────────────────────────────────
-        const watermarkUpdate = () => {
-            const tf = tf_btns.value || container.dataset.tf || chartTfs[0];
-            const lastBar = dataset[tf]?.candles?.slice(-1)[0];
-            if (lastBar) {
-                const atr = +(lastBar.atr_percent * 100).toFixed(2);
-                const lvrg = Math.floor(lastBar.leverage);
-                atr_badge.innerHTML = `ATR: ${atr}%`;
-                lvrg_badge.innerHTML = `x${lvrg}`;
-            }
-            const watermarks = [
-                {
-                    lines: [
-                        {
-                            text: `${container.dataset.symbol} ${tf}`,
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 24,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'Structure Power (9, 16)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'RSSI (14, 9)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'ATR Reversion (42, 1.618)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-                {
-                    lines: [
-                        {
-                            text: 'Sharpe (200)',
-                            color: 'rgba(178, 181, 190, 0.5)',
-                            fontSize: 18,
-                        },
-                    ],
-                },
-            ];
-            Object.entries(textWatermarks).forEach(([k,v]) => {
-                v.applyOptions(watermarks[k]);
-            });
-        }
-
-        // ─── TF update ────────────────────────────────────────────────
-        const onIntervalUpdate = (tf) => {
-            const tfData = dataset[tf];
-            if (!tfData) return;
-            const data = tfData.candles.map(d => ({
-                ...d,
-                time: Math.floor(d.time / 1000),
-            }));
-            candlestickSeries.setData(data);
-            volumeSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.volume,
-                color: d.volume_color,
-            })));
-            volumeSmaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.volume_sma,
-            })));
-            ema200Series.setData(data.map(d => ({
-                time: d.time,
-                value: d.ema200,
-                color: d.ema200_color,
-            })));
-            biasRevSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.bias_reversion,
-                color: d.bias_reversion_color,
-            })));
-            atrUpperBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.atr_upperband,
-                color: d.atr_upperband_color,
-            })));
-            atrLowerBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.atr_lowerband,
-                color: d.atr_lowerband_color,
-            })));
-            neutralRevRsiSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.neutral_revrsi,
-                color: d.neutral_revrsi_color,
-            })));
-            bullishBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.bullish_revrsi,
-                color: d.bullish_revrsi_color,
-            })));
-            bearishBandSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.bearish_revrsi,
-                color: d.bearish_revrsi_color,
-            })));
-            structurePwrSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.structure_power,
-                color: d.structure_power_color,
-            })));
-            structurePwrSmaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.structure_power_sma,
-            })));
-            structurePwrDirSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.structure_power_direction,
-            })));
-            rssiSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi,
-                color: d.rssi_color,
-            })));
-            rssiMaSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi_ma,
-            })));
-            rssiDirSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.rssi_direction,
-            })));
-            atrRevSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.atr_reversion_percent,
-                color: d.atr_reversion_percent_color,
-            })));
-            sharpeSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.sharpe,
-                color: d.sharpe_color,
-            })));
-            const markers = data.filter(d => d.climax_signal != 0).map(d => ({
-                time: d.time,
-                position: d.climax_signal_pos,
-                color: d.climax_signal_color,
-                shape: d.climax_signal_shape,
-            }))
-            // ATR Climax circles
-            data.forEach(d => {
-                if (d.close >= d.atr_upperband) {
-                    markers.push({
-                        time: d.time,
-                        position: 'aboveBar',
-                        shape: 'circle',
-                        color: 'rgba(157,225,159,0.7)',
-                        size: 3,
-                    });
-                }
-                if (d.close <= d.atr_lowerband) {
-                    markers.push({
-                        time: d.time,
-                        position: 'belowBar',
-                        shape: 'circle',
-                        color: 'rgba(201,134,134,0.7)',
-                        size: 3,
-                    });
-                }
-            });
-            markers.sort((a, b) => a.time - b.time);
-            markersSeries.setMarkers(markers);
-
-            // ─── Gap Zone Bands (precomputed) ──────────────────────────
-            const suppliedGaps = Array.isArray(tfData.gapZones) ? tfData.gapZones : [];
-            if (window._gapPrimitive) {
-                try { candlestickSeries.detachPrimitive(window._gapPrimitive); } catch(_) {}
-            }
-            if (suppliedGaps.length > 0) {
-                window._gapPrimitive = new GapZonePrimitive(suppliedGaps, data);
-                candlestickSeries.attachPrimitive(window._gapPrimitive);
-            }
-
-            // ─── RSSI Tint ─────────────────────────────────────────────
-            const lastRssi = data[data.length - 1]?.rssi || 50;
-            container.classList.remove('rssi-bullish', 'rssi-bearish');
-            if (lastRssi > 59) container.classList.add('rssi-bullish');
-            else if (lastRssi < 41) container.classList.add('rssi-bearish');
-
-            watermarkUpdate();
-        }
-
-        // ─── Layout ───────────────────────────────────────────────────
-        const onSizeUpdate = () => {
-            const tmpSeries = chart.panes()[0].getSeries()[0];
-            const len = tmpSeries.data().length;
-            chart.timeScale().setVisibleLogicalRange({ from: len - 128, to: len + 5 });
-            const containerHeight = document.getElementById("container").getClientRects()[0].height;
-            chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
-            watermarkUpdate();
-        }
-        const resizeObserver = new ResizeObserver((entries) => {
-            requestAnimationFrame(() => {
-                onSizeUpdate();
-            });
-        });
-        resizeObserver.observe(container);
-
-        // ─── TF buttons ───────────────────────────────────────────────
-        chartTfs.forEach(tf => {
-            const tf_btn = document.createElement('sl-radio-button');
-            tf_btn.innerText = tf;
-            tf_btn.value = tf
-            tf_btn.addEventListener('click', () => {
-                requestAnimationFrame(() => {
-                    onIntervalUpdate(tf);
-                });
-            });
-            tf_btns.appendChild(tf_btn);
-        });
-
-        // ─── Ticker loading ───────────────────────────────────────────
-        async function loadTicker(symbol) {
-            loadingOverlay.classList.add('active');
-            try {
-                const resp = await fetch(`data/${symbol}.json`);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                dataset = await resp.json();
-
-                const ticker = tickers.find(t => t.symbol === symbol);
-                currentTicker = ticker;
-                container.dataset.symbol = `BingX:${symbol}`;
-                container.dataset.tf = ticker.default_tf;
-
-                // Update badges
-                slBadge.innerHTML = `SL: ${ticker.sl_percent}%`;
-                tolBadge.innerHTML = `Tol: ${ticker.tol_percent}%`;
-
-                // Update page title
-                document.title = `BingX:${symbol} (InNoobWeTrust™)`;
-
-                // Click default TF
-                requestAnimationFrame(() => {
-                    const defaultBtn = [...tf_btns.children].find(b => b.textContent == ticker.default_tf);
-                    if (defaultBtn) defaultBtn.click();
-                    else if (tf_btns.children[0]) tf_btns.children[0].click();
-                });
-            } catch(e) {
-                console.error(`Failed to load ticker data for ${symbol}:`, e);
-            } finally {
-                loadingOverlay.classList.remove('active');
-            }
-        }
-
-        // ─── URL sync + init ──────────────────────────────────────────
-        tickerSelect.addEventListener('sl-change', (e) => {
-            const symbol = e.target.value;
-            history.replaceState(null, '', `?ticker=${symbol}`);
-            loadTicker(symbol);
-        });
-
-        // Initial load from URL params or first ticker
-        const params = new URLSearchParams(location.search);
-        const initialTicker = params.get('ticker') || tickers[0]?.symbol;
-        if (initialTicker) {
-            tickerSelect.value = initialTicker;
-            loadTicker(initialTicker);
-        }
-    </script>
-  </body>
-</html>
-"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chartlib::{ChartRecord, DatasetKey, GapDirection, GapZone};
+    use serde_json::Value;
 
-    fn ticker() -> TickerConf {
-        TickerConf {
-            symbol: "BTC-USDT".to_string(),
-            sl_percent: 0.02,
-            tol_percent: 0.01,
-            default_tf: Timeframe::H1,
+    fn dataset(timeframe: &str) -> InteractiveDataset {
+        InteractiveDataset {
+            key: DatasetKey::new("BTC-USDT", timeframe),
+            display_symbol: String::from("BingX:BTC-USDT"),
+            records: vec![ChartRecord::from_iter([
+                (String::from("time"), Value::from(1_700_000_000_000_i64)),
+                (String::from("open"), Value::from(100.0)),
+                (String::from("high"), Value::from(101.0)),
+                (String::from("low"), Value::from(99.0)),
+                (String::from("close"), Value::from(100.5)),
+                (String::from("volume"), Value::from(1_000.0)),
+            ])],
+            gap_zones: vec![GapZone {
+                time_ms: 1_700_000_000_000,
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.5,
+                volume: 1_000.0,
+                body_bottom: 100.0,
+                body_top: 100.5,
+                body_ratio: Some(0.5),
+                direction: GapDirection::Bullish,
+            }],
         }
-    }
-
-    fn klines(seed: f64) -> Vec<Kline> {
-        (0..240)
-            .map(|index| {
-                let open = seed + index as f64;
-                Kline {
-                    open,
-                    high: open + 4.0,
-                    low: open - 2.0,
-                    close: open + if index % 2 == 0 { 2.0 } else { -1.0 },
-                    volume: 1_000.0 + index as f64,
-                    time: 1_700_000_000_000 + index as i64 * 60_000,
-                    adjclose: None,
-                }
-            })
-            .collect()
     }
 
     #[tokio::test]
-    async fn crypto_batch_adapter_preserves_timeframes_and_isolates_invalid_siblings() {
-        let ticker = ticker();
-        let valid_5m = klines(100.0);
-        let valid_1h = klines(200.0);
-        let mut invalid = klines(300.0);
-        invalid[0].open = f64::NAN;
-
-        let frames = compute_crypto_frames(
-            vec![
-                (Timeframe::H1, valid_1h.clone()),
-                (Timeframe::M1, invalid),
-                (Timeframe::M5, valid_5m.clone()),
-            ],
-            &ticker,
+    async fn publication_uses_canonical_grouped_data_layout_and_template() {
+        let publication = build_interactive_publication(
+            vec![(
+                RegistryEntryMeta {
+                    symbol: String::from("BTC-USDT"),
+                    sl_percent: String::from("2"),
+                    tol_percent: String::from("1.00"),
+                    default_tf: String::from("1h"),
+                },
+                vec![dataset("1h"), dataset("4h")],
+            )],
+            vec![String::from("1h"), String::from("4h")],
         )
-        .await;
-
-        assert_eq!(frames.len(), 2);
-        assert!(!frames.contains_key(&Timeframe::M1));
-        let validated =
-            ValidatedTicker::new(&ticker.symbol, ticker.sl_percent, ticker.tol_percent).unwrap();
-        for (timeframe, klines) in [(Timeframe::H1, valid_1h), (Timeframe::M5, valid_5m)] {
-            let expected = presentation::compute_crypto_frame(klines, validated.clone())
+        .expect("publication");
+        let root =
+            std::env::temp_dir().join(format!("chartlib-publication-{}", std::process::id()));
+        if root.exists() {
+            tokio::fs::remove_dir_all(&root)
                 .await
-                .unwrap();
-            assert_eq!(
-                frames[&timeframe].0.to_json_records().unwrap(),
-                expected.0.to_json_records().unwrap(),
-                "timeframe {timeframe} must retain its matching batch result"
-            );
-            assert_eq!(
-                frames[&timeframe].1, expected.1,
-                "timeframe {timeframe} must retain its matching gap zones"
-            );
+                .expect("clean prior output");
         }
+        write_interactive_publication(&root, &publication)
+            .await
+            .expect("write publication");
+        let html = tokio::fs::read_to_string(root.join("index.html"))
+            .await
+            .expect("read index");
+        assert!(html.contains("LightweightCharts.createChart"));
+        assert!(html.contains("chart.panes()[3]"));
+        assert!(html.contains("GapZonePrimitive"));
+        assert!(html.contains("#4FC3F7"));
+        let json = tokio::fs::read_to_string(root.join("data/BTC-USDT.json"))
+            .await
+            .expect("read data");
+        let data: serde_json::Value = serde_json::from_str(&json).expect("parse data");
+        assert!(data["1h"]["candles"].is_array());
+        assert!(data["1h"]["gapZones"].is_array());
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove output");
     }
 }

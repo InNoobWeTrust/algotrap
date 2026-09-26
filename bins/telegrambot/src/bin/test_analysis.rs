@@ -11,7 +11,7 @@ use telegrambot::config::EnvConf;
 use telegrambot::{data, llm};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+async fn main() -> Result<std::process::ExitCode, Box<dyn core::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
     dotenv().ok();
 
@@ -33,6 +33,8 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         .with_api_key(&conf.llm_api_key);
     let llm_client = OpenAIClient::with_config(openai_config);
 
+    let mut completed = 0;
+    let mut failed = 0;
     for (i, ticker) in conf.tickers.iter().enumerate() {
         let bar = "━".repeat(60);
         println!(
@@ -45,7 +47,14 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // 1. Fetch data
         println!("\n📡 Fetching market data for {}...", ticker.symbol);
         let ic = telegrambot::memory::IndicatorConfig::default();
-        let data = data::fetch_all_data(&bingx, ticker, &ic).await?;
+        let data = match data::fetch_all_data(&bingx, ticker, &ic).await {
+            Ok(data) => data,
+            Err(err) => {
+                failed += 1;
+                println!("  ❌ {}: fetch failed: {err}", ticker.symbol);
+                continue;
+            }
+        };
         let all_dfs = &data.dfs;
         let gap_zones = &data.gap_zones;
         println!("✅ Fetched {} timeframes", all_dfs.len());
@@ -66,7 +75,15 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             llm::AnalysisMode::AlertScan,
             Some(&mem),
         )
-        .await?;
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                failed += 1;
+                println!("  ❌ {}: alert scan failed: {err}", ticker.symbol);
+                continue;
+            }
+        };
 
         // 3. Print result
         let tier = telegrambot::scoring::classify_tier(
@@ -89,13 +106,21 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         }
         println!("  └─────────────────────────────────────────┘");
         println!("\n  Summary: {}", result.text);
+        completed += 1;
+        println!("  ✅ {}: completed", ticker.symbol);
     }
 
     println!("\n\n═══════════════════════════════════════════════════════════════");
-    println!("  ✅ All {} tickers scanned!", conf.tickers.len());
+    if failed == 0 {
+        println!("  ✅ All {} tickers scanned!", conf.tickers.len());
+    }
     println!("═══════════════════════════════════════════════════════════════");
+    println!(
+        "completed {completed}, failed {failed} of {}",
+        conf.tickers.len()
+    );
 
-    Ok(())
+    Ok(std::process::ExitCode::from(u8::from(failed > 0)))
 }
 
 // ─── Flight output presentation (U5) ─────────────────────────────────────────

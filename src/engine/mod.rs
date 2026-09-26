@@ -14,6 +14,6 @@ pub mod validation;
 
 // Re-export types for convenience
 pub use error::{ErrorKind, MarketError};
-pub use frame::{SourceColumnData, SourceFrame, QueryResultFrame};
+pub use frame::{QueryResultFrame, SourceColumnData, SourceFrame};
 pub use traits::ComputedFrame;
 pub use validation::{Ticker, ValidatedTicker};

@@ -483,23 +483,15 @@ async fn run_manual_analysis(
             Some(df) => df,
             None => continue,
         };
-        let last_rssi = crate::chart::last_rssi_from_df(df.as_ref());
-        let rssi_tint = crate::chart::rssi_tint_class(last_rssi);
-        let gap_zones_json =
-            crate::chart::gap_zones_to_chart_json(gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]));
-        let chart_html = match crate::chart::render_single_tf_chart_html(
-            tf,
-            df.as_ref(),
-            ticker,
-            &gap_zones_json,
-            rssi_tint,
-        ) {
-            Ok(html) => html,
-            Err(e) => {
-                error!(tf = %tf_label, "Failed to render chart: {e:#}");
-                continue;
-            }
-        };
+        let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
+        let chart_html =
+            match crate::chart::render_single_tf_chart_html(tf, df.as_ref(), ticker, zones) {
+                Ok(html) => html,
+                Err(e) => {
+                    error!(tf = %tf_label, "Failed to render chart: {e:#}");
+                    continue;
+                }
+            };
         match crate::browserless::capture_chart_screenshot(&chart_html, &state.conf.browserless_url)
             .await
         {

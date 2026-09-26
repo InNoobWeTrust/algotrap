@@ -1,203 +1,335 @@
 use algotrap::engine::traits::ComputedFrame;
-use algotrap::prelude::*;
-use minijinja::render;
+use algotrap::prelude::Timeframe;
+use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
+use algotrap::ta::prelude::{LeapMonthPolicy, plum_blossom_signal_with_policy};
+use chartlib::{
+    ChartRecord, DatasetKey, DocumentKind, FIXED_DOCUMENT_SCHEMA_VERSION, FixedChartDocument,
+    GapDirection, GapZone, InteractiveDataset,
+};
+use serde_json::Value;
 
 use crate::config::TickerConf;
 
-// ─── Chart Column Registry ───────────────────────────────────────────────────
+/// Builds a fixed chart from Telegram's own projected indicators in the canonical flat format.
+pub fn fixed_chart_document(
+    tf: &Timeframe,
+    df: &dyn ComputedFrame,
+    ticker: &TickerConf,
+    gap_zones: &[GapZoneRecord],
+) -> Result<FixedChartDocument, Box<dyn core::error::Error + Send + Sync>> {
+    let records = (0..df.len())
+        .map(|row| flat_record(df, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    let gap_zones = gap_zones
+        .iter()
+        .map(|zone| GapZone {
+            time_ms: zone.time_ms,
+            open: zone.open,
+            high: zone.high,
+            low: zone.low,
+            close: zone.close,
+            volume: zone.volume,
+            body_bottom: zone.body_bottom,
+            body_top: zone.body_top,
+            body_ratio: zone.body_ratio,
+            direction: match zone.direction {
+                GapZoneDirection::Bullish => GapDirection::Bullish,
+                GapZoneDirection::Bearish => GapDirection::Bearish,
+                GapZoneDirection::Flat => GapDirection::Flat,
+            },
+        })
+        .collect();
+    Ok(FixedChartDocument {
+        schema_version: FIXED_DOCUMENT_SCHEMA_VERSION,
+        kind: DocumentKind::FixedDocument,
+        title: format!("BingX:{} {}", ticker.symbol, tf),
+        subtitle: None,
+        dataset: InteractiveDataset {
+            key: DatasetKey::new(&ticker.symbol, tf.to_string()),
+            display_symbol: format!("BingX:{}", ticker.symbol),
+            records,
+            gap_zones,
+        },
+    })
+}
 
-/// Canonical list of derived indicator columns available to the chart template.
-///
-/// OHLCV base columns (time, open, high, low, close, volume) are implicit.
-/// Update this list whenever the Telegram presentation output contract changes.
-pub const CHART_COLUMNS: &[&str] = &[
-    "volume_sma",
-    "bias_reversion",
-    "ema200",
-    "neutral_revrsi",
-    "bullish_revrsi",
-    "bearish_revrsi",
-    "atr_upperband",
-    "atr_lowerband",
-    "atr_percent",
-    "structure_power",
-    "structure_power_sma",
-    "rssi",
-    "rssi_ma",
-    "atr_reversion_percent",
-    "leverage",
-    "sharpe",
-    "is_atr_gap",
-    "body_ratio",
-];
-
-// ─── Chart Rendering ─────────────────────────────────────────────────────────
-
-/// Render a chart HTML page for a **single** timeframe.
-///
-/// Produces a self-contained HTML page with LightweightCharts showing
-/// exactly one timeframe's data. Suitable for Browserless screenshot
-/// capture — no interactive toggle needed.
+/// Renders one caller-selected Telegram dataset through the production four-pane template.
 pub fn render_single_tf_chart_html(
     tf: &Timeframe,
     df: &dyn ComputedFrame,
     ticker: &TickerConf,
-    gap_zones_json: &str,
-    rssi_tint: &str,
+    gap_zones: &[GapZoneRecord],
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
-    let records = df
-        .to_json_records()
-        .map_err(|e| std::io::Error::other(format!("{e}")))?;
-    let df_json =
-        serde_json::Value::Array(records.into_iter().map(serde_json::Value::Object).collect());
-    let dataset = serde_json::to_string(&df_json)?;
-
-    Ok(render!(
-        TDV_HTML_TEMPLATE,
-        dataset => dataset,
-        symbol => format!("BingX:{}", ticker.symbol),
-        tf => tf.to_string(),
-        sl_percent => format!("{:.0}", ticker.sl_percent * 100.),
-        tol_percent => format!("{:.2}", ticker.tol_percent * 100.),
-        gap_zones => gap_zones_json,
-        rssi_tint => rssi_tint,
-    )
-    .trim()
-    .to_string())
+    let document = fixed_chart_document(tf, df, ticker, gap_zones)?;
+    chartlib::render_fixed_html(&document).map_err(Into::into)
 }
 
-/// Determine RSSI background tint class from the last RSSI value.
-pub fn rssi_tint_class(last_rssi: f64) -> &'static str {
-    match last_rssi {
-        r if r >= 60.0 => "bullish",
-        r if r <= 40.0 => "bearish",
-        _ => "neutral",
+fn flat_record(
+    df: &dyn ComputedFrame,
+    row: usize,
+) -> Result<ChartRecord, Box<dyn core::error::Error + Send + Sync>> {
+    let mut record = ChartRecord::new();
+    for field in ["time", "open", "high", "low", "close", "volume"] {
+        insert_required(df, &mut record, field, row)?;
     }
+    for field in [
+        "volume_sma",
+        "ema200",
+        "bias_reversion",
+        "atr_upperband",
+        "atr_lowerband",
+        "neutral_revrsi",
+        "bullish_revrsi",
+        "bearish_revrsi",
+        "structure_power",
+        "structure_power_sma",
+        "atr_percent",
+        "atr_reversion_percent",
+        "leverage",
+        "iching_open",
+        "iching_high",
+        "iching_low",
+        "iching_close",
+        "iching_moving_line",
+        "iching_transformed_close",
+        "iching_mutual_close",
+        "iching_mutual_high",
+        "iching_mutual_low",
+        "iching_mutual_mean",
+    ] {
+        insert_optional(df, &mut record, field, row)?;
+    }
+    let time_ms = required_value(df, "time", row)? as i64;
+    let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(time_ms)
+        .ok_or_else(|| format!("invalid I-Ching timestamp: {time_ms}"))?;
+    // `LeapMonthPolicy::Allow` (not the `Reject` default): historical candles on 1d/1w/1M
+    // spans cover lunar leap months; Reject would error and silently drop those chart rows.
+    // Keep consistent with cryptobot's iching presentation path.
+    let signal = plum_blossom_signal_with_policy(timestamp, LeapMonthPolicy::Allow)
+        .map_err(|error| format!("I-Ching calculation failed at {time_ms}: {error}"))?;
+    let transformed = signal
+        .transformed
+        .ok_or_else(|| format!("I-Ching transformed channel is missing at {time_ms}"))?;
+    record.insert(
+        String::from("iching_original_energy"),
+        Value::from(signal.original.energy),
+    );
+    record.insert(
+        String::from("iching_transformed_energy"),
+        Value::from(transformed.energy),
+    );
+    record.insert(
+        String::from("iching_mutual_energy"),
+        Value::from(signal.mutual.energy),
+    );
+
+    let close = required_value(df, "close", row)?;
+    let open = required_value(df, "open", row)?;
+    record.insert(
+        String::from("volume_color"),
+        Value::from(if close >= open {
+            "rgba(76, 175, 80, 0.3)"
+        } else {
+            "rgba(242, 54, 69, 0.3)"
+        }),
+    );
+    for (field, color) in [
+        ("bias_reversion_color", "rgba(178, 181, 190, 0.2)"),
+        ("ema200_color", "rgba(156, 39, 176, 0.5)"),
+        ("neutral_revrsi_color", "rgba(178,181,190,0.2)"),
+        ("bullish_revrsi_color", "rgba(33,150,243,0.2)"),
+        ("bearish_revrsi_color", "rgba(255,152,0,0.2)"),
+        ("atr_upperband_color", "rgba(76, 175, 80, 0.2)"),
+        ("atr_lowerband_color", "rgba(242, 54, 69, 0.2)"),
+    ] {
+        record.insert(String::from(field), Value::from(color));
+    }
+    let power = optional_number(df, "structure_power", row)?;
+    let smoothing = optional_number(df, "structure_power_sma", row)?;
+    if let (Some(power), Some(smoothing)) = (power, smoothing) {
+        record.insert(
+            String::from("structure_power_direction"),
+            Value::from(3.0 * power - 2.0 * smoothing),
+        );
+    } else {
+        record.insert(String::from("structure_power_direction"), Value::Null);
+    }
+    let atr_reversion = optional_number(df, "atr_reversion_percent", row)?;
+    let atr_reversion_color = match atr_reversion {
+        Some(value) if value > 50.0 => "rgba(76, 175, 80, 0.5)",
+        Some(value) if value < -50.0 => "rgba(242, 54, 69, 0.5)",
+        _ => "rgba(41, 98, 255, 0.2)",
+    };
+    record.insert(
+        String::from("atr_reversion_percent_color"),
+        Value::from(atr_reversion_color),
+    );
+    Ok(record)
 }
 
-/// Extract the last RSSI value from a ComputedFrame, defaulting to 50.0.
-pub fn last_rssi_from_df(df: &dyn ComputedFrame) -> f64 {
-    let last_row = df.len().saturating_sub(1);
-    df.f64_at("rssi", last_row).ok().flatten().unwrap_or(50.0)
+fn insert_required(
+    df: &dyn ComputedFrame,
+    record: &mut ChartRecord,
+    field: &str,
+    row: usize,
+) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    record.insert(
+        String::from(field),
+        Value::from(required_value(df, field, row)?),
+    );
+    Ok(())
 }
 
-/// Convert gap zones to chart-level JSON for band rendering.
-///
-/// Takes pre-budgeted [`algotrap::query::gap_zones::GapZoneRecord`]s and emits
-/// `{top, bottom, direction}` per zone with no trust weighting, filtering, or
-/// truncation — the caller already budgeted via `recent_gap_zones`.
-pub fn gap_zones_to_chart_json(
-    zones: &[algotrap::query::gap_zones::GapZoneRecord],
-) -> String {
-    let chart_zones: Vec<serde_json::Value> = zones
-        .iter()
-        .map(|z| {
-            let direction = match z.direction {
-                algotrap::query::gap_zones::GapZoneDirection::Bullish => "bullish",
-                algotrap::query::gap_zones::GapZoneDirection::Bearish => "bearish",
-                algotrap::query::gap_zones::GapZoneDirection::Flat => "flat",
-            };
-            serde_json::json!({
-                "top": z.body_top,
-                "bottom": z.body_bottom,
-                "direction": direction,
-            })
-        })
-        .collect();
-    serde_json::to_string(&chart_zones).unwrap_or_else(|_| "[]".to_string())
+fn insert_optional(
+    df: &dyn ComputedFrame,
+    record: &mut ChartRecord,
+    field: &str,
+    row: usize,
+) -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+    if let Some(value) = optional_number(df, field, row)? {
+        record.insert(String::from(field), Value::from(value));
+    } else if df.has_column(field) {
+        record.insert(String::from(field), Value::Null);
+    }
+    Ok(())
 }
 
-// ─── Chart HTML Template ─────────────────────────────────────────────────────
+fn required_value(
+    df: &dyn ComputedFrame,
+    field: &str,
+    row: usize,
+) -> Result<f64, Box<dyn core::error::Error + Send + Sync>> {
+    optional_number(df, field, row)?
+        .ok_or_else(|| format!("required chart value {field} is missing at row {row}").into())
+}
 
-const TDV_HTML_TEMPLATE: &str = include_str!("chart_template.html");
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
+fn optional_number(
+    df: &dyn ComputedFrame,
+    field: &str,
+    row: usize,
+) -> Result<Option<f64>, Box<dyn core::error::Error + Send + Sync>> {
+    if !df.has_column(field) {
+        return Ok(None);
+    }
+    df.f64_at(field, row).map_err(Into::into)
+}
 
 #[cfg(test)]
 mod chart_tests {
     use super::*;
-    use std::collections::HashSet;
+    use algotrap::engine::frame::{SourceColumnData, SourceFrame};
 
-    const BASE_COLUMNS: &[&str] = &["time", "open", "high", "low", "close", "volume"];
+    fn ticker() -> TickerConf {
+        TickerConf {
+            symbol: String::from("BTC-USDT"),
+            sl_percent: 0.02,
+            tol_percent: 0.01,
+            tfs: vec![Timeframe::H1],
+            default_tf: Timeframe::H1,
+        }
+    }
+
+    fn frame() -> SourceFrame {
+        let values = |items| SourceColumnData::Number(items);
+        SourceFrame::from_columns(vec![
+            (
+                "time".into(),
+                values(vec![Some(1_704_067_200_000.0), Some(1_704_070_800_000.0)]),
+            ),
+            ("open".into(), values(vec![Some(100.0), Some(101.0)])),
+            ("high".into(), values(vec![Some(102.0), Some(103.0)])),
+            ("low".into(), values(vec![Some(99.0), Some(100.0)])),
+            ("close".into(), values(vec![Some(101.0), Some(102.0)])),
+            ("volume".into(), values(vec![Some(1_000.0), Some(1_100.0)])),
+            ("volume_sma".into(), values(vec![Some(900.0), Some(950.0)])),
+            ("structure_power".into(), values(vec![Some(2.0), Some(3.0)])),
+            ("structure_power_sma".into(), values(vec![None, Some(2.5)])),
+            (
+                "atr_reversion_percent".into(),
+                values(vec![Some(0.0), Some(1.0)]),
+            ),
+        ])
+        .expect("source frame")
+    }
 
     #[test]
-    fn chart_template_references_only_known_columns() {
-        let template = include_str!("chart_template.html");
+    fn adapter_preserves_flat_records_and_directional_warmup_null() {
+        let document =
+            fixed_chart_document(&Timeframe::H1, &frame(), &ticker(), &[]).expect("document");
+        assert_eq!(document.dataset.records.len(), 2);
+        assert_eq!(
+            document.dataset.records[0]["structure_power_direction"],
+            Value::Null
+        );
+        assert_eq!(
+            document.dataset.records[1]["structure_power_direction"],
+            Value::from(4.0)
+        );
+        assert!(document.dataset.records[0].contains_key("iching_original_energy"));
+    }
 
-        // Match `d.xxx` and `d["xxx"]` patterns in JS
-        let re = regex::Regex::new(r#"d\.([a-z_][a-z0-9_]*)|d\["([a-z_][a-z0-9_]*)"\]"#).unwrap();
-        let referenced: HashSet<&str> = re
-            .captures_iter(template)
-            .filter_map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str()))
-            .filter(|k| !BASE_COLUMNS.contains(k))
-            .collect();
+    #[test]
+    fn adapter_survives_lunar_leap_month_dates() {
+        // 2020-05-23T04:00:00Z is inside the lunar leap 4th month (see
+        // ta::iching::signal::tests::find_2020_leap_solar_date). With the old
+        // Reject default, plum_blossom_signal errors and the whole
+        // fixed_chart_document aborts, dropping every candle that spans a leap
+        // month — holes in 1d/1w/1M chart renders.
+        let leap_ms: i64 = 1_590_211_200_000; // 2020-05-23T04:00:00Z == leap date
+        let ts = chrono::DateTime::from_timestamp_millis(leap_ms).unwrap();
 
-        let known: HashSet<&str> = CHART_COLUMNS.iter().copied().collect();
-
-        let unknown: Vec<&&str> = referenced.difference(&known).collect();
+        // Sanity guard: the chosen instant is actually a leap month under Reject,
+        // so the Allow assertion below cannot be vacuous.
         assert!(
-            unknown.is_empty(),
-            "Chart template references unknown columns: {:?}\n\
-             Either add them to CHART_COLUMNS or remove from the template.",
-            unknown
+            plum_blossom_signal_with_policy(ts, LeapMonthPolicy::Reject).is_err(),
+            "sanity: 2020-05-23T04:00Z must be a leap-month date, else this test is vacuous"
+        );
+
+        let frame = SourceFrame::from_columns(vec![
+            (
+                "time".into(),
+                SourceColumnData::Number(vec![Some(leap_ms as f64)]),
+            ),
+            ("open".into(), SourceColumnData::Number(vec![Some(100.0)])),
+            ("high".into(), SourceColumnData::Number(vec![Some(102.0)])),
+            ("low".into(), SourceColumnData::Number(vec![Some(99.0)])),
+            ("close".into(), SourceColumnData::Number(vec![Some(101.0)])),
+            (
+                "volume".into(),
+                SourceColumnData::Number(vec![Some(1_000.0)]),
+            ),
+        ])
+        .expect("source frame");
+        let document = fixed_chart_document(&Timeframe::H1, &frame, &ticker(), &[])
+            .expect("leap-month render");
+        assert!(
+            document.dataset.records[0]["iching_original_energy"].is_number(),
+            "leap-month candle must still emit an I-Ching energy value"
         );
     }
 
     #[test]
-    fn rssi_tint_class_boundaries() {
-        assert_eq!(rssi_tint_class(60.0), "bullish");
-        assert_eq!(rssi_tint_class(75.0), "bullish");
-        assert_eq!(rssi_tint_class(40.0), "bearish");
-        assert_eq!(rssi_tint_class(20.0), "bearish");
-        assert_eq!(rssi_tint_class(50.0), "neutral");
-        assert_eq!(rssi_tint_class(59.9), "neutral");
-        assert_eq!(rssi_tint_class(40.1), "neutral");
+    fn fixed_render_uses_shared_canonical_template() {
+        let html =
+            render_single_tf_chart_html(&Timeframe::H1, &frame(), &ticker(), &[]).expect("render");
+        assert!(html.contains("chartlib-fixed"));
+        assert!(html.contains("LightweightCharts.createChart"));
+        assert!(html.contains("ICHING") || html.contains("I-Ching"));
+        assert!(!html.to_lowercase().contains("rssi"));
     }
 
     #[test]
-    fn gap_zones_to_chart_json_emits_top_bottom_direction_without_trust() {
-        use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
-
-        fn record(direction: GapZoneDirection, bottom: f64, top: f64) -> GapZoneRecord {
-            GapZoneRecord {
-                time_ms: 1_700_000_000_000,
-                open: 100.0,
-                high: 115.0,
-                low: 95.0,
-                close: 110.0,
-                volume: 1_000.0,
-                body_bottom: bottom,
-                body_top: top,
-                direction,
-                body_ratio: Some(0.8),
-            }
-        }
-
-        let zones = vec![
-            record(GapZoneDirection::Bullish, 100.0, 110.0),
-            record(GapZoneDirection::Bearish, 90.0, 100.0),
-            record(GapZoneDirection::Flat, 100.0, 100.0),
-        ];
-        let json = gap_zones_to_chart_json(&zones);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let arr = parsed.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0]["top"], serde_json::json!(110.0));
-        assert_eq!(arr[0]["bottom"], serde_json::json!(100.0));
-        assert_eq!(arr[0]["direction"], serde_json::json!("bullish"));
-        assert_eq!(arr[1]["direction"], serde_json::json!("bearish"));
-        assert_eq!(arr[2]["direction"], serde_json::json!("flat"));
-        for entry in arr {
-            let obj = entry.as_object().unwrap();
-            assert!(obj.contains_key("top"));
-            assert!(obj.contains_key("bottom"));
-            assert!(obj.contains_key("direction"));
-            assert!(
-                !obj.contains_key("trust"),
-                "chart JSON must not carry trust: {obj:?}"
-            );
-            assert_eq!(obj.len(), 3);
-        }
-        assert_eq!(gap_zones_to_chart_json(&[]), "[]");
+    fn adapter_rejects_missing_required_candle_value() {
+        let frame = SourceFrame::from_columns(vec![
+            (
+                "time".into(),
+                SourceColumnData::Number(vec![Some(1_704_067_200_000.0)]),
+            ),
+            ("open".into(), SourceColumnData::Number(vec![Some(100.0)])),
+        ])
+        .expect("source frame");
+        let error = fixed_chart_document(&Timeframe::H1, &frame, &ticker(), &[])
+            .expect_err("missing close");
+        assert!(error.to_string().contains("required chart value high"));
     }
 }
