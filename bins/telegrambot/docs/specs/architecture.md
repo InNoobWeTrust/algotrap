@@ -88,8 +88,8 @@ The agent uses a multi-turn conversation with tool calling:
 3. LLM returns structured analysis text (≤300 words)
 
 ### Adaptive Alert Mode (`AlertScan`)
-1. System prompt from `system_adaptive.txt` with memory/weights/outcome context injection
-2. User message from `user_adaptive.txt`
+1. System prompt from `system_alert.txt` with memory/weights/outcome context injection
+2. User message from `user_alert.txt`
 3. LLM returns JSON: `{ confidence, direction, summary, weights, trade_plans, significance_threshold }`
 4. See `docs/specs/llm-prompt-engineering.md` for template variable contract
 
@@ -151,7 +151,7 @@ The ticker is rendered using Unicode Mathematical Bold Sans-Serif characters
 - Resources: 500m CPU, 1Gi memory
 
 ### Prompt Configuration (K8s ConfigMap)
-- `k8s/prompts-configmap.yaml` contains `system.txt`, `user.txt`, `system_adaptive.txt`, `user_adaptive.txt`
+- `k8s/prompts-configmap.yaml` contains `system.txt`, `user.txt`, `system_alert.txt`, `user_alert.txt`
 - Mounted at `/etc/telegrambot/prompts` via volume mount
 - `PROMPTS_DIR` env var points to mount path
 - Edit prompts → `kubectl apply` + `rollout restart` — **no Docker rebuild**

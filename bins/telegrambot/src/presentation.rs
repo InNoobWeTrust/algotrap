@@ -33,17 +33,20 @@ const BASE_COLUMNS: [&str; 8] = [
     "Date",
 ];
 
-const ICHING_ENERGY_COLUMNS: [&str; 10] = [
+const ICHING_ENERGY_COLUMNS: [&str; 13] = [
     "iching_original_energy",
     "iching_transformed_energy",
-    "iching_nuclear_energy",
+    "iching_mutual_energy",
     "iching_open",
     "iching_high",
     "iching_low",
     "iching_close",
     "iching_moving_line",
     "iching_transformed_close",
-    "iching_nuclear_close",
+    "iching_mutual_close",
+    "iching_mutual_high",
+    "iching_mutual_low",
+    "iching_mutual_mean",
 ];
 
 pub(crate) struct TelegramIndicators {
@@ -438,11 +441,11 @@ fn telegram_output_frame(
             ),
         ),
         (
-            "iching_nuclear_energy".into(),
+            "iching_mutual_energy".into(),
             SourceColumnData::Number(
                 trajectories
                     .iter()
-                    .map(|trajectory| Some(trajectory.nuclear_open))
+                    .map(|trajectory| Some(trajectory.mutual_open))
                     .collect(),
             ),
         ),
@@ -501,11 +504,38 @@ fn telegram_output_frame(
             ),
         ),
         (
-            "iching_nuclear_close".into(),
+            "iching_mutual_close".into(),
             SourceColumnData::Number(
                 trajectories
                     .iter()
-                    .map(|trajectory| Some(trajectory.nuclear_close))
+                    .map(|trajectory| Some(trajectory.mutual_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_high".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_high))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_low".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_low))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_mean".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_mean))
                     .collect(),
             ),
         ),
@@ -974,14 +1004,17 @@ mod tests {
                 "\"Date\"".to_string(),
                 "\"iching_original_energy\"".to_string(),
                 "\"iching_transformed_energy\"".to_string(),
-                "\"iching_nuclear_energy\"".to_string(),
+                "\"iching_mutual_energy\"".to_string(),
                 "\"iching_open\"".to_string(),
                 "\"iching_high\"".to_string(),
                 "\"iching_low\"".to_string(),
                 "\"iching_close\"".to_string(),
                 "\"iching_moving_line\"".to_string(),
                 "\"iching_transformed_close\"".to_string(),
-                "\"iching_nuclear_close\"".to_string(),
+                "\"iching_mutual_close\"".to_string(),
+                "\"iching_mutual_high\"".to_string(),
+                "\"iching_mutual_low\"".to_string(),
+                "\"iching_mutual_mean\"".to_string(),
                 "\"atr\"".to_string(),
                 "\"rssi_ma\"".to_string(),
                 "\"atr_percent\"".to_string(),
@@ -1982,14 +2015,17 @@ mod tests {
                 "adj_close",
                 "iching_original_energy",
                 "iching_transformed_energy",
-                "iching_nuclear_energy",
+                "iching_mutual_energy",
                 "iching_open",
                 "iching_high",
                 "iching_low",
                 "iching_close",
                 "iching_moving_line",
                 "iching_transformed_close",
-                "iching_nuclear_close",
+                "iching_mutual_close",
+                "iching_mutual_high",
+                "iching_mutual_low",
+                "iching_mutual_mean",
                 "gap_candidate_qualifies",
                 "gap_candidate_body_bottom",
                 "gap_candidate_body_top",
@@ -2123,14 +2159,17 @@ mod tests {
             "adj_close",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "atr",
             "volume_sma",
             "ema200",
@@ -2165,14 +2204,17 @@ mod tests {
             "adj_close",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
             "gap_candidate_body_top",
@@ -2188,14 +2230,17 @@ mod tests {
             "adj_close",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "__leverage_atr",
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
@@ -2271,14 +2316,17 @@ mod tests {
             "adj_close",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "atr",
             "volume_sma",
             "ema200",
@@ -2313,14 +2361,17 @@ mod tests {
             "adj_close",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "gap_candidate_qualifies",
             "gap_candidate_body_bottom",
             "gap_candidate_body_top",

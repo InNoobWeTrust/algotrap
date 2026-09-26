@@ -92,7 +92,10 @@ fn flat_record(
         "iching_close",
         "iching_moving_line",
         "iching_transformed_close",
-        "iching_nuclear_close",
+        "iching_mutual_close",
+        "iching_mutual_high",
+        "iching_mutual_low",
+        "iching_mutual_mean",
     ] {
         insert_optional(df, &mut record, field, row)?;
     }
@@ -116,8 +119,8 @@ fn flat_record(
         Value::from(transformed.energy),
     );
     record.insert(
-        String::from("iching_nuclear_energy"),
-        Value::from(signal.nuclear.energy),
+        String::from("iching_mutual_energy"),
+        Value::from(signal.mutual.energy),
     );
 
     let close = required_value(df, "close", row)?;

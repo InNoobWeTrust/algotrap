@@ -53,8 +53,8 @@ pub struct IchingSignal {
     /// Post-trigger state (变卦). `Some` for Plum Blossom; `None` for methods without a moving line.
     pub transformed: Option<HexagramEnergy>,
     /// Internal/mutual characteristic (互卦), structurally derived from `original`.
-    /// Always present because every six-line hexagram has a nuclear derivation.
-    pub nuclear: HexagramEnergy,
+    /// Always present because every six-line hexagram has a mutual derivation.
+    pub mutual: HexagramEnergy,
     /// Moving line position 1..=6 (bottom-to-top) for Plum Blossom; `None` otherwise.
     pub moving_line: Option<u8>,
 }
@@ -187,9 +187,9 @@ impl Hexagram {
         Ok(Self { lines })
     }
 
-    /// Nuclear hexagram: lower trigram from lines 2,3,4; upper from lines 3,4,5
+    /// Mutual hexagram: lower trigram from lines 2,3,4; upper from lines 3,4,5
     /// (1-indexed bottom; 0-indexed: lower=[1,2,3], upper=[2,3,4]).
-    pub fn nuclear(self) -> Self {
+    pub fn mutual(self) -> Self {
         let l = self.lines;
         Self {
             lines: [l[1], l[2], l[3], l[2], l[3], l[4]],
@@ -370,23 +370,23 @@ mod tests {
     }
 
     #[test]
-    fn hexagram_nuclear_mapping() {
+    fn hexagram_mutual_mapping() {
         // Original bottom->top [1,0,1,0,1,0] (index 21).
         let original = Hexagram::from_binary_index(21).expect("21 is valid");
         let lower = Trigram::from_lines([0, 1, 0]).expect("binary lines");
         let upper = Trigram::from_lines([1, 0, 1]).expect("binary lines");
         let expected = Hexagram::from_trigrams(upper, lower);
-        assert_eq!(original.nuclear(), expected);
-        assert_eq!(original.nuclear().binary_index(), 42);
-        assert_eq!(original.nuclear().bits_top_to_bottom(), "101010");
+        assert_eq!(original.mutual(), expected);
+        assert_eq!(original.mutual().binary_index(), 42);
+        assert_eq!(original.mutual().bits_top_to_bottom(), "101010");
 
-        // Qian and Kun are nuclear-stable.
+        // Qian and Kun are mutual-stable.
         let qian = Trigram::from_num(1).expect("Qian is valid");
         let qian_hex = Hexagram::from_trigrams(qian, qian);
-        assert_eq!(qian_hex.nuclear(), qian_hex);
+        assert_eq!(qian_hex.mutual(), qian_hex);
         let kun = Trigram::from_num(8).expect("Kun is valid");
         let kun_hex = Hexagram::from_trigrams(kun, kun);
-        assert_eq!(kun_hex.nuclear(), kun_hex);
+        assert_eq!(kun_hex.mutual(), kun_hex);
     }
 
     #[test]
@@ -435,18 +435,18 @@ mod tests {
     }
 
     #[test]
-    fn nuclear_qian_is_qian() {
+    fn mutual_qian_is_qian() {
         let qian = Trigram::from_num(1).expect("Qian is valid");
         let qian_hex = Hexagram::from_trigrams(qian, qian);
         assert_eq!(qian_hex.binary_index(), 63);
-        assert_eq!(qian_hex.nuclear(), qian_hex);
+        assert_eq!(qian_hex.mutual(), qian_hex);
     }
 
     #[test]
-    fn nuclear_kun_is_kun() {
+    fn mutual_kun_is_kun() {
         let kun = Trigram::from_num(8).expect("Kun is valid");
         let kun_hex = Hexagram::from_trigrams(kun, kun);
         assert_eq!(kun_hex.binary_index(), 0);
-        assert_eq!(kun_hex.nuclear(), kun_hex);
+        assert_eq!(kun_hex.mutual(), kun_hex);
     }
 }

@@ -10,18 +10,18 @@ use chrono::{DateTime, Utc};
 /// - `original.hexagram ∈ 0..=63` (enforced by `HexagramEnergy::new`)
 /// - `original.energy == original.hexagram as f64 - 31.5` (enforced by factory)
 /// - `transformed`: if `Some`, same invariant as `original`
-/// - `nuclear.hexagram ∈ 0..=63` and `nuclear.energy == nuclear.hexagram as f64 - 31.5`
+/// - `mutual.hexagram ∈ 0..=63` and `mutual.energy == mutual.hexagram as f64 - 31.5`
 /// - `moving_line`: if `Some(v)`, then `v ∈ 1..=6`
 ///
 /// This function is `pub(crate)` — only the facade and tests call it.
 pub(crate) fn build_signal(
     original: HexagramEnergy,
     transformed: Option<HexagramEnergy>,
-    nuclear: HexagramEnergy,
+    mutual: HexagramEnergy,
     moving_line: Option<u8>,
 ) -> TaResult<IchingSignal> {
     validate_channel(&original, "original")?;
-    validate_channel(&nuclear, "nuclear")?;
+    validate_channel(&mutual, "mutual")?;
     if let Some(channel) = &transformed {
         validate_channel(channel, "transformed")?;
     }
@@ -31,7 +31,7 @@ pub(crate) fn build_signal(
     Ok(IchingSignal {
         original,
         transformed,
-        nuclear,
+        mutual,
         moving_line,
     })
 }
@@ -62,7 +62,7 @@ pub fn plum_blossom_signal(datetime: DateTime<Utc>) -> TaResult<IchingSignal> {
 ///
 /// 1. `calendar::to_plum_blossom_input(datetime, policy)` → `PlumBlossomInput`
 /// 2. `plum_blossom::compute_channels(input)` → `PlumBlossomResult`
-/// 3. `build_signal(original, Some(transformed), nuclear, Some(moving_line))` → `IchingSignal`
+/// 3. `build_signal(original, Some(transformed), mutual, Some(moving_line))` → `IchingSignal`
 pub fn plum_blossom_signal_with_policy(
     datetime: DateTime<Utc>,
     policy: LeapMonthPolicy,
@@ -72,7 +72,7 @@ pub fn plum_blossom_signal_with_policy(
     build_signal(
         channels.original,
         Some(channels.transformed),
-        channels.nuclear,
+        channels.mutual,
         Some(channels.moving_line),
     )
 }
@@ -86,52 +86,52 @@ mod tests {
     fn valid_channels() -> (HexagramEnergy, HexagramEnergy, HexagramEnergy) {
         let original = HexagramEnergy::new(10).expect("10 is valid");
         let transformed = HexagramEnergy::new(21).expect("21 is valid");
-        let nuclear = HexagramEnergy::new(42).expect("42 is valid");
-        (original, transformed, nuclear)
+        let mutual = HexagramEnergy::new(42).expect("42 is valid");
+        (original, transformed, mutual)
     }
 
     #[test]
     fn valid_signal_with_all_channels() {
-        let (original, transformed, nuclear) = valid_channels();
-        let signal = build_signal(original, Some(transformed), nuclear, Some(3))
+        let (original, transformed, mutual) = valid_channels();
+        let signal = build_signal(original, Some(transformed), mutual, Some(3))
             .expect("valid inputs must succeed");
         assert_eq!(signal.original, original);
         assert_eq!(signal.transformed, Some(transformed));
-        assert_eq!(signal.nuclear, nuclear);
+        assert_eq!(signal.mutual, mutual);
         assert_eq!(signal.moving_line, Some(3));
     }
 
     #[test]
     fn moving_line_zero_rejected_as_validation() {
-        let (original, transformed, nuclear) = valid_channels();
-        let err = build_signal(original, Some(transformed), nuclear, Some(0))
+        let (original, transformed, mutual) = valid_channels();
+        let err = build_signal(original, Some(transformed), mutual, Some(0))
             .expect_err("moving_line 0 must be rejected");
         assert_eq!(err.kind, TaErrorKind::Validation);
     }
 
     #[test]
     fn moving_line_seven_rejected_as_validation() {
-        let (original, transformed, nuclear) = valid_channels();
-        let err = build_signal(original, Some(transformed), nuclear, Some(7))
+        let (original, transformed, mutual) = valid_channels();
+        let err = build_signal(original, Some(transformed), mutual, Some(7))
             .expect_err("moving_line 7 must be rejected");
         assert_eq!(err.kind, TaErrorKind::Validation);
     }
 
     #[test]
     fn transformed_none_and_moving_none_succeeds() {
-        let (original, _, nuclear) = valid_channels();
-        let signal = build_signal(original, None, nuclear, None)
+        let (original, _, mutual) = valid_channels();
+        let signal = build_signal(original, None, mutual, None)
             .expect("None/None must succeed for future methods");
         assert_eq!(signal.original, original);
         assert_eq!(signal.transformed, None);
-        assert_eq!(signal.nuclear, nuclear);
+        assert_eq!(signal.mutual, mutual);
         assert_eq!(signal.moving_line, None);
     }
 
     #[test]
     fn transformed_none_with_moving_some_succeeds() {
-        let (original, _, nuclear) = valid_channels();
-        let signal = build_signal(original, None, nuclear, Some(1))
+        let (original, _, mutual) = valid_channels();
+        let signal = build_signal(original, None, mutual, Some(1))
             .expect("uncoupled None/Some(1) must succeed");
         assert_eq!(signal.transformed, None);
         assert_eq!(signal.moving_line, Some(1));
@@ -139,48 +139,48 @@ mod tests {
 
     #[test]
     fn raw_out_of_range_original_rejected() {
-        let (_, transformed, nuclear) = valid_channels();
+        let (_, transformed, mutual) = valid_channels();
         let raw = HexagramEnergy {
             hexagram: 64,
             energy: 64.0_f64 - 31.5,
         };
-        let err = build_signal(raw, Some(transformed), nuclear, Some(3))
+        let err = build_signal(raw, Some(transformed), mutual, Some(3))
             .expect_err("hexagram 64 must be rejected");
         assert_eq!(err.kind, TaErrorKind::Validation);
     }
 
     #[test]
     fn mismatched_energy_original_rejected() {
-        let (_, transformed, nuclear) = valid_channels();
+        let (_, transformed, mutual) = valid_channels();
         let raw = HexagramEnergy {
             hexagram: 10,
             energy: 0.0,
         };
-        let err = build_signal(raw, Some(transformed), nuclear, Some(3))
+        let err = build_signal(raw, Some(transformed), mutual, Some(3))
             .expect_err("mismatched original energy must be rejected");
         assert_eq!(err.kind, TaErrorKind::Validation);
     }
 
     #[test]
-    fn mismatched_energy_nuclear_rejected() {
+    fn mismatched_energy_mutual_rejected() {
         let (original, transformed, _) = valid_channels();
-        let raw_nuclear = HexagramEnergy {
+        let raw_mutual = HexagramEnergy {
             hexagram: 5,
             energy: 99.0,
         };
-        let err = build_signal(original, Some(transformed), raw_nuclear, Some(2))
-            .expect_err("mismatched nuclear energy must be rejected");
+        let err = build_signal(original, Some(transformed), raw_mutual, Some(2))
+            .expect_err("mismatched mutual energy must be rejected");
         assert_eq!(err.kind, TaErrorKind::Validation);
     }
 
     #[test]
     fn invalid_transformed_rejected() {
-        let (original, _, nuclear) = valid_channels();
+        let (original, _, mutual) = valid_channels();
         let raw_transformed = HexagramEnergy {
             hexagram: 7,
             energy: 7.0,
         };
-        let err = build_signal(original, Some(raw_transformed), nuclear, Some(4))
+        let err = build_signal(original, Some(raw_transformed), mutual, Some(4))
             .expect_err("mismatched transformed energy must be rejected");
         assert_eq!(err.kind, TaErrorKind::Validation);
     }
@@ -215,7 +215,7 @@ mod tests {
                 < f64::EPSILON
         );
         assert!(
-            (signal.nuclear.energy - (signal.nuclear.hexagram as f64 - 31.5)).abs() < f64::EPSILON
+            (signal.mutual.energy - (signal.mutual.hexagram as f64 - 31.5)).abs() < f64::EPSILON
         );
         let transformed = signal.transformed.expect("already checked");
         assert!((transformed.energy - (transformed.hexagram as f64 - 31.5)).abs() < f64::EPSILON);
@@ -224,7 +224,7 @@ mod tests {
         let expected = plum_blossom::compute_channels(input).expect("channels must succeed");
         assert_eq!(signal.original, expected.original);
         assert_eq!(signal.transformed, Some(expected.transformed));
-        assert_eq!(signal.nuclear, expected.nuclear);
+        assert_eq!(signal.mutual, expected.mutual);
         assert_eq!(signal.moving_line, Some(expected.moving_line));
     }
 
@@ -327,9 +327,9 @@ mod tests {
         assert_eq!(original_hex.bits_top_to_bottom(), "100001");
         let transformed_hex = original_hex.flip_line(moving).expect("line 6 valid");
         assert_eq!(transformed_hex.binary_index(), 1);
-        let nuclear_hex = original_hex.nuclear();
-        assert_eq!(nuclear_hex.binary_index(), 0);
-        assert_eq!(nuclear_hex.bits_top_to_bottom(), "000000");
+        let mutual_hex = original_hex.mutual();
+        assert_eq!(mutual_hex.binary_index(), 0);
+        assert_eq!(mutual_hex.bits_top_to_bottom(), "000000");
         // Facade must match the manual computation.
         let signal = plum_blossom_signal(dt).expect("fixed instant must succeed");
         assert_eq!(signal.original.hexagram, 33);
@@ -338,8 +338,8 @@ mod tests {
         let transformed = signal.transformed.expect("transformed must be Some");
         assert_eq!(transformed.hexagram, 1);
         assert_eq!(transformed.energy, -30.5);
-        assert_eq!(signal.nuclear.hexagram, 0);
-        assert_eq!(signal.nuclear.energy, -31.5);
+        assert_eq!(signal.mutual.hexagram, 0);
+        assert_eq!(signal.mutual.energy, -31.5);
         assert!(
             (signal.original.energy - (f64::from(signal.original.hexagram) - 31.5)).abs()
                 < f64::EPSILON
@@ -348,13 +348,13 @@ mod tests {
             (transformed.energy - (f64::from(transformed.hexagram) - 31.5)).abs() < f64::EPSILON
         );
         assert!(
-            (signal.nuclear.energy - (f64::from(signal.nuclear.hexagram) - 31.5)).abs()
+            (signal.mutual.energy - (f64::from(signal.mutual.hexagram) - 31.5)).abs()
                 < f64::EPSILON
         );
         let expected = plum_blossom::compute_channels(input).expect("channels must succeed");
         assert_eq!(signal.original, expected.original);
         assert_eq!(signal.transformed, Some(expected.transformed));
-        assert_eq!(signal.nuclear, expected.nuclear);
+        assert_eq!(signal.mutual, expected.mutual);
         assert_eq!(signal.moving_line, Some(expected.moving_line));
     }
 
@@ -395,7 +395,7 @@ mod tests {
                 < f64::EPSILON
         );
         assert!(
-            (signal.nuclear.energy - (f64::from(signal.nuclear.hexagram) - 31.5)).abs()
+            (signal.mutual.energy - (f64::from(signal.mutual.hexagram) - 31.5)).abs()
                 < f64::EPSILON
         );
         let transformed = signal.transformed.expect("already checked");
@@ -416,8 +416,7 @@ mod tests {
                 < f64::EPSILON
         );
         assert!(
-            (signal.nuclear.energy - f64::from(signal.nuclear.hexagram) + 31.5).abs()
-                < f64::EPSILON
+            (signal.mutual.energy - f64::from(signal.mutual.hexagram) + 31.5).abs() < f64::EPSILON
         );
         let transformed = signal.transformed.expect("transformed must be Some");
         assert!((transformed.energy - f64::from(transformed.hexagram) + 31.5).abs() < f64::EPSILON);

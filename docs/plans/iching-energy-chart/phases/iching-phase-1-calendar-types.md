@@ -106,8 +106,8 @@ pub struct IchingSignal {
     /// Post-trigger state (变卦). `Some` for Plum Blossom; `None` for methods without a moving line.
     pub transformed: Option<HexagramEnergy>,
     /// Internal/mutual characteristic (互卦), structurally derived from `original`.
-    /// Always present because every six-line hexagram has a nuclear derivation.
-    pub nuclear: HexagramEnergy,
+    /// Always present because every six-line hexagram has a mutual derivation.
+    pub mutual: HexagramEnergy,
     /// Moving line position 1..=6 (bottom-to-top) for Plum Blossom; `None` otherwise.
     pub moving_line: Option<u8>,
 }
@@ -253,7 +253,7 @@ All trigram tests pass; round-trip and edge-case assertions verified.
 ## p1-u5-hexagram-core-ops
 
 ### Goal
-Implement `Hexagram` with trigram composition, binary index, display, flip-line, and nuclear derivation — the core hexagram operations that Plum Blossom casting and the facade consume.
+Implement `Hexagram` with trigram composition, binary index, display, flip-line, and mutual derivation — the core hexagram operations that Plum Blossom casting and the facade consume.
 
 ### Writable surface
 | File | Action |
@@ -289,9 +289,9 @@ impl Hexagram {
     /// Returns `TaError::validation` if `line ∉ 1..=6`.
     pub fn flip_line(self, line: u8) -> crate::ta::TaResult<Self>;
 
-    /// Nuclear hexagram: lower trigram from lines 2,3,4; upper from lines 3,4,5
+    /// Mutual hexagram: lower trigram from lines 2,3,4; upper from lines 3,4,5
     /// (1-indexed bottom; 0-indexed: lower=[1,2,3], upper=[2,3,4]).
-    pub fn nuclear(self) -> Self;
+    pub fn mutual(self) -> Self;
 }
 ```
 
@@ -302,12 +302,12 @@ impl Hexagram {
 - [ ] Display convention matches research §2.1: `Qian(1)` top→bottom = `"111111"`, index 63
 - [ ] `flip_line(1)` flips bottom line; `flip_line(6)` flips top line
 - [ ] `flip_line(0)` returns `Validation`; `flip_line(7)` returns `Validation`
-- [ ] `nuclear()` matches research §3.1: original lines 2,3,4 → lower trigram; lines 3,4,5 → upper trigram
+- [ ] `mutual()` matches research §3.1: original lines 2,3,4 → lower trigram; lines 3,4,5 → upper trigram
 - [ ] `Hexagram` is `Copy + Clone + Eq` (verified by compile test or `assert!(<Hexagram as Copy>::is_copy())`)
 - [ ] `from_binary_index(64)` returns `Validation`
 
 ### Stop condition
-All hexagram unit tests pass, including exhaustive `0..=63` round-trip, nuclear derivation, and flip-line edge cases.
+All hexagram unit tests pass, including exhaustive `0..=63` round-trip, mutual derivation, and flip-line edge cases.
 
 ### Dependencies
 - `p1-u4-trigram-invariants` (needs `Trigram` to compose hexagrams)

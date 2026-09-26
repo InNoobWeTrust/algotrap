@@ -24,14 +24,14 @@ No new production types. Tests exercise:
 - `Trigram::display()` string length and character content for all 8
 - `Hexagram::from_binary_index(b)` → `binary_index()` exhaustive round-trip for `b ∈ 0..=63`
 - `Hexagram::flip_line` identity: flipping the same line twice returns the original
-- `Hexagram::nuclear` on a hand-computed fixture (e.g. Qian-Kun hexagram: all yang → nuclear is all yang via Qian)
+- `Hexagram::mutual` on a hand-computed fixture (e.g. Qian-Kun hexagram: all yang → mutual is all yang via Qian)
 
 ### Acceptance criteria
 - [ ] `#[test] fn trigram_roundtrip_all_xiantian()` — 8 assertions, one per Xiantian number
 - [ ] `#[test] fn hexagram_exhaustive_roundtrip()` — 64 assertions, one per binary index
 - [ ] `#[test] fn flip_line_double_flip_identity()` — flip line 3 twice, assert equality with original
-- [ ] `#[test] fn nuclear_qian_is_qian()` — nuclear of pure-Qian hexagram is Qian (all yang lines in positions 2–5)
-- [ ] `#[test] fn nuclear_kun_is_kun()` — nuclear of pure-Kun hexagram is Kun
+- [ ] `#[test] fn mutual_qian_is_qian()` — mutual of pure-Qian hexagram is Qian (all yang lines in positions 2–5)
+- [ ] `#[test] fn mutual_kun_is_kun()` — mutual of pure-Kun hexagram is Kun
 - [ ] All tests pass under `cargo test -p algotrap --lib ta::iching::types`
 
 ### Stop condition
@@ -45,7 +45,7 @@ All round-trip tests pass. Types are validated from a consumer perspective.
 ## p2-u2-plum-blossom-cast-pure
 
 ### Goal
-Implement `PlumBlossomInput`, the `PlumBlossomRecord` internal struct, and the pure `cast()` function that computes original hexagram, moving line, transformed hexagram, and nuclear hexagram from discrete inputs — no I/O, no `chrono`, no `lunar-lite`.
+Implement `PlumBlossomInput`, the `PlumBlossomRecord` internal struct, and the pure `cast()` function that computes original hexagram, moving line, transformed hexagram, and mutual hexagram from discrete inputs — no I/O, no `chrono`, no `lunar-lite`.
 
 ### Writable surface
 | File | Action |
@@ -84,7 +84,7 @@ pub(crate) struct PlumBlossomRecord {
     pub hexagram: u8,          // canonical six-bit value 0..=63
     pub moving_line: u8,       // 1..=6
     pub transformed: u8,       // canonical six-bit value after flip
-    pub nuclear: u8,           // canonical six-bit value
+    pub mutual: u8,           // canonical six-bit value
 }
 
 /// Pure Plum Blossom cast over discrete inputs.
@@ -105,7 +105,7 @@ pub fn cast(input: PlumBlossomInput) -> TaResult<PlumBlossomRecord>;
 - `from_num_mod8` handles the modulo-zero → 8 mapping
 - `Hexagram::from_trigrams(upper, lower)` composes the original
 - `Hexagram::flip_line(moving_line)` produces transformed
-- `Hexagram::nuclear()` produces nuclear
+- `Hexagram::mutual()` produces mutual
 - `binary_index()` on each yields the canonical value
 
 ### Acceptance criteria
@@ -116,7 +116,7 @@ pub fn cast(input: PlumBlossomInput) -> TaResult<PlumBlossomRecord>;
 - [ ] `PlumBlossomInput` with `hour_branch: 13` fails validation
 - [ ] `PlumBlossomInput` with `lunar_day: 0` fails validation
 - [ ] Transformed hexagram always differs from the original: `flip_line` inverts exactly one bit, so `record.transformed != record.hexagram` for every valid moving_line 1..=6. Assert this for at least one fixture per line position (1 through 6).
-- [ ] Nuclear is always computed, regardless of moving-line position
+- [ ] Mutual is always computed, regardless of moving-line position
 - [ ] Double-check: flipping moving_line on the transformed record's hexagram with the same moving_line produces the original (round-trip)
 - [ ] All tests pass under `cargo test -p algotrap --lib ta::iching::plum_blossom`
 
@@ -125,7 +125,7 @@ Pure casting tests pass with hand-verified fixtures. No I/O or chrono dependency
 
 ### Dependencies
 - `p1-u4-trigram-invariants` (needs `Trigram::from_num_mod8`)
-- `p1-u5-hexagram-core-ops` (needs `Hexagram::from_trigrams`, `flip_line`, `nuclear`, `binary_index`)
+- `p1-u5-hexagram-core-ops` (needs `Hexagram::from_trigrams`, `flip_line`, `mutual`, `binary_index`)
 
 ---
 
@@ -179,7 +179,7 @@ End-to-end adapter test passes. All Phase 2 tests pass under `cargo test -p algo
 ## p2-u4-plum-blossom-energy-channel-construction
 
 ### Goal
-Add a higher-level function in `plum_blossom.rs` that takes `PlumBlossomInput`, runs `cast()`, and constructs the three `HexagramEnergy` channels (original, transformed, nuclear) plus the moving line — the bridge between pure casting and the signal facade.
+Add a higher-level function in `plum_blossom.rs` that takes `PlumBlossomInput`, runs `cast()`, and constructs the three `HexagramEnergy` channels (original, transformed, mutual) plus the moving line — the bridge between pure casting and the signal facade.
 
 ### Writable surface
 | File | Action |
@@ -198,7 +198,7 @@ use super::types::HexagramEnergy;
 pub(crate) struct PlumBlossomResult {
     pub original: HexagramEnergy,
     pub transformed: HexagramEnergy,
-    pub nuclear: HexagramEnergy,
+    pub mutual: HexagramEnergy,
     pub moving_line: u8,
 }
 
@@ -215,9 +215,9 @@ pub fn compute_channels(input: PlumBlossomInput) -> crate::ta::TaResult<PlumBlos
 - [ ] For any valid `PlumBlossomInput`, `compute_channels` returns `Ok` with all three channels populated
 - [ ] `result.original.energy == result.original.hexagram as f64 - 31.5` for the original channel
 - [ ] `result.transformed.energy == result.transformed.hexagram as f64 - 31.5` for the transformed channel
-- [ ] `result.nuclear.energy == result.nuclear.hexagram as f64 - 31.5` for the nuclear channel
+- [ ] `result.mutual.energy == result.mutual.hexagram as f64 - 31.5` for the mutual channel
 - [ ] `result.moving_line ∈ 1..=6`
-- [ ] Three-channel fixture: a fixed input returns populated original, transformed, and nuclear with energies matching manual computation
+- [ ] Three-channel fixture: a fixed input returns populated original, transformed, and mutual with energies matching manual computation
 - [ ] Midpoint fixture: `HexagramEnergy::new(0)` has energy `-31.5`; `HexagramEnergy::new(63)` has energy `+31.5`
 
 ### Stop condition

@@ -668,6 +668,16 @@ mod tests {
             vec!["time".into(), "high".into(), "low".into()]
         }
 
+        fn column_dtypes(&self) -> Vec<(String, algotrap::engine::traits::ColumnDType)> {
+            use algotrap::engine::traits::ColumnDType;
+
+            vec![
+                ("time".into(), ColumnDType::Number),
+                ("high".into(), ColumnDType::Number),
+                ("low".into(), ColumnDType::Number),
+            ]
+        }
+
         fn slice_last(
             &self,
             count: usize,

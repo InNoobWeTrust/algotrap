@@ -26,7 +26,7 @@
 
 Define deterministic, testable interfaces for producing I Ching-derived records from UTC timestamps and joining those records to the existing time-indexed candle frame. The design preserves the following research traditions while keeping their semantics separate:
 
-1. **Plum Blossom (`Mei Hua Yi Shu`):** a discrete time-casting method with an explicit moving line, transformed hexagram, and mutual/nuclear hexagram.
+1. **Plum Blossom (`Mei Hua Yi Shu`):** a discrete time-casting method with an explicit moving line, transformed hexagram, and mutual hexagram.
 2. **Gua Qi / Twelve Sovereigns:** a solar-ecliptic sector classification using twelve tidal hexagrams.
 3. **Fu Xi circular wheel:** a 64-hexagram angular quantizer with a separate geometric line position.
 
@@ -111,7 +111,7 @@ pub struct IchingRecord {
     pub bits_top_to_bottom: String,
     pub moving_line: Option<u8>,
     pub transformed_binary_index: Option<u8>,
-    pub nuclear_binary_index: Option<u8>,
+    pub mutual_binary_index: Option<u8>,
     pub polarity_weighted: f64,
     pub kinetic_score: f64,
     pub discrete_derivative: Option<f64>,
@@ -161,7 +161,7 @@ Then:
 2. Lower trigram number is `S2 mod 8`, with zero mapped to 8.
 3. Moving line is `S2 mod 6`, with zero mapped to 6, counted from bottom line 1 to top line 6.
 4. The transformed hexagram flips exactly that moving line.
-5. The mutual/nuclear hexagram uses original lines 2, 3, 4 as its lower trigram and original lines 3, 4, 5 as its upper trigram. These line numbers are one-based and bottom-to-top.
+5. The mutual hexagram uses original lines 2, 3, 4 as its lower trigram and original lines 3, 4, 5 as its upper trigram. These line numbers are one-based and bottom-to-top.
 
 Plum Blossom is the only default method in this document that produces a moving line and transformed hexagram. The kinetic score and kinetic turn-point rule in §4 are therefore defined for this method first.
 
@@ -475,7 +475,7 @@ Planned machine-verifiable acceptance:
   | `240°` | Kun | `000000` |
 
 - Fixed expected UTC fixtures for the selected winter solstice, spring equinox, summer solstice, and autumn equinox inputs return Fu, Da Zhuang, Gou, and Guan respectively, subject to the `1e-9°` non-boundary tolerance when the fixture is not a boundary case.
-- Plum Blossom fixtures verify moving-line calculation, bottom-to-top flipping, transformed hexagram, and mutual/nuclear line selection.
+- Plum Blossom fixtures verify moving-line calculation, bottom-to-top flipping, transformed hexagram, and mutual line selection.
 - Plum Blossom fixtures are synthetic (hand-authored); no raw remote-provider payload may be committed to the repository.
 - The Zi-hour rule is tested under the approved v1 policy: a candle open timestamp in CST `[23:00, 24:00)` keeps the **same** Gregorian civil date as the calendar lookup key and assigns `hour_branch = 1`.
 - An offline replay integration test builds a complete Plum Blossom snapshot from synthetic lunar-date fixtures without network access; `snapshot_id` is deterministic across identical inputs and incorporates the frozen time-policy ID plus per-date fixture/schema-version provenance (see [`docs/architecture/iching-lunar-calendar-integration.md`](../../architecture/iching-lunar-calendar-integration.md)).
@@ -553,7 +553,7 @@ PLV/Hilbert work remains deferred until the numerical method and dependency are 
 ### 7.2 Classical Sinological & I Ching Numerology Systems (§2.1–§2.3, §3.1–§3.3, §4.2)
 
 - **Nielsen, Bent (2003).** *A Companion to Yi Jing Numerology and Cosmology: Chinese Studies of Images and Numbers from Han (202 BCE–220 CE) to Song (960–1279 CE)*. London: RoutledgeCurzon. ISBN: 978-0700716081.
-  - *Annotation:* Comprehensive academic reference on *Xiangshu* (象數) Yixue, documenting the historical mechanics of Han Dynasty *Gua Qi* (卦氣, Meng Xi and Jing Fang), the Twelve Sovereign/Tidal Hexagrams (十二辟卦 / 十二消息卦), mutual/nuclear hexagrams (互卦), and Five Elements (五行) interactions.
+  - *Annotation:* Comprehensive academic reference on *Xiangshu* (象數) Yixue, documenting the historical mechanics of Han Dynasty *Gua Qi* (卦氣, Meng Xi and Jing Fang), the Twelve Sovereign/Tidal Hexagrams (十二辟卦 / 十二消息卦), mutual hexagrams (互卦), and Five Elements (五行) interactions.
 - **Liu, Da (1979).** *I Ching Numerology: Based on Shao Yung's Classic Plum Blossom Numerology*. San Francisco: Harper & Row / Routledge & Kegan Paul. ISBN: 978-0710002440.
   - *Annotation:* Primary English reference for Plum Blossom (*Mei Hua Yi Shu* 梅花易數) calculation rules, modular arithmetic for trigram derivation ($S_1 \pmod 8$, $S_2 \pmod 8$), moving lines ($S2 \pmod 6$), and transformed hexagrams.
 - **Birdwhistell, Anne D. (1989).** *Transition to Neo-Confucianism: Shao Yung on Knowledge and Symbols of Reality*. Stanford, CA: Stanford University Press. ISBN: 978-0804715508.

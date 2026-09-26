@@ -1,24 +1,25 @@
 # Cryptobot I-Ching Energy Panel — L2 Implementation Plan
 
-> **Status: superseded (Sep 2026).** The three-line contract below was replaced by the candlestick trajectory model in `src/ta/iching/trajectory.rs` (`iching_bar_trajectory`). Original is now a candlestick range `[open, close] × [low, high]`; Transformed and Nuclear are projection lines at bar closes; six columns plus legacy energy aliases ship. See PR #22 for the current implementation. Historical text retained as design context.
+> **Status: implemented (Sep 2026).** Reflects the final trajectory + mutual-band model shipped in this PR (src/ta/iching/trajectory.rs, bins/cryptobot/src/presentation.rs, bins/chartlib renderer, bins/cryptobot/UX-SPEC.md).
+> Mutual (互卦, formerly Nuclear) renders as three `BaselineSeries` (high/low edge lines + line-only mean); all 13 I-Ching trajectory columns from `iching_bar_trajectory` ship.
 
 ## Objective
 
-Replace the visible RSSI pane and Sharpe pane with exactly one I-Ching Energy pane. The pane renders three simultaneous solid `LineSeries` from the existing I-Ching facade: Original, Transformed, and Nuclear. This is a bounded replacement; all unrelated indicators, including Reverse RSI overlays in the price pane, Structure Power, ATR Reversion, candles, market APIs, configuration, and `src/ta/iching/**` remain unchanged.
+Replace the visible RSSI pane and Sharpe pane with exactly one I-Ching Energy pane. The pane renders five series from `iching_bar_trajectory`: a stepped `LineSeries` average (本卦 Original, OHLC/4), a dashed stepped `LineSeries` close projection (变卦 Transformed), and three zero-split `BaselineSeries` — high/low edge lines plus line-only mean (互卦 Mutual inner band). This is a bounded replacement; all unrelated indicators, including Reverse RSI overlays in the price pane, Structure Power, ATR Reversion, candles, market APIs, configuration, and `src/ta/iching/**` remain unchanged.
 
 ## Discovery and locked integration contract
 
 - Verified producer boundary: `bins/cryptobot/src/presentation.rs` owns `CryptoIndicators`, `CryptoIndicatorRow`, source-frame columns, chart SQL projection, and presentation tests. `Kline.time` is milliseconds.
 - Verified consumer boundary: `bins/cryptobot/src/main.rs` owns the embedded Lightweight Charts template. Browser chart time is derived by `Math.floor(d.time / 1000)`.
 - Verified facade: `algotrap::ta::plum_blossom_signal_with_policy(DateTime<Utc>, LeapMonthPolicy)` returns `TaResult<IchingSignal>`; Plum Blossom supplies a transformed channel. The presentation layer selects `LeapMonthPolicy::Allow` for **every** candle.
-- Locked JSON/chart data columns, nullable numeric at each input candle time: `iching_original_energy`, `iching_transformed_energy`, `iching_nuclear_energy`.
+- Locked JSON/chart data columns from `iching_bar_trajectory` — open-cast energy aliases: `iching_original_energy` (= `energy_open`), `iching_transformed_energy` (= `transformed_open`), `iching_mutual_energy` (= `mutual_open`); Original envelope: `iching_open`, `iching_high`, `iching_low`, `iching_close`; terminal cast: `iching_moving_line` (nullable u8), `iching_transformed_close`, `iching_mutual_close`; Mutual band: `iching_mutual_high`, `iching_mutual_low`, `iching_mutual_mean`. All are nullable numeric.
 - Timestamp contract: convert each Kline millisecond timestamp to `DateTime<Utc>` in presentation. Invalid or out-of-range timestamps return the presentation transformation error; no fallback timestamp is allowed.
 - Signal failure contract: propagate facade errors as presentation transformation errors; do not substitute zero, omit a row, or silently serialize null for a true facade failure. The transformed channel is serialized from Plum Blossom's transformed energy.
-- UI contract: pane indices after replacement are price `0`, Structure Power `1`, ATR Reversion `2`, I-Ching Energy `3`. The new pane contains exactly three `LineSeries`, and exactly one watermark/legend identifies all three labels:
-  - `I-Ching Original` — solid line, `#4FC3F7` (evaluated main energy)
-  - `I-Ching Transformed` — dashed (`lineStyle: 2`) + transparent, `rgba(255,183,77,0.55)` (derived prediction of the next state)
-  - `I-Ching Nuclear` — BaselineSeries zero-split area with transparent positive/negative fills (`rgba(206,147,216,…)` / `rgba(156,39,176,…)`)
-  These opaque, non-gradient colors are separately WCAG-distinguishable on the existing `#22222240` dark chart background. The natural series scale is `[-31.5, 31.5]`; do not clamp, normalize, or add a derived scale.
+- UI contract: pane indices after replacement are price `0`, Structure Power `1`, ATR Reversion `2`, I-Ching Energy `3`. The new pane contains two stepped `LineSeries` and three `BaselineSeries` (zero-split, `baseValue` price 0). Exactly one compact in-pane watermark identifies all three layer roles with their 卦 characters (本/变/互):
+  - `本卦 I-Ching Original average` — stepped `LineSeries`, `rgba(79,195,247,0.95)`, 2px; value = (`iching_open`+`iching_high`+`iching_low`+`iching_close`)/4. Intra-bar OHLC range is usually tiny, so candlesticks collapse to flat ticks; the average line avoids this.
+  - `变卦 Transformed projection` — stepped dashed `LineSeries` (`lineStyle: 2`), `rgba(255,183,77,0.40)`, 2px; value = `iching_transformed_close` (terminal moving-line cast destination).
+  - `互卦 Mutual inner band + mean` — three `BaselineSeries` (v5, `baseValue` price 0): edge lines at `iching_mutual_high` / `iching_mutual_low` (positive teal-green `rgba(38,166,154,0.25)` / negative coral-red `rgba(239,83,80,0.25)`, 1px, fills 0.12→0.00 at zero); line-only mean at `iching_mutual_mean` (lighter tints `rgba(110,231,183,0.35)` / `rgba(252,165,165,0.35)`, 1px, fills 0.00). Lightweight-Charts v5 cannot fill between two dynamic lines — each series fills line→zero; the inner range reads as the subtraction between the edge lines, NOT fill overlap.
+  The natural series scale is `[-31.5, 31.5]`; do not clamp, normalize, or add a derived scale.
 - Removal is semantic, not concealment: delete RSSI calculation/state/output/source fields/SQL color and derived values/chart series, bindings, watermark, and RSSI tint CSS/runtime classes. Delete Sharpe calculation/state/output/source fields/SQL color/chart series, binding, and watermark. Preserve Reverse RSI price overlays despite their names.
 
 ## Target file tree
@@ -38,7 +39,7 @@ No other file is writable during implementation. In particular, `src/ta/iching/*
 
 ## Quick-track UX specification
 
-Quick-track is justified because this is one replacement pane in an established single-page chart: no new navigation, controls, or interaction behavior. Before chart code, materialize `bins/cryptobot/UX-SPEC.md` as the implementation contract. It must specify: the four pane locations; the three exact labels and color tokens/values above; a single watermark/legend listing all three labels with matching colors; natural `[-31.5, 31.5]` energy display; time alignment with candle seconds in the browser; no RSSI tint; no RSSI/Sharpe pane or label; and unchanged price/Reverse RSI/Structure/ATR behavior.
+Quick-track is justified because this is one replacement pane in an established single-page chart: no new navigation, controls, or interaction behavior. Before chart code, materialize `bins/cryptobot/UX-SPEC.md` as the implementation contract. It must specify: the four pane locations; the exact series labels (with 卦 characters), color tokens, and rendering semantics above; a compact in-pane watermark naming each channel with its 卦 character (本/变/互); natural `[-31.5, 31.5]` energy display; time alignment with candle seconds in the browser; no RSSI tint; no RSSI/Sharpe pane or label; and unchanged price/Reverse RSI/Structure/ATR behavior.
 
 ## Ordered functional units
 
@@ -55,4 +56,4 @@ Quick-track is justified because this is one replacement pane in an established 
 
 ## Completion gate
 
-The feature is complete only when all four units meet their acceptance criteria: serialized records expose exactly the three locked I-Ching fields and no RSSI/Sharpe fields; all valid candle timestamps map one-for-one to all three energies under `Allow`; the chart has one pane at index 3 with exactly three I-Ching `LineSeries`, one identifying watermark, and no RSSI/Sharpe runtime behavior; all focused checks pass.
+The feature is complete only when all four units meet their acceptance criteria: serialized records expose all 13 I-Ching trajectory columns (energy aliases + Original envelope + terminal cast + Mutual band) and no RSSI/Sharpe fields; all valid candle timestamps map one-for-one to trajectory data under `Allow`; the chart has one pane at index 3 with two stepped `LineSeries` and three `BaselineSeries`, one compact in-pane watermark identifying all three layer roles by their 卦 characters (本/变/互), and no RSSI/Sharpe runtime behavior; all focused checks pass.

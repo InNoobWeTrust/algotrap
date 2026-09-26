@@ -1,6 +1,7 @@
 mod tools;
 
 use std::collections::HashMap;
+use std::io::ErrorKind;
 
 use algotrap::prelude::*;
 use async_openai::Client as OpenAIClient;
@@ -29,7 +30,7 @@ pub use tools::{build_tools, execute_tool_call};
 pub enum AnalysisMode {
     /// Full analysis for manual `/analyze` — uses system.txt + user.txt, all tools.
     FullAnalysis,
-    /// Alert scan — uses system_alert.txt + user_alert.txt, excludes capture_chart.
+    /// Alert scan — uses adaptive prompts and the same seven tools as full analysis.
     AlertScan,
 }
 
@@ -55,12 +56,81 @@ pub struct AnalysisResult {
     pub proposed_indicator_params: Option<Vec<IndicatorProposal>>,
 }
 
+fn retryable_transport_error(error: &async_openai::error::OpenAIError) -> Option<&'static str> {
+    let gateway_message = match error {
+        async_openai::error::OpenAIError::JSONDeserialize(_, content) => Some(content.as_str()),
+        async_openai::error::OpenAIError::ApiError(api_error) => Some(api_error.message.as_str()),
+        _ => None,
+    };
+    if let Some(message) = gateway_message {
+        let message = message.to_ascii_lowercase();
+        if message.contains("\"error\"")
+            && [
+                "timeout",
+                "504",
+                "502",
+                "503",
+                "529",
+                "overloaded",
+                "temporarily unavailable",
+            ]
+            .iter()
+            .any(|marker| message.contains(marker))
+        {
+            return Some("gateway");
+        }
+    }
+
+    let async_openai::error::OpenAIError::Reqwest(error) = error else {
+        return None;
+    };
+    if error.is_status() {
+        return None;
+    }
+
+    if error.is_timeout() {
+        return Some("timeout");
+    }
+    if error.is_connect() {
+        return Some("connection");
+    }
+    if error.is_body() {
+        return Some("response body");
+    }
+    if error.is_request() && !error.is_builder() {
+        return Some("send");
+    }
+
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+            if is_retryable_io_error(io_error.kind()) {
+                return Some("transport");
+            }
+        }
+        source = cause.source();
+    }
+    None
+}
+
+fn is_retryable_io_error(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::TimedOut
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+    )
+}
+
 // ─── Agent Entry Point ───────────────────────────────────────────────────────
 
 /// Run the multi-turn agentic LLM analysis loop.
 ///
-/// In `FullAnalysis` mode, uses all tools and returns the analysis text.
-/// In `AlertScan` mode, excludes `capture_chart` and parses a structured
+/// In `FullAnalysis` mode, uses all seven tools and returns the analysis text.
+/// In `AlertScan` mode, uses the same tools and parses a structured
 /// JSON response for confidence + direction.
 pub async fn run_agent(
     llm_client: &OpenAIClient<OpenAIConfig>,
@@ -71,14 +141,14 @@ pub async fn run_agent(
     mode: AnalysisMode,
     memory: Option<&TickerMemory>,
 ) -> Result<AnalysisResult, Box<dyn core::error::Error + Send + Sync>> {
-    let tools = build_tools(conf, mode)?;
+    let tools = build_tools(conf)?;
 
     let mut available_timeframes: Vec<Timeframe> = all_dfs.keys().copied().collect::<Vec<_>>();
     available_timeframes.sort_by_key(|tf| tf.weight());
 
     let (system_file, user_file) = match mode {
         AnalysisMode::FullAnalysis => ("system.txt", "user.txt"),
-        AnalysisMode::AlertScan => ("system_adaptive.txt", "user_adaptive.txt"),
+        AnalysisMode::AlertScan => ("system_alert.txt", "user_alert.txt"),
     };
 
     let system_prompt = render_prompt(conf, ticker, system_file, memory)?;
@@ -96,7 +166,11 @@ pub async fn run_agent(
     ];
 
     // Session-scoped scratchpad for LLM working memory (Scenario 10: empty at start)
-    let mut session_scratchpad: HashMap<String, String> = HashMap::new();
+    let session_scratchpad: HashMap<String, String> = HashMap::new();
+    let default_ic = IndicatorConfig::default();
+    let ic = memory.map(|m| &m.indicator_config).unwrap_or(&default_ic);
+    let tool_ctx =
+        tools::create_tool_context(all_dfs, gap_zones, conf, ticker, ic, &session_scratchpad)?;
     let mut handoff_attempts: u8 = 0;
     let mut empty_response_retries: u8 = 0;
 
@@ -109,9 +183,11 @@ pub async fn run_agent(
         // Handoff check: when messages exceed threshold, manage context
         let handoff_threshold = conf.keep_recent_messages * 2 + 1; // +1 for system msg
         if messages.len() > handoff_threshold {
-            if !session_scratchpad.is_empty() {
+            let notes: HashMap<String, String> =
+                serde_json::from_value(tool_ctx.get_state("notes", serde_json::json!({})))?;
+            if !notes.is_empty() {
                 // Scenario 4: Scratchpad has entries → instant context reset
-                context_reset(&mut messages, &session_scratchpad)?;
+                context_reset(&mut messages, &notes)?;
                 handoff_attempts = 0;
             } else if handoff_attempts == 0 {
                 // Scenario 5: First forced handoff directive
@@ -150,7 +226,24 @@ pub async fn run_agent(
         }
         let request = req_builder.build()?;
 
-        let response = llm_client.chat().create(request).await?;
+        let mut attempt = 1;
+        let response = loop {
+            match llm_client.chat().create(request.clone()).await {
+                Ok(response) => break response,
+                Err(error) => {
+                    let Some(error_class) = retryable_transport_error(&error) else {
+                        return Err(error.into());
+                    };
+                    if attempt == 3 {
+                        return Err(error.into());
+                    }
+                    warn!(attempt, error_class, "Retrying LLM chat request");
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
+                    attempt += 1;
+                }
+            }
+        };
+        info!(turn, response_model = %response.model, response_id = %response.id, "LLM completion response");
         let choice = response.choices.first().ok_or("No response from LLM")?;
         let assistant_msg = &choice.message;
 
@@ -198,18 +291,7 @@ pub async fn run_agent(
                         "Executing tool call"
                     );
 
-                    let default_ic = IndicatorConfig::default();
-                    let ic = memory.map(|m| &m.indicator_config).unwrap_or(&default_ic);
-                    let result = execute_tool_call(
-                        tool_call,
-                        all_dfs,
-                        gap_zones,
-                        conf,
-                        ticker,
-                        ic,
-                        &mut session_scratchpad,
-                    )
-                    .await?;
+                    let result = tools::dispatch_tool_call(tool_call, &tool_ctx).await?;
 
                     debug!(
                         tool = %tool_call.function.name,
@@ -1589,6 +1671,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_retryable_transport_errors() {
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+            ErrorKind::BrokenPipe,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(is_retryable_io_error(kind), "{kind:?} should be retried");
+        }
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::InvalidInput] {
+            assert!(
+                !is_retryable_io_error(kind),
+                "{kind:?} should not be retried"
+            );
+        }
+
+        // A 401 API response is not a transport error, and must not be retried.
+        let unauthorized =
+            async_openai::error::OpenAIError::ApiError(async_openai::error::ApiError {
+                message: "Unauthorized".into(),
+                r#type: None,
+                param: None,
+                code: None,
+            });
+        assert_eq!(retryable_transport_error(&unauthorized), None);
+
+        let timeout_payload = r#"{"id":"gen-redacted","error":{"message":"A Timeout Occurred","code":504,"metadata":{"error_type":"timeout"}}}"#;
+        let timeout_deser = async_openai::error::OpenAIError::JSONDeserialize(
+            serde_json::from_str::<async_openai::types::chat::CreateChatCompletionResponse>(
+                timeout_payload,
+            )
+            .unwrap_err(),
+            timeout_payload.into(),
+        );
+        assert!(retryable_transport_error(&timeout_deser).is_some());
+
+        let successful_payload = r#"{"id":"gen-redacted","object":"chat.completion"}"#;
+        let schema_mismatch = async_openai::error::OpenAIError::JSONDeserialize(
+            serde_json::from_str::<async_openai::types::chat::CreateChatCompletionResponse>(
+                successful_payload,
+            )
+            .unwrap_err(),
+            successful_payload.into(),
+        );
+        assert_eq!(retryable_transport_error(&schema_mismatch), None);
+    }
+
+    #[test]
     fn test_parse_alert_json_valid() {
         // Fail-closed conviction: LONG without >=2 valid plans forces NONE/0.
         let text =
@@ -2731,7 +2863,12 @@ That's all."#;
         let config_map = std::fs::read_to_string(manifest_dir.join("k8s/prompts-configmap.yaml"))
             .expect("read prompts ConfigMap");
 
-        for filename in ["system_adaptive.txt", "user_adaptive.txt"] {
+        for filename in [
+            "system_alert.txt",
+            "user_alert.txt",
+            "system.txt",
+            "user.txt",
+        ] {
             let source =
                 std::fs::read_to_string(manifest_dir.join("config/prompts").join(filename))
                     .unwrap_or_else(|error| {
@@ -2749,9 +2886,9 @@ That's all."#;
     #[test]
     fn test_active_adaptive_prompt_contract_includes_timeframe_and_outcome_rules() {
         let prompts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/prompts");
-        let system = std::fs::read_to_string(prompts_dir.join("system_adaptive.txt"))
+        let system = std::fs::read_to_string(prompts_dir.join("system_alert.txt"))
             .expect("read active adaptive system prompt");
-        let user = std::fs::read_to_string(prompts_dir.join("user_adaptive.txt"))
+        let user = std::fs::read_to_string(prompts_dir.join("user_alert.txt"))
             .expect("read active adaptive user prompt");
         let contract = format!("{system}\n{user}");
 

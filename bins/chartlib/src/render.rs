@@ -98,41 +98,108 @@ mod tests {
             "iching_low",
             "iching_close",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
         ] {
             assert!(INTERACTIVE_TEMPLATE.contains(field));
         }
         assert!(INTERACTIVE_TEMPLATE.contains("value: d.iching_transformed_close"));
-        assert!(INTERACTIVE_TEMPLATE.contains("value: d.iching_nuclear_close"));
-        assert!(INTERACTIVE_TEMPLATE.contains("I-Ching Original range"));
-        assert!(INTERACTIVE_TEMPLATE.contains("Transformed projection"));
-        assert!(INTERACTIVE_TEMPLATE.contains("Nuclear inner state"));
-        assert!(INTERACTIVE_TEMPLATE.contains("chart.panes()[3]"));
-        assert!(!INTERACTIVE_TEMPLATE.contains("chart.panes()[4]"));
-        assert!(INTERACTIVE_TEMPLATE.contains("LightweightCharts.CandlestickSeries"));
         for mapping in [
-            "open: d.iching_open",
-            "high: d.iching_high",
-            "low: d.iching_low",
-            "close: d.iching_close",
+            "value: d.iching_mutual_high",
+            "value: d.iching_mutual_low",
+            "value: d.iching_mutual_mean",
         ] {
             assert!(INTERACTIVE_TEMPLATE.contains(mapping));
         }
-        // Transformed (derived prediction): dashed + transparent orange.
+        for label in [
+            "本卦 I-Ching Original average",
+            "变卦 Transformed projection",
+            "互卦 Mutual inner band + mean",
+        ] {
+            assert!(INTERACTIVE_TEMPLATE.contains(label));
+        }
+        assert!(INTERACTIVE_TEMPLATE.contains("chart.panes()[3]"));
+        assert!(!INTERACTIVE_TEMPLATE.contains("chart.panes()[4]"));
+        assert!(INTERACTIVE_TEMPLATE.contains("LightweightCharts.CandlestickSeries"));
+        // Original: intra-bar OHLC range is usually tiny, so the pane plots the
+        // OHLC average as a stepped LineSeries instead of candlesticks.
+        assert!(INTERACTIVE_TEMPLATE.contains("ichingOriginalSeries"));
         assert!(
             INTERACTIVE_TEMPLATE
-                .contains("rgba(255, 183, 77, 0.55)', lineWidth: 2, lineStyle: 2, lineType: 1"),
+                .contains("(d.iching_open + d.iching_high + d.iching_low + d.iching_close) / 4"),
+            "original must plot the OHLC average"
+        );
+        assert!(
+            INTERACTIVE_TEMPLATE.contains(
+                "const ichingOriginalSeries = chart.addSeries(LightweightCharts.LineSeries"
+            ),
+            "original average must use LineSeries, not CandlestickSeries"
+        );
+        assert!(
+            INTERACTIVE_TEMPLATE.contains("color: 'rgba(79, 195, 247, 0.95)'"),
+            "original average line must be near-opaque foreground above the muted mutual background"
+        );
+        // Transformed (derived prediction): dashed + more transparent orange so
+        // the foreground Original average stays dominant.
+        assert!(
+            INTERACTIVE_TEMPLATE
+                .contains("rgba(255, 183, 77, 0.40)', lineWidth: 2, lineStyle: 2, lineType: 1"),
             "transformed must be dashed (lineStyle: 2) and transparent to signal prediction"
         );
-        // Nuclear: BaselineSeries zero-split with transparent positive/negative purple fills.
+        // Mutual: BaselineSeries with zero-split so each fill segment stays
+        // inside its own side of 0 and reads as positive or negative.
+        assert!(INTERACTIVE_TEMPLATE.contains("ichingMutualHighSeries"));
+        assert!(INTERACTIVE_TEMPLATE.contains("ichingMutualLowSeries"));
+        assert!(INTERACTIVE_TEMPLATE.contains("ichingMutualMeanSeries"));
         assert!(
-            INTERACTIVE_TEMPLATE.contains("BaselineSeries"),
-            "nuclear must use BaselineSeries for positive/negative fill"
+            INTERACTIVE_TEMPLATE.contains("LightweightCharts.BaselineSeries"),
+            "mutual band must use BaselineSeries for zero-split fills"
         );
-        assert!(INTERACTIVE_TEMPLATE.contains("baseValue: { type: 'price', price: 0 }"));
+        // Zero-split boundaries use TradingView teal-green above zero and hot
+        // coral-red below zero. Fill overlap is NOT the inner range (each
+        // BaselineSeries fills its line to zero), so the inner range is read
+        // as the subtraction between the visible stepped edge lines; fills
+        // stay equal and modest as pure sign wash.
+        assert!(INTERACTIVE_TEMPLATE.contains(
+            "const ichingBoundaryOptions = {\n            baseValue: { type: 'price', price: 0 },"
+        ));
+        for token in [
+            "topLineColor: 'rgba(38, 166, 154, 0.25)'",
+            "topFillColor1: 'rgba(38, 166, 154, 0.12)'",
+            "bottomLineColor: 'rgba(239, 83, 80, 0.25)'",
+            "bottomFillColor2: 'rgba(239, 83, 80, 0.12)'",
+        ] {
+            assert!(INTERACTIVE_TEMPLATE.contains(token));
+        }
+        // Mean is line-only (fills 0.00) with a slightly lighter line so it
+        // reads on the wash but stays below the Transformed dashed line
+        // (0.40/2px) in visual weight.
+        for token in [
+            "topLineColor: 'rgba(110, 231, 183, 0.35)'",
+            "topFillColor1: 'rgba(45, 218, 178, 0.00)'",
+            "bottomLineColor: 'rgba(252, 165, 165, 0.35)'",
+            "bottomFillColor2: 'rgba(255, 110, 118, 0.00)'",
+        ] {
+            assert!(INTERACTIVE_TEMPLATE.contains(token));
+        }
         assert!(INTERACTIVE_TEMPLATE.contains("lineType: 1"));
-        assert!(INTERACTIVE_TEMPLATE.contains("topFillColor1: 'rgba(206, 147, 216, 0.12)'"));
-        assert!(INTERACTIVE_TEMPLATE.contains("bottomFillColor1: 'rgba(156, 39, 176, 0.34)'"));
+        assert!(!INTERACTIVE_TEMPLATE.contains("ichingMutualSeries"));
+    }
+
+    #[test]
+    fn template_title_watermark_sits_top_right_and_dim() {
+        // Pane-0 title must not sit under the top-left picker overlay: it is
+        // anchored top-right (beside the picker), dimmed so it never
+        // obstructs chart drawings, and sized from the container width so it
+        // stays proportionate on iPad/mobile.
+        assert!(
+            INTERACTIVE_TEMPLATE.contains("Pane 0 title sits top-right"),
+            "pane-0 watermark placement must be documented"
+        );
+        assert!(INTERACTIVE_TEMPLATE.contains("horzAlign: 'right'"));
+        assert!(INTERACTIVE_TEMPLATE.contains("rgba(178, 181, 190, 0.32)"));
+        assert!(INTERACTIVE_TEMPLATE.contains("container.clientWidth"));
     }
 
     #[test]
@@ -140,6 +207,28 @@ mod tests {
         let lower = INTERACTIVE_TEMPLATE.to_lowercase();
         assert!(!lower.contains("rssi"));
         assert!(!lower.contains("sharpe"));
+        // Viewport meta is required so the picker scales on iPad/mobile
+        // instead of rendering at desktop width.
+        assert!(
+            INTERACTIVE_TEMPLATE.contains("name=\"viewport\"")
+                && INTERACTIVE_TEMPLATE.contains("width=device-width"),
+            "template must declare a responsive viewport for small screens"
+        );
+        // Picker must stay proportionate to the chart on small screens:
+        // fluid widths plus stepped scale-down breakpoints.
+        for token in [
+            "max-width: calc(100vw - 24px)",
+            "width: min(56vw, 220px)",
+            "@media (max-width: 768px)",
+            "@media (max-width: 480px)",
+            "transform: scale(0.8)",
+            "transform: scale(0.7)",
+        ] {
+            assert!(
+                INTERACTIVE_TEMPLATE.contains(token),
+                "responsive picker rule missing: {token}"
+            );
+        }
         assert!(INTERACTIVE_TEMPLATE.contains("neutral_revrsi"));
         assert!(INTERACTIVE_TEMPLATE.contains(
             "const structurePwrSeries = chart.addSeries(LightweightCharts.HistogramSeries, {}, 1);"

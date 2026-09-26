@@ -89,7 +89,7 @@ pub(crate) struct CryptoIndicatorRow {
     pub atr_lowerband: Option<f64>,
     pub iching_original_energy: Option<f64>,
     pub iching_transformed_energy: Option<f64>,
-    pub iching_nuclear_energy: Option<f64>,
+    pub iching_mutual_energy: Option<f64>,
     pub structure_power: Option<f64>,
     pub structure_power_sma: Option<f64>,
     pub atr_percent: Option<f64>,
@@ -237,7 +237,7 @@ impl Kernel for CryptoIndicators {
             })?,
             iching_original_energy: Some(signal.original.energy),
             iching_transformed_energy: Some(transformed.energy),
-            iching_nuclear_energy: Some(signal.nuclear.energy),
+            iching_mutual_energy: Some(signal.mutual.energy),
             structure_power: Some(structure_value),
             structure_power_sma: structure_sma_step.output,
             atr_percent: option_map2(Some(atr), Some(kline.open), atr_percent)?,
@@ -406,11 +406,11 @@ fn crypto_output_frame(
             ),
         ),
         (
-            "iching_nuclear_energy".into(),
+            "iching_mutual_energy".into(),
             SourceColumnData::Number(
                 trajectories
                     .iter()
-                    .map(|trajectory| Some(trajectory.nuclear_open))
+                    .map(|trajectory| Some(trajectory.mutual_open))
                     .collect(),
             ),
         ),
@@ -469,11 +469,38 @@ fn crypto_output_frame(
             ),
         ),
         (
-            "iching_nuclear_close".into(),
+            "iching_mutual_close".into(),
             SourceColumnData::Number(
                 trajectories
                     .iter()
-                    .map(|trajectory| Some(trajectory.nuclear_close))
+                    .map(|trajectory| Some(trajectory.mutual_close))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_high".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_high))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_low".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_low))
+                    .collect(),
+            ),
+        ),
+        (
+            "iching_mutual_mean".into(),
+            SourceColumnData::Number(
+                trajectories
+                    .iter()
+                    .map(|trajectory| Some(trajectory.mutual_mean))
                     .collect(),
             ),
         ),
@@ -601,9 +628,10 @@ fn crypto_select_expressions(risk_adjustment: &str) -> Vec<String> {
         "neutral_revrsi", "'rgba(178,181,190,0.2)' AS neutral_revrsi_color", "bullish_revrsi", "'rgba(33,150,243,0.2)' AS bullish_revrsi_color",
         "bearish_revrsi", "'rgba(255,152,0,0.2)' AS bearish_revrsi_color", "atr_upperband", "'rgba(76, 175, 80, 0.2)' AS atr_upperband_color",
         "atr_lowerband", "'rgba(242, 54, 69, 0.2)' AS atr_lowerband_color", "iching_original_energy",
-        "iching_transformed_energy", "iching_nuclear_energy", "structure_power",
+        "iching_transformed_energy", "iching_mutual_energy", "structure_power",
         "iching_open", "iching_high", "iching_low", "iching_close", "iching_moving_line",
-        "iching_transformed_close", "iching_nuclear_close",
+        "iching_transformed_close", "iching_mutual_close", "iching_mutual_high",
+        "iching_mutual_low", "iching_mutual_mean",
         "CASE WHEN structure_power >= 0.0 THEN 'rgba(0, 137, 123, 1)' ELSE 'rgba(136, 14, 79, 1)' END AS structure_power_color",
         "structure_power_sma", "3.0 * structure_power - 2.0 * structure_power_sma AS structure_power_direction", "atr_percent", "atr_reversion_percent",
         "CASE WHEN atr_reversion_percent > 50.0 THEN 'rgba(76, 175, 80, 0.5)' WHEN atr_reversion_percent < -50.0 THEN 'rgba(242, 54, 69, 0.5)' ELSE 'rgba(41, 98, 255, 0.2)' END AS atr_reversion_percent_color",
@@ -670,7 +698,7 @@ mod tests {
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
         ] {
             assert!(sql.contains(present), "{present} must appear in SQL");
         }
@@ -805,14 +833,17 @@ mod tests {
             ("atr_lowerband", "number"),
             ("iching_original_energy", "number"),
             ("iching_transformed_energy", "number"),
-            ("iching_nuclear_energy", "number"),
+            ("iching_mutual_energy", "number"),
             ("iching_open", "number"),
             ("iching_high", "number"),
             ("iching_low", "number"),
             ("iching_close", "number"),
             ("iching_moving_line", "number"),
             ("iching_transformed_close", "number"),
-            ("iching_nuclear_close", "number"),
+            ("iching_mutual_close", "number"),
+            ("iching_mutual_high", "number"),
+            ("iching_mutual_low", "number"),
+            ("iching_mutual_mean", "number"),
             ("structure_power", "number"),
             ("structure_power_sma", "number"),
             ("atr_percent", "number"),
@@ -892,7 +923,7 @@ mod tests {
             "atr_lowerband_color",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "structure_power",
             "iching_open",
             "iching_high",
@@ -900,7 +931,10 @@ mod tests {
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "structure_power_color",
             "structure_power_sma",
             "structure_power_direction",
@@ -916,14 +950,17 @@ mod tests {
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
         ] {
             assert!(frame.has_column(present), "{present} must be projected");
         }
@@ -988,9 +1025,9 @@ mod tests {
             "iching_transformed_energy",
         );
         assert_option_f64_close(
-            frame.f64_at("iching_nuclear_energy", mature).unwrap(),
-            direct[mature].iching_nuclear_energy,
-            "iching_nuclear_energy",
+            frame.f64_at("iching_mutual_energy", mature).unwrap(),
+            direct[mature].iching_mutual_energy,
+            "iching_mutual_energy",
         );
         assert_option_f64_close(
             frame.f64_at("body_ratio", mature).unwrap(),
@@ -1049,7 +1086,7 @@ mod tests {
         number(row.atr_lowerband);
         number(row.iching_original_energy);
         number(row.iching_transformed_energy);
-        number(row.iching_nuclear_energy);
+        number(row.iching_mutual_energy);
         number(row.structure_power);
         number(row.structure_power_sma);
         number(row.atr_percent);
@@ -1081,7 +1118,7 @@ mod tests {
                 atr_lowerband: Some(9.0),
                 iching_original_energy: Some(10.0),
                 iching_transformed_energy: Some(11.0),
-                iching_nuclear_energy: Some(11.5),
+                iching_mutual_energy: Some(11.5),
                 structure_power: Some(12.0),
                 structure_power_sma: Some(13.0),
                 atr_percent: Some(14.0),
@@ -1106,7 +1143,7 @@ mod tests {
                 atr_lowerband: Some(29.0),
                 iching_original_energy: Some(30.0),
                 iching_transformed_energy: Some(31.0),
-                iching_nuclear_energy: Some(-31.5),
+                iching_mutual_energy: Some(-31.5),
                 structure_power: Some(32.0),
                 structure_power_sma: Some(33.0),
                 atr_percent: Some(34.0),
@@ -1214,11 +1251,11 @@ mod tests {
                 ),
             ),
             (
-                "iching_nuclear_energy".to_string(),
+                "iching_mutual_energy".to_string(),
                 SourceColumnData::Number(
                     trajectories
                         .iter()
-                        .map(|trajectory| Some(trajectory.nuclear_open))
+                        .map(|trajectory| Some(trajectory.mutual_open))
                         .collect(),
                 ),
             ),
@@ -1277,11 +1314,38 @@ mod tests {
                 ),
             ),
             (
-                "iching_nuclear_close".to_string(),
+                "iching_mutual_close".to_string(),
                 SourceColumnData::Number(
                     trajectories
                         .iter()
-                        .map(|trajectory| Some(trajectory.nuclear_close))
+                        .map(|trajectory| Some(trajectory.mutual_close))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_mutual_high".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.mutual_high))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_mutual_low".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.mutual_low))
+                        .collect(),
+                ),
+            ),
+            (
+                "iching_mutual_mean".to_string(),
+                SourceColumnData::Number(
+                    trajectories
+                        .iter()
+                        .map(|trajectory| Some(trajectory.mutual_mean))
                         .collect(),
                 ),
             ),
@@ -1376,7 +1440,7 @@ mod tests {
                 atr_lowerband,
                 iching_original_energy,
                 iching_transformed_energy,
-                iching_nuclear_energy,
+                iching_mutual_energy,
                 structure_power,
                 structure_power_sma,
                 atr_percent,
@@ -1402,7 +1466,7 @@ mod tests {
                 atr_lowerband,
                 iching_original_energy,
                 iching_transformed_energy,
-                iching_nuclear_energy,
+                iching_mutual_energy,
                 structure_power,
                 structure_power_sma,
                 atr_percent,
@@ -1464,7 +1528,7 @@ mod tests {
             assert!(row.atr.is_some());
             assert!(row.iching_original_energy.is_some());
             assert!(row.iching_transformed_energy.is_some());
-            assert!(row.iching_nuclear_energy.is_some());
+            assert!(row.iching_mutual_energy.is_some());
             assert!(row.structure_power.is_some());
         }
     }
@@ -1477,7 +1541,7 @@ mod tests {
         assert!(row.atr.is_some());
         assert!(row.iching_original_energy.is_some());
         assert!(row.iching_transformed_energy.is_some());
-        assert!(row.iching_nuclear_energy.is_some());
+        assert!(row.iching_mutual_energy.is_some());
         assert!(row.structure_power.is_some());
         assert!(row.bias_reversion.is_some());
     }
@@ -1655,9 +1719,9 @@ mod tests {
             "iching_transformed_energy",
         );
         assert_option_f64(
-            expected.iching_nuclear_energy,
-            actual.iching_nuclear_energy,
-            "iching_nuclear_energy",
+            expected.iching_mutual_energy,
+            actual.iching_mutual_energy,
+            "iching_mutual_energy",
         );
         assert_option_f64(
             expected.structure_power,
@@ -2143,7 +2207,7 @@ mod tests {
                 atr_lowerband: None,
                 iching_original_energy: None,
                 iching_transformed_energy: None,
-                iching_nuclear_energy: None,
+                iching_mutual_energy: None,
                 structure_power: None,
                 structure_power_sma: None,
                 atr_percent: None,
@@ -2178,14 +2242,17 @@ mod tests {
             "atr_lowerband",
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
             "structure_power",
             "structure_power_sma",
             "atr_percent",
@@ -2288,7 +2355,7 @@ mod tests {
             atr_lowerband: None,
             iching_original_energy: None,
             iching_transformed_energy: None,
-            iching_nuclear_energy: None,
+            iching_mutual_energy: None,
             structure_power: None,
             structure_power_sma: None,
             atr_percent: None,
@@ -2319,14 +2386,17 @@ mod tests {
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
             "iching_open",
             "iching_high",
             "iching_low",
             "iching_close",
             "iching_moving_line",
             "iching_transformed_close",
-            "iching_nuclear_close",
+            "iching_mutual_close",
+            "iching_mutual_high",
+            "iching_mutual_low",
+            "iching_mutual_mean",
         ] {
             assert!(
                 frame.column_names().contains(&present),
@@ -2355,7 +2425,7 @@ mod tests {
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
         ] {
             assert!(sql.contains(present), "{present} must appear in SQL");
         }
@@ -2392,7 +2462,7 @@ mod tests {
             for (label, value) in [
                 ("iching_original_energy", row.iching_original_energy),
                 ("iching_transformed_energy", row.iching_transformed_energy),
-                ("iching_nuclear_energy", row.iching_nuclear_energy),
+                ("iching_mutual_energy", row.iching_mutual_energy),
             ] {
                 let value = value.unwrap_or_else(|| panic!("row {position} {label} must be Some"));
                 assert!(
@@ -2413,8 +2483,8 @@ mod tests {
                 "row {position} transformed mismatch"
             );
             assert!(
-                (row.iching_nuclear_energy.unwrap() - expected.nuclear.energy).abs() <= 1e-12,
-                "row {position} nuclear mismatch"
+                (row.iching_mutual_energy.unwrap() - expected.mutual.energy).abs() <= 1e-12,
+                "row {position} mutual mismatch"
             );
         }
         let (frame, _zones) = compute_crypto_frame(candles.clone(), ticker())
@@ -2424,7 +2494,7 @@ mod tests {
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
-            "iching_nuclear_energy",
+            "iching_mutual_energy",
         ] {
             assert!(frame.has_column(present), "{present} must be projected");
         }

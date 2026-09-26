@@ -29,8 +29,8 @@ pub(crate) struct PlumBlossomRecord {
     pub moving_line: u8,
     /// Canonical six-bit value after flip 0..=63.
     pub transformed: u8,
-    /// Canonical six-bit nuclear value 0..=63.
-    pub nuclear: u8,
+    /// Canonical six-bit mutual value 0..=63.
+    pub mutual: u8,
 }
 
 /// Pure Plum Blossom cast over discrete inputs.
@@ -65,12 +65,12 @@ pub fn cast(input: PlumBlossomInput) -> crate::ta::TaResult<PlumBlossomRecord> {
     let original = Hexagram::from_trigrams(upper, lower);
     let hexagram = original.binary_index();
     let transformed = original.flip_line(moving_line)?.binary_index();
-    let nuclear = original.nuclear().binary_index();
+    let mutual = original.mutual().binary_index();
     Ok(PlumBlossomRecord {
         hexagram,
         moving_line,
         transformed,
-        nuclear,
+        mutual,
     })
 }
 
@@ -79,7 +79,7 @@ pub fn cast(input: PlumBlossomInput) -> crate::ta::TaResult<PlumBlossomRecord> {
 pub(crate) struct PlumBlossomResult {
     pub original: HexagramEnergy,
     pub transformed: HexagramEnergy,
-    pub nuclear: HexagramEnergy,
+    pub mutual: HexagramEnergy,
     pub moving_line: u8,
 }
 
@@ -94,7 +94,7 @@ pub fn compute_channels(input: PlumBlossomInput) -> crate::ta::TaResult<PlumBlos
     Ok(PlumBlossomResult {
         original: HexagramEnergy::new(record.hexagram)?,
         transformed: HexagramEnergy::new(record.transformed)?,
-        nuclear: HexagramEnergy::new(record.nuclear)?,
+        mutual: HexagramEnergy::new(record.mutual)?,
         moving_line: record.moving_line,
     })
 }
@@ -186,11 +186,11 @@ mod tests {
             .expect("line 4 is valid")
             .binary_index();
         assert_eq!(record.transformed, expected_transformed);
-        let expected_nuclear = Hexagram::from_binary_index(expected_hex)
+        let expected_mutual = Hexagram::from_binary_index(expected_hex)
             .expect("0..=63 is valid")
-            .nuclear()
+            .mutual()
             .binary_index();
-        assert_eq!(record.nuclear, expected_nuclear);
+        assert_eq!(record.mutual, expected_mutual);
     }
 
     #[test]
@@ -216,11 +216,11 @@ mod tests {
             .expect("line 6 is valid")
             .binary_index();
         assert_eq!(record.transformed, expected_transformed);
-        let expected_nuclear = Hexagram::from_binary_index(expected_hex)
+        let expected_mutual = Hexagram::from_binary_index(expected_hex)
             .expect("0..=63 is valid")
-            .nuclear()
+            .mutual()
             .binary_index();
-        assert_eq!(record.nuclear, expected_nuclear);
+        assert_eq!(record.mutual, expected_mutual);
     }
 
     #[test]
@@ -325,21 +325,21 @@ mod tests {
     }
 
     #[test]
-    fn cast_nuclear_always_available() {
+    fn cast_mutual_always_available() {
         for (input, _) in fixtures_per_moving_line() {
             let record = cast(input).expect("fixture is valid");
-            assert!(record.nuclear <= 63, "nuclear must be 0..=63");
+            assert!(record.mutual <= 63, "mutual must be 0..=63");
             assert!(record.hexagram <= 63, "hexagram must be 0..=63");
             assert!(record.transformed <= 63, "transformed must be 0..=63");
             let original =
                 Hexagram::from_binary_index(record.hexagram).expect("hexagram is 0..=63");
             assert_eq!(
-                record.nuclear,
-                original.nuclear().binary_index(),
-                "nuclear must match Hexagram::nuclear for {input:?}"
+                record.mutual,
+                original.mutual().binary_index(),
+                "mutual must match Hexagram::mutual for {input:?}"
             );
-            Hexagram::from_binary_index(record.nuclear)
-                .expect("nuclear must be a valid hexagram index");
+            Hexagram::from_binary_index(record.mutual)
+                .expect("mutual must be a valid hexagram index");
         }
     }
 
@@ -372,10 +372,10 @@ mod tests {
         let result = compute_channels(input).expect("valid input returns Ok");
         assert_eq!(result.original.hexagram, record.hexagram);
         assert_eq!(result.transformed.hexagram, record.transformed);
-        assert_eq!(result.nuclear.hexagram, record.nuclear);
+        assert_eq!(result.mutual.hexagram, record.mutual);
         assert!(result.original.hexagram <= 63);
         assert!(result.transformed.hexagram <= 63);
-        assert!(result.nuclear.hexagram <= 63);
+        assert!(result.mutual.hexagram <= 63);
     }
 
     #[test]
@@ -393,9 +393,9 @@ mod tests {
                 "transformed energy formula for {input:?}"
             );
             assert_eq!(
-                result.nuclear.energy,
-                result.nuclear.hexagram as f64 - 31.5,
-                "nuclear energy formula for {input:?}"
+                result.mutual.energy,
+                result.mutual.hexagram as f64 - 31.5,
+                "mutual energy formula for {input:?}"
             );
         }
     }
@@ -433,13 +433,13 @@ mod tests {
         let expected_original = HexagramEnergy::new(record.hexagram).expect("0..=63 is valid");
         let expected_transformed =
             HexagramEnergy::new(record.transformed).expect("0..=63 is valid");
-        let expected_nuclear = HexagramEnergy::new(record.nuclear).expect("0..=63 is valid");
+        let expected_mutual = HexagramEnergy::new(record.mutual).expect("0..=63 is valid");
         assert_eq!(result.original, expected_original);
         assert_eq!(result.transformed, expected_transformed);
-        assert_eq!(result.nuclear, expected_nuclear);
+        assert_eq!(result.mutual, expected_mutual);
         assert_eq!(result.original.energy, record.hexagram as f64 - 31.5);
         assert_eq!(result.transformed.energy, record.transformed as f64 - 31.5);
-        assert_eq!(result.nuclear.energy, record.nuclear as f64 - 31.5);
+        assert_eq!(result.mutual.energy, record.mutual as f64 - 31.5);
         assert_eq!(result.moving_line, 4);
     }
 

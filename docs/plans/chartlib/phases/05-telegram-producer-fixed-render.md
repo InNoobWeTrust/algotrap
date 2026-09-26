@@ -6,7 +6,7 @@
 | In | Out |
 |---|---|
 | Local Directional/I-Ching calculations, DTO adapter, fixed integration, Browserless readiness wait, render-only visual removals. | Cryptobot, Chartlib changes, Telegram delivery/messaging, RSSI/Sharpe analytics/decision changes. |
-Use unchanged [Phase 02](02-chart-document-contracts.md). Locally calculate/retain Directional and Original/Transformed/Nuclear before adaptation; never default them. Preserve local RSSI/Sharpe/memory/prediction/configuration/tools/decision semantics; remove only their pane/series, RSSI tint, ATR arrows.
+Use unchanged [Phase 02](02-chart-document-contracts.md). Locally calculate/retain Directional and Original/Transformed/Mutual before adaptation; never default them. Preserve local RSSI/Sharpe/memory/prediction/configuration/tools/decision semantics; remove only their pane/series, RSSI tint, ATR arrows.
 ## File operations
 ```text
 [MODIFY] bins/telegrambot/Cargo.toml

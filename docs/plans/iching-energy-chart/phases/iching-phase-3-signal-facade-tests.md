@@ -33,26 +33,26 @@ use super::types::{HexagramEnergy, IchingSignal};
 /// - `original.hexagram ∈ 0..=63` (enforced by `HexagramEnergy::new`)
 /// - `original.energy == original.hexagram as f64 - 31.5` (enforced by factory)
 /// - `transformed`: if `Some`, same invariant as `original`
-/// - `nuclear.hexagram ∈ 0..=63` and `nuclear.energy == nuclear.hexagram as f64 - 31.5`
+/// - `mutual.hexagram ∈ 0..=63` and `mutual.energy == mutual.hexagram as f64 - 31.5`
 /// - `moving_line`: if `Some(v)`, then `v ∈ 1..=6`
 ///
 /// This function is `pub(crate)` — only the facade and tests call it.
 pub(crate) fn build_signal(
     original: HexagramEnergy,
     transformed: Option<HexagramEnergy>,
-    nuclear: HexagramEnergy,
+    mutual: HexagramEnergy,
     moving_line: Option<u8>,
 ) -> TaResult<IchingSignal>;
 ```
 
 **Implementation approach:**
 - Validate every supplied `HexagramEnergy` at the boundary. Although production callers use `HexagramEnergy::new`, its public fields allow an invalid literal; `build_signal` must reject `hexagram > 63` or `energy != hexagram as f64 - 31.5` (compare exact values because both sides use the same integer-to-`f64` conversion and subtraction).
-- Validate `original`, `nuclear`, and `transformed` when present before constructing the signal.
+- Validate `original`, `mutual`, and `transformed` when present before constructing the signal.
 - Validate `moving_line` range: `if let Some(ml) = moving_line { if !(1..=6).contains(&ml) { return Err(...) } }`.
-- Construct and return `IchingSignal { original, transformed, nuclear, moving_line }` only after all validations pass.
+- Construct and return `IchingSignal { original, transformed, mutual, moving_line }` only after all validations pass.
 
 ### Acceptance criteria
-- [ ] `build_signal(original, Some(transformed), nuclear, Some(3))` returns `Ok(IchingSignal)` for valid inputs
+- [ ] `build_signal(original, Some(transformed), mutual, Some(3))` returns `Ok(IchingSignal)` for valid inputs
 - [ ] `build_signal(..., moving_line: Some(0))` returns `Err` with `kind == Validation`
 - [ ] `build_signal(..., moving_line: Some(7))` returns `Err` with `kind == Validation`
 - [ ] `build_signal(..., transformed: None, moving_line: None)` returns `Ok` (valid for future methods)
@@ -100,7 +100,7 @@ pub fn plum_blossom_signal(datetime: DateTime<Utc>) -> TaResult<IchingSignal> {
 ///
 /// 1. `calendar::to_plum_blossom_input(datetime, policy)` → `PlumBlossomInput`
 /// 2. `plum_blossom::compute_channels(input)` → `PlumBlossomResult`
-/// 3. `build_signal(original, Some(transformed), nuclear, Some(moving_line))` → `IchingSignal`
+/// 3. `build_signal(original, Some(transformed), mutual, Some(moving_line))` → `IchingSignal`
 pub fn plum_blossom_signal_with_policy(
     datetime: DateTime<Utc>,
     policy: LeapMonthPolicy,
@@ -109,7 +109,7 @@ pub fn plum_blossom_signal_with_policy(
 
 ### Acceptance criteria
 - [ ] `plum_blossom_signal(fixed_utc)` returns `Ok(IchingSignal)` with all three channels and `moving_line == Some(_)`
-- [ ] The returned `IchingSignal.original`, `.transformed`, and `.nuclear` all have valid `HexagramEnergy` values
+- [ ] The returned `IchingSignal.original`, `.transformed`, and `.mutual` all have valid `HexagramEnergy` values
 - [ ] `moving_line` is always `Some(1..=6)` for Plum Blossom — never `None`
 - [ ] `transformed` is always `Some(_)` for Plum Blossom — never `None`
 - [ ] Leap `Reject` propagates as `Validation` through the facade for a known leap-month datetime
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn plum_channels_always_populated() {
-        // For any valid Plum Blossom call, original/transformed/nuclear are all Some
+        // For any valid Plum Blossom call, original/transformed/mutual are all Some
         let dt = DateTime::parse_from_rfc3339("2024-06-15T12:00:00+08:00")
             .unwrap()
             .with_timezone(&Utc);
@@ -202,7 +202,7 @@ mod tests {
         let dt = Utc.with_ymd_and_hms(2023, 8, 8, 14, 30, 0).unwrap();
         let signal = plum_blossom_signal(dt).unwrap();
         assert!((signal.original.energy - signal.original.hexagram as f64 + 31.5).abs() < f64::EPSILON);
-        assert!((signal.nuclear.energy - signal.nuclear.hexagram as f64 + 31.5).abs() < f64::EPSILON);
+        assert!((signal.mutual.energy - signal.mutual.hexagram as f64 + 31.5).abs() < f64::EPSILON);
         let transformed = signal.transformed.unwrap();
         assert!((transformed.energy - transformed.hexagram as f64 + 31.5).abs() < f64::EPSILON);
     }

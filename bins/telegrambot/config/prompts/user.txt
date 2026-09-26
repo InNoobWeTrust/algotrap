@@ -1,1 +1,1 @@
-Please analyze {{symbol}} now. Current time: {{time}}. Use your tools to gather data and provide a comprehensive analysis.
+Please analyze {{symbol}} now. Current time: {{time}}. Use your tools to gather data and provide a comprehensive analysis. Read Original (本卦), Transformed (变卦), and Mutual (互卦) as same-cast I-Ching channels, subordinate to >=4h thesis and ATR levels.

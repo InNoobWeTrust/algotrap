@@ -11,7 +11,7 @@ use duckdb::{Connection, Row};
 use serde_json::{Map, Number, Value};
 
 use crate::engine::error::MarketError;
-use crate::engine::traits::ComputedFrame;
+use crate::engine::traits::{ColumnDType, ComputedFrame};
 
 /// Nullable column data exchanged across engine frame boundaries.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +110,20 @@ impl ComputedFrame for SourceFrame {
 
     fn columns(&self) -> Vec<String> {
         self.columns.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    fn column_dtypes(&self) -> Vec<(String, ColumnDType)> {
+        self.columns
+            .iter()
+            .map(|(name, column)| {
+                let dtype = match column {
+                    SourceColumnData::Number(_) => ColumnDType::Number,
+                    SourceColumnData::Boolean(_) => ColumnDType::Boolean,
+                    SourceColumnData::Text(_) => ColumnDType::Text,
+                };
+                (name.clone(), dtype)
+            })
+            .collect()
     }
 
     fn slice_last(&self, count: usize) -> Result<Box<dyn ComputedFrame>, MarketError> {
@@ -400,6 +414,24 @@ impl ComputedFrame for QueryResultFrame {
         self.columns.clone()
     }
 
+    fn column_dtypes(&self) -> Vec<(String, ColumnDType)> {
+        self.columns
+            .iter()
+            .zip(&self.values)
+            .map(|(name, column)| {
+                let dtype = match column {
+                    QueryResultColumn::Float64(_)
+                    | QueryResultColumn::Int64(_)
+                    | QueryResultColumn::UInt64(_) => ColumnDType::Number,
+                    QueryResultColumn::Boolean(_) => ColumnDType::Boolean,
+                    QueryResultColumn::Utf8(_) => ColumnDType::Text,
+                    QueryResultColumn::Null(_) => ColumnDType::Null,
+                };
+                (name.clone(), dtype)
+            })
+            .collect()
+    }
+
     fn slice_last(&self, count: usize) -> Result<Box<dyn ComputedFrame>, MarketError> {
         let start = self.row_count.saturating_sub(count);
         Ok(Box::new(Self::from_parts(
@@ -450,7 +482,65 @@ mod tests {
     use serde_json::json;
 
     use super::{QueryResultFrame, SourceColumnData, SourceFrame};
+    use crate::engine::traits::ColumnDType;
     use crate::engine::{ComputedFrame, ErrorKind, MarketError};
+
+    #[test]
+    fn lists_mixed_source_column_dtypes_in_frame_order() {
+        let frame = SourceFrame::from_columns(vec![
+            ("text".into(), SourceColumnData::Text(vec![None])),
+            ("number".into(), SourceColumnData::Number(vec![Some(1.0)])),
+            (
+                "boolean".into(),
+                SourceColumnData::Boolean(vec![Some(true)]),
+            ),
+        ])
+        .unwrap();
+
+        let expected = vec![
+            ("text".into(), ColumnDType::Text),
+            ("number".into(), ColumnDType::Number),
+            ("boolean".into(), ColumnDType::Boolean),
+        ];
+        assert_eq!(frame.column_dtypes(), expected);
+        assert_eq!(frame.slice_last(0).unwrap().column_dtypes(), expected);
+    }
+
+    #[test]
+    fn lists_projected_duckdb_column_dtypes_in_frame_order() {
+        let frame = decode(
+            "SELECT 'text'::VARCHAR AS text_value, true AS bool_value, \
+             1.5::DOUBLE AS float_value, (-2)::BIGINT AS int_value, \
+             3::UBIGINT AS uint_value, NULL AS null_value",
+        );
+
+        let expected = vec![
+            ("text_value".into(), ColumnDType::Text),
+            ("bool_value".into(), ColumnDType::Boolean),
+            ("float_value".into(), ColumnDType::Number),
+            ("int_value".into(), ColumnDType::Number),
+            ("uint_value".into(), ColumnDType::Number),
+            ("null_value".into(), ColumnDType::Number),
+        ];
+        assert_eq!(frame.column_dtypes(), expected);
+        assert_eq!(frame.slice_last(0).unwrap().column_dtypes(), expected);
+    }
+
+    #[test]
+    fn lists_decoded_null_column_dtype() {
+        use super::QueryResultColumn;
+
+        let frame = QueryResultFrame::from_parts(
+            vec!["null_value".into()],
+            vec![QueryResultColumn::Null(vec![None])],
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame.column_dtypes(),
+            vec![("null_value".into(), ColumnDType::Null)]
+        );
+    }
 
     #[test]
     fn exposes_engine_owned_paths_and_locked_constructor_signatures() {

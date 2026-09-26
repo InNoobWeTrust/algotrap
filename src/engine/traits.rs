@@ -2,6 +2,15 @@
 
 use crate::engine::error::MarketError;
 
+/// Engine-neutral column type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnDType {
+    Number,
+    Boolean,
+    Text,
+    Null,
+}
+
 /// Engine-neutral table access trait.
 ///
 /// This is the downstream contract consumed by charts, LLM tools,
@@ -17,6 +26,9 @@ pub trait ComputedFrame: Send + Sync {
 
     /// Returns the column names in order.
     fn columns(&self) -> Vec<String>;
+
+    /// Returns column names and types in frame column order.
+    fn column_dtypes(&self) -> Vec<(String, ColumnDType)>;
 
     /// Returns a view of the last `count` rows.
     ///

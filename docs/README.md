@@ -110,7 +110,7 @@ Each plan owns a directory containing its parent plan and all of its phases. Fol
 
 | Plan | Status | Documents |
 |---|---|---|
-| Cryptobot I-Ching Energy Panel | Planned | [`plan.md`](./plans/cryptobot-iching-panel/plan.md) · [`phases/`](./plans/cryptobot-iching-panel/phases/) |
+| Cryptobot I-Ching Energy Panel | Implemented | [`plan.md`](./plans/cryptobot-iching-panel/plan.md) · [`phases/`](./plans/cryptobot-iching-panel/phases/) |
 | I-Ching Energy Chart Signal | Planned | [`l0.md`](./plans/iching-energy-chart/l0.md) · [`l1.md`](./plans/iching-energy-chart/l1.md) · [`phases/`](./plans/iching-energy-chart/phases/) |
 
 ---
