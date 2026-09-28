@@ -1,13 +1,13 @@
 
 <!DOCTYPE html>
-<html class="sl-theme-dark" style="font-size: 16px">
+<html class="wa-dark" style="font-size: 16px">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>InNoobWeTrust™ CryptoBot</title>
     <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js" integrity="sha384-8J8e9bGIwf7e9BLO5rwf4zJwNRKcypGnvuGzORD/t4TrFA1gWbl3Hsi/RvyWwBKl" crossorigin="anonymous"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css" />
-    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
+    <link rel="stylesheet" href="https://ka-f.webawesome.com/webawesome@3.14.0/styles/themes/default.css" />
+    <script type="module" src="https://ka-f.webawesome.com/webawesome@3.14.0/webawesome.loader.js"></script>
     <style>
         html, body {
             height: 100%;
@@ -41,32 +41,127 @@
         #ticker-select {
             width: min(56vw, 220px);
             min-width: 0;
+        }
+        #ticker-row {
+            display: inline-flex;
+            align-items: stretch;
+            gap: 4px;
+            max-width: 100%;
             margin-bottom: 0.25rem;
+            vertical-align: middle;
+        }
+        #ticker-select, #fullscreen-btn {
+            box-sizing: border-box;
+            height: 32px;
+            margin: 0;
+            vertical-align: middle;
+        }
+        #ticker-select::part(combobox) {
+            box-sizing: border-box;
+            height: 100%;
+        }
+        #fullscreen-btn {
+            flex: none;
+            width: 32px;
+            display: grid;
+            place-items: center;
+            position: relative;
+            z-index: 1;
+            font-size: 16px;
+        }
+        #fullscreen-btn::part(button) {
+            box-sizing: border-box;
+            display: grid;
+            place-items: center;
+            width: 100%;
+            height: 100%;
+            padding: 0;
+            line-height: 1;
+            color: #e8e8e8;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 4px;
+        }
+        #tf-picker {
+            display: flex;
+            width: max-content;
+            max-width: calc(100vw - 24px);
+            align-items: center;
+        }
+        #tf-scroll {
+            width: max-content;
+            min-width: 0;
+            flex: 0 1 auto;
+            white-space: nowrap;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+            scroll-snap-type: x mandatory;
+            scroll-behavior: smooth;
+            scrollbar-width: none;
+        }
+        #tf-picker wa-button {
+            display: none;
+            flex: none;
+            width: 44px;
+            height: 44px;
+        }
+        #tf-picker wa-button::part(button) {
+            box-sizing: border-box;
+            width: 100%;
+            height: 100%;
+            padding: 0;
+        }
+        #tf-picker.scrollable wa-button {
+            display: block;
+        }
+        #tf-picker.scrollable wa-button[hidden] {
+            visibility: hidden;
+        }
+        #tf-scroll::-webkit-scrollbar {
+            display: none;
         }
         #tf-btns {
-            display: inline-block;
-            max-width: calc(100vw - 24px);
+            display: block;
+            width: max-content;
         }
-        /* Scale the picker down on smaller screens so it stays proportionate
-           to the chart instead of covering it. Overlay is absolutely
-           positioned, so transform scale only affects the picker itself. */
+        #tf-btns::part(form-control-input) {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: nowrap;
+        }
+        #tf-btns wa-radio {
+            flex: none;
+            scroll-snap-align: start;
+        }
+        /* Keep the tablet picker proportionate to the chart. */
         @media (max-width: 1024px) {
             #overlay { transform: scale(0.9); }
         }
         @media (max-width: 768px) {
-            #overlay { top: 1.5%; transform: scale(0.8); }
-            #overlay sl-divider { --spacing: 0.15rem; }
+            #overlay { top: 1.5%; transform: none; font-size: 13px; }
+            #badges { gap: 2px; }
+            #badges wa-badge { font-size: 8px; white-space: nowrap; }
+            #badges wa-badge::part(badge) { padding: 0 4px; font-size: 8px; }
+            #ticker-row { gap: 2px; margin-bottom: 2px; }
+            #ticker-select { width: auto; min-width: 0; max-width: 30vw; height: 22px; --wa-form-control-height: 22px; --wa-form-control-padding-inline: 4px; font-size: 8px; }
+            #ticker-select::part(combobox) { height: 22px; min-height: 0; padding: 0 4px; font-size: 8px; }
+            #ticker-select::part(display-input) { font-size: 8px; }
+            #fullscreen-btn { width: 22px; height: 22px; font-size: 12px; }
+            #tf-picker, #tf-scroll { width: max-content; min-width: 0; max-width: 100%; }
+            #tf-picker wa-button { width: 18px; height: 18px; font-size: 10px; }
+            #tf-picker.scrollable #tf-scroll { mask-image: linear-gradient(to right, rgba(0, 0, 0, 0.35), black 12px, black calc(100% - 12px), rgba(0, 0, 0, 0.35)); }
+            #tf-btns wa-radio { box-sizing: border-box; width: auto; min-width: 0; flex: none; height: 18px; min-height: 18px; padding: 0 4px; font-size: 8px; line-height: 1; white-space: nowrap; }
+            #tf-btns wa-radio::part(label) { white-space: nowrap; }
+            #overlay wa-divider { --spacing: 0.15rem; }
         }
         @media (max-width: 480px) {
-            #overlay { top: 1%; transform: scale(0.7); }
-            #ticker-select { width: min(52vw, 180px); }
-        }
-        #fullscreen-btn {
-            position: absolute;
-            bottom: 15px;
-            left: -6px;
-            z-index: 9999;
-            font-size: 10px;
+            #overlay { top: 1%; font-size: 12px; }
+            #ticker-select { height: 20px; --wa-form-control-height: 20px; }
+            #ticker-select::part(combobox) { height: 20px; }
+            #fullscreen-btn { width: 20px; height: 20px; font-size: 11px; }
+            #tf-picker wa-button { width: 16px; height: 16px; font-size: 9px; }
+            #tf-btns wa-radio { height: 16px; min-height: 16px; }
         }
         #loading-overlay {
             position: fixed;
@@ -88,49 +183,62 @@
   </head>
   <body>
     <div id="container" data-symbol="" data-tf=""></div>
-    <div id="loading-overlay"><sl-spinner style="font-size: 3rem; --track-width: 4px;"></sl-spinner></div>
+    <div id="loading-overlay"><wa-spinner style="font-size: 3rem; --track-width: 4px;"></wa-spinner></div>
     <div id="overlay">
         <div id="badges">
-            <sl-badge id="sl-badge" variant="danger" pill>SL: -</sl-badge>
-            <sl-badge id="tol-badge" variant="success" pill>Tol: -</sl-badge>
-            <sl-badge id="atr-percent" variant="warning" pill>ATR: -</sl-badge>
-            <sl-badge id="leverage" variant="primary" pill>Lvrg: -</sl-badge>
+            <wa-badge id="sl-badge" variant="danger" pill>SL: -</wa-badge>
+            <wa-badge id="tol-badge" variant="success" pill>Tol: -</wa-badge>
+            <wa-badge id="atr-percent" variant="warning" pill>ATR: -</wa-badge>
+            <wa-badge id="leverage" variant="brand" pill>Lvrg: -</wa-badge>
         </div>
-        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
-        <sl-select id="ticker-select" size="small" placeholder="Select ticker"></sl-select>
-        <sl-divider style="--spacing: 0.25rem;"></sl-divider>
-        <sl-radio-group id="tf-btns"></sl-radio-group>
+        <wa-divider style="--spacing: 0.25rem;"></wa-divider>
+        <div id="ticker-row">
+            <wa-select id="ticker-select" size="s" placeholder="Select ticker"></wa-select>
+            <wa-button
+              id="fullscreen-btn"
+              aria-label="Toggle Fullscreen"
+              onclick="toggleFullscreen(event)">
+              <wa-icon name="expand"></wa-icon>
+            </wa-button>
+        </div>
+        <wa-divider style="--spacing: 0.25rem;"></wa-divider>
+        <div id="tf-picker">
+            <wa-button id="tf-prev" aria-label="Scroll timeframes left" hidden><wa-icon name="chevron-left"></wa-icon></wa-button>
+            <div id="tf-scroll" tabindex="0" aria-label="Timeframes, scroll horizontally for more options">
+                <wa-radio-group id="tf-btns"></wa-radio-group>
+            </div>
+            <wa-button id="tf-next" aria-label="Scroll timeframes right" hidden><wa-icon name="chevron-right"></wa-icon></wa-button>
+        </div>
     </div>
-    <sl-icon-button
-      id="fullscreen-btn"
-      name="fullscreen"
-      label="Toggle Fullscreen"
-      style="font-size: 2rem;"
-      onclick="toggleFullscreen()">
-    </sl-icon-button>
     <script>
       const fullscreenButton = document.getElementById('fullscreen-btn');
+      const updateFullscreenIcon = () => {
+        fullscreenButton.querySelector('wa-icon').name = document.fullscreenElement || document.webkitFullscreenElement
+          ? 'compress' : 'expand';
+      };
 
-      function toggleFullscreen() {
-        if (!document.fullscreenElement) {
-          const elem = document.documentElement;
-          elem.requestFullscreen?.();
-          elem.webkitRequestFullscreen?.();
-          elem.msRequestFullscreen?.();
-        } else {
-          document.exitFullscreen?.();
-          document.webkitExitFullscreen?.();
-          document.msExitFullscreen?.();
+      async function toggleFullscreen(event) {
+        event?.preventDefault();
+        try {
+          if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+            const elem = document.documentElement;
+            const request = elem.requestFullscreen || elem.webkitRequestFullscreen;
+            if (!request) throw new Error('Fullscreen API unavailable');
+            await request.call(elem);
+          } else {
+            const exit = document.exitFullscreen || document.webkitExitFullscreen;
+            if (!exit) throw new Error('Fullscreen exit API unavailable');
+            await exit.call(document);
+          }
+          updateFullscreenIcon();
+        } catch (error) {
+          console.error('Fullscreen toggle failed:', error);
         }
       }
 
-      document.addEventListener('fullscreenchange', () => {
-        if (document.fullscreenElement) {
-          fullscreenButton.name = 'fullscreen-exit';
-        } else {
-          fullscreenButton.name = 'fullscreen';
-        }
-      });
+      document.addEventListener('fullscreenchange', updateFullscreenIcon);
+      document.addEventListener('webkitfullscreenchange', updateFullscreenIcon);
+      updateFullscreenIcon();
     </script>
     <!-- Gap Zone Primitive classes (must be defined before onIntervalUpdate) -->
     <script type="text/javascript">
@@ -194,6 +302,10 @@
         // ─── DOM refs ─────────────────────────────────────────────────
         const tickerSelect = document.getElementById('ticker-select');
         const tf_btns = document.getElementById('tf-btns');
+        const tfPicker = document.getElementById('tf-picker');
+        const tfScroll = document.getElementById('tf-scroll');
+        const tfPrev = document.getElementById('tf-prev');
+        const tfNext = document.getElementById('tf-next');
         const container = document.getElementById('container');
         const slBadge = document.getElementById('sl-badge');
         const tolBadge = document.getElementById('tol-badge');
@@ -207,7 +319,7 @@
 
         // ─── Populate ticker dropdown ─────────────────────────────────
         tickers.forEach(t => {
-            const opt = document.createElement('sl-option');
+            const opt = document.createElement('wa-option');
             opt.value = t.symbol;
             opt.textContent = `BingX:${t.symbol}`;
             tickerSelect.appendChild(opt);
@@ -575,7 +687,8 @@
 
         // ─── TF buttons ───────────────────────────────────────────────
         chartTfs.forEach(tf => {
-            const tf_btn = document.createElement('sl-radio-button');
+            const tf_btn = document.createElement('wa-radio');
+            tf_btn.appearance = 'button';
             tf_btn.innerText = tf;
             tf_btn.value = tf
             tf_btn.addEventListener('click', () => {
@@ -585,6 +698,23 @@
             });
             tf_btns.appendChild(tf_btn);
         });
+
+        const updateTfScroll = () => {
+            // Compare content with the capped picker width, not the chevron-reduced scroll viewport.
+            const scrollable = tf_btns.scrollWidth > tfPicker.getBoundingClientRect().width + 2;
+            tfPicker.classList.toggle('scrollable', scrollable);
+            const maxScroll = Math.max(0, tfScroll.scrollWidth - tfScroll.clientWidth);
+            tfPrev.hidden = !scrollable || tfScroll.scrollLeft <= 2;
+            tfNext.hidden = !scrollable || tfScroll.scrollLeft >= maxScroll - 2;
+        };
+        tfPrev.addEventListener('click', () => tfScroll.scrollBy({ left: -Math.max(120, tfScroll.clientWidth * 0.6), behavior: 'smooth' }));
+        tfNext.addEventListener('click', () => tfScroll.scrollBy({ left: Math.max(120, tfScroll.clientWidth * 0.6), behavior: 'smooth' }));
+        tfScroll.addEventListener('scroll', updateTfScroll);
+        const tfResizeObserver = new ResizeObserver(updateTfScroll);
+        tfResizeObserver.observe(tfPicker);
+        tfResizeObserver.observe(tf_btns);
+        window.addEventListener('resize', updateTfScroll);
+        requestAnimationFrame(updateTfScroll);
 
         // ─── Ticker loading ───────────────────────────────────────────
         async function loadTicker(symbol) {
@@ -608,9 +738,13 @@
 
                 // Click default TF
                 requestAnimationFrame(() => {
-                    const defaultBtn = [...tf_btns.children].find(b => b.textContent == ticker.default_tf);
-                    if (defaultBtn) defaultBtn.click();
-                    else if (tf_btns.children[0]) tf_btns.children[0].click();
+                    const selectedBtn = [...tf_btns.children].find(b => b.textContent == ticker.default_tf)
+                        || tf_btns.children[0];
+                    if (selectedBtn) {
+                        tf_btns.value = selectedBtn.value;
+                        selectedBtn.click();
+                        selectedBtn.scrollIntoView({ inline: 'center', block: 'nearest' });
+                    }
                 });
             } catch(e) {
                 console.error(`Failed to load ticker data for ${symbol}:`, e);
@@ -620,7 +754,7 @@
         }
 
         // ─── URL sync + init ──────────────────────────────────────────
-        tickerSelect.addEventListener('sl-change', (e) => {
+        tickerSelect.addEventListener('change', (e) => {
             const symbol = e.target.value;
             history.replaceState(null, '', `?ticker=${symbol}`);
             loadTicker(symbol);
