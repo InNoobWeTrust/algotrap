@@ -25,8 +25,7 @@ pub fn render_interactive_html(registry: &ChartRegistry) -> Result<String, Chart
 }
 
 /// Hides picker controls in fixed mode — single ticker + fixed TF, so picker is dead UI in screenshots.
-const PICKER_HIDE_CSS: &str =
-    "<style>#overlay>sl-divider,#ticker-select,#tf-btns{display:none!important}</style>";
+const PICKER_HIDE_CSS: &str = "<style>#overlay>wa-divider,#ticker-row,#ticker-select,#tf-picker,#tf-btns{display:none!important}</style>";
 
 /// Renders a single dataset through the canonical production template with an inline fetch shim.
 pub fn render_fixed_html(document: &FixedChartDocument) -> Result<String, ChartContractError> {
@@ -214,15 +213,31 @@ mod tests {
                 && INTERACTIVE_TEMPLATE.contains("width=device-width"),
             "template must declare a responsive viewport for small screens"
         );
-        // Picker must stay proportionate to the chart on small screens:
-        // fluid widths plus stepped scale-down breakpoints.
+        // Picker stays compact on small screens with inline fullscreen control.
         for token in [
             "max-width: calc(100vw - 24px)",
             "width: min(56vw, 220px)",
             "@media (max-width: 768px)",
             "@media (max-width: 480px)",
-            "transform: scale(0.8)",
-            "transform: scale(0.7)",
+            "transform: none; font-size: 13px",
+            "#overlay { top: 1%; font-size: 12px; }",
+            "#badges wa-badge::part(badge) { padding: 0 4px; font-size: 8px; }",
+            "width: auto; min-width: 0; max-width: 30vw; height: 22px",
+            "--wa-form-control-height: 22px; --wa-form-control-padding-inline: 4px",
+            "#ticker-select::part(combobox) { height: 22px; min-height: 0; padding: 0 4px; font-size: 8px; }",
+            "#tf-picker, #tf-scroll { width: max-content; min-width: 0; max-width: 100%; }",
+            "#tf-scroll {",
+            "overflow-x: auto",
+            "white-space: nowrap",
+            "scroll-snap-type: x mandatory",
+            "<div id=\"tf-scroll\"",
+            "#tf-btns wa-radio { box-sizing: border-box; width: auto; min-width: 0; flex: none; height: 18px; min-height: 18px; padding: 0 4px; font-size: 8px; line-height: 1; white-space: nowrap; }",
+            "#tf-btns wa-radio::part(label) { white-space: nowrap; }",
+            "#tf-picker wa-button { width: 16px; height: 16px; font-size: 9px; }",
+            "#tf-btns wa-radio { height: 16px; min-height: 16px; }",
+            "#fullscreen-btn {",
+            "width: 20px; height: 20px",
+            "font-size: 16px",
         ] {
             assert!(
                 INTERACTIVE_TEMPLATE.contains(token),
@@ -338,9 +353,38 @@ mod tests {
             html.contains("display:none!important"),
             "picker-hiding rule must use !important to beat template styles"
         );
+        assert!(
+            html.contains("#overlay>wa-divider,#ticker-row,#ticker-select,#tf-picker,#tf-btns{display:none!important}"),
+            "fixed output must hide picker wrappers as well as their nested controls"
+        );
         // Metadata badges (in #badges) are NOT targeted by the hide rule and stay visible.
         assert!(html.contains("id=\"badges\""));
-        assert!(html.contains("sl-badge"));
+        assert!(html.contains("<wa-badge id=\"sl-badge\""));
+    }
+
+    #[test]
+    fn template_uses_webawesome_components_and_native_change_event() {
+        for token in [
+            "https://ka-f.webawesome.com/webawesome@3.14.0/styles/themes/default.css",
+            "https://ka-f.webawesome.com/webawesome@3.14.0/webawesome.loader.js",
+            "class=\"wa-dark\"",
+            "<wa-select",
+            "<wa-radio-group",
+            "<wa-button",
+            "<wa-icon",
+            "tickerSelect.addEventListener('change'",
+        ] {
+            assert!(
+                INTERACTIVE_TEMPLATE.contains(token),
+                "missing WA contract: {token}"
+            );
+        }
+        for legacy in ["sl-change", "<sl-", "</sl-", "--sl-"] {
+            assert!(
+                !INTERACTIVE_TEMPLATE.contains(legacy),
+                "legacy component token: {legacy}"
+            );
+        }
     }
 
     #[test]
