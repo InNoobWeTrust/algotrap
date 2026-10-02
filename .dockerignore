@@ -6,6 +6,9 @@
 target
 
 bins/telegrambot/memory
-bins/telegrambot/.env
+.env
+.env.*
+**/.env
+**/.env.*
 
 geckodriver.log

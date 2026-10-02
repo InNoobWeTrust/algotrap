@@ -5,7 +5,7 @@ use algotrap::engine::error::MarketError;
 use algotrap::engine::frame::{SourceColumnData, SourceFrame};
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::engine::validation::ValidatedTicker;
-use algotrap::prelude::Kline;
+use algotrap::prelude::{Kline, Timeframe};
 use algotrap::query::RawQuery;
 use algotrap::query::duckdb::DuckDBQuery;
 use algotrap::query::gap_zones::{GapZoneRecord, recent_gap_zones};
@@ -19,6 +19,7 @@ use algotrap::ta::prelude::{
     band_reversion_percent, bar_bias, bias_reversion, body_ratio, ema, iching_bar_trajectory,
     is_atr_gap, option_map2, require_output, reverse_rsi, rma, rsi, sharpe, sma,
 };
+use algotrap::time_utils::bar_scheduled_close_ms;
 use futures::TryStreamExt;
 use std::convert::Infallible;
 
@@ -374,6 +375,7 @@ fn telegram_output_frame(
     rows: Vec<TelegramIndicatorRow>,
     klines: &[Kline],
     outputs: &crate::memory::TelegramOutputConfig,
+    tf: Timeframe,
 ) -> Result<SourceFrame, MarketError> {
     if rows.len() != klines.len() {
         return Err(MarketError::computation(
@@ -385,7 +387,9 @@ fn telegram_output_frame(
         .iter()
         .enumerate()
         .map(|(index, kline)| {
-            let bar_close_time = klines.get(index + 1).map_or(kline.time, |next| next.time);
+            let bar_close_time = klines
+                .get(index + 1)
+                .map_or_else(|| bar_scheduled_close_ms(kline.time, tf), |next| next.time);
             iching_bar_trajectory(kline.time, bar_close_time).map_err(MarketError::from)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -490,7 +494,7 @@ fn telegram_output_frame(
             SourceColumnData::Number(
                 trajectories
                     .iter()
-                    .map(|trajectory| trajectory.moving_line.map(f64::from))
+                    .map(|trajectory| trajectory.moving_line_open.map(f64::from))
                     .collect(),
             ),
         ),
@@ -662,6 +666,7 @@ pub(crate) async fn compute_telegram_frame(
     klines: Vec<Kline>,
     ticker: ValidatedTicker,
     indicator_config: &crate::memory::IndicatorConfig,
+    tf: Timeframe,
 ) -> Result<(Box<dyn ComputedFrame>, Vec<GapZoneRecord>), MarketError> {
     let periods = indicator_periods(&indicator_config.periods)?;
     let body_ratio_threshold = indicator_config.gap_zones.body_ratio_threshold.clamped();
@@ -675,7 +680,7 @@ pub(crate) async fn compute_telegram_frame(
         atr_gap_multiplier,
     )
     .await?;
-    let frame = telegram_output_frame(rows, &klines, &indicator_config.outputs)?;
+    let frame = telegram_output_frame(rows, &klines, &indicator_config.outputs, tf)?;
     let (sl_percent, tol_percent) = ticker.risk_percentages();
 
     // Decision time is the last supplied kline time; empty input has no
@@ -885,7 +890,7 @@ mod tests {
     use algotrap::engine::frame::{SourceColumnData, SourceFrame};
     use algotrap::engine::traits::ComputedFrame;
     use algotrap::engine::validation::ValidatedTicker;
-    use algotrap::prelude::Kline;
+    use algotrap::prelude::{Kline, Timeframe};
     use algotrap::query::RawQuery;
     use algotrap::query::duckdb::DuckDBQuery;
     use algotrap::ta::ops::{GapCandidateInput, gap_candidate_facts};
@@ -1718,6 +1723,7 @@ mod tests {
             candles.clone(),
             ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap(),
             &IndicatorConfig::default(),
+            Timeframe::M1,
         )
         .await
         .unwrap();
@@ -1725,6 +1731,7 @@ mod tests {
             candles.clone(),
             ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap(),
             &custom_config,
+            Timeframe::M1,
         )
         .await
         .unwrap();
@@ -1893,6 +1900,7 @@ mod tests {
             Vec::new(),
             ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap(),
             &IndicatorConfig::default(),
+            Timeframe::M1,
         )
         .await
         .unwrap();
@@ -1948,11 +1956,119 @@ mod tests {
     }
 
     #[test]
+    fn crossing_bar_exports_opening_moving_line() {
+        let mut candle = klines()[0];
+        candle.time = chrono::DateTime::parse_from_rfc3339("2024-02-10T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let frame = telegram_output_frame(
+            vec![sample_row()],
+            &[candle],
+            &IndicatorConfig::default().outputs,
+            Timeframe::H4,
+        )
+        .unwrap();
+        assert_eq!(frame.f64_at("iching_open", 0).unwrap(), Some(33.0 - 31.5));
+        assert_eq!(
+            frame.f64_at("iching_original_energy", 0).unwrap(),
+            Some(33.0 - 31.5)
+        );
+        assert_eq!(
+            frame.f64_at("iching_transformed_energy", 0).unwrap(),
+            Some(1.0 - 31.5)
+        );
+        assert_eq!(frame.f64_at("iching_close", 0).unwrap(), Some(34.0 - 31.5));
+        assert_eq!(
+            frame.f64_at("iching_transformed_close", 0).unwrap(),
+            Some(32.0 - 31.5)
+        );
+        assert_eq!(frame.f64_at("iching_moving_line", 0).unwrap(), Some(6.0));
+    }
+
+    #[test]
+    fn latest_row_exports_full_scheduled_trajectory_for_short_and_h4_bars() {
+        let mut candle = klines()[0];
+        candle.time = chrono::DateTime::parse_from_rfc3339("2024-02-10T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        for tf in [Timeframe::M1, Timeframe::H4] {
+            let frame = telegram_output_frame(
+                vec![sample_row()],
+                &[candle],
+                &IndicatorConfig::default().outputs,
+                tf,
+            )
+            .unwrap();
+            let expected = algotrap::ta::iching_bar_trajectory(
+                candle.time,
+                algotrap::time_utils::bar_scheduled_close_ms(candle.time, tf),
+            )
+            .unwrap();
+            assert_eq!(
+                expected.moving_line,
+                Some(if tf == Timeframe::H4 { 2 } else { 6 })
+            );
+            let exports = [
+                ("iching_original_energy", Some(expected.energy_open)),
+                ("iching_transformed_energy", Some(expected.transformed_open)),
+                ("iching_mutual_energy", Some(expected.mutual_open)),
+                ("iching_open", Some(expected.energy_open)),
+                ("iching_high", Some(expected.energy_high)),
+                ("iching_low", Some(expected.energy_low)),
+                ("iching_close", Some(expected.energy_close)),
+                (
+                    "iching_moving_line",
+                    expected.moving_line_open.map(f64::from),
+                ),
+                ("iching_transformed_close", Some(expected.transformed_close)),
+                ("iching_mutual_close", Some(expected.mutual_close)),
+                ("iching_mutual_high", Some(expected.mutual_high)),
+                ("iching_mutual_low", Some(expected.mutual_low)),
+                ("iching_mutual_mean", Some(expected.mutual_mean)),
+            ];
+            assert_eq!(
+                frame
+                    .columns()
+                    .iter()
+                    .filter(|name| name.starts_with("iching_"))
+                    .count(),
+                13
+            );
+            for (name, value) in exports {
+                assert_eq!(frame.f64_at(name, 0).unwrap(), value, "{tf:?} {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn final_bar_trajectory_includes_internal_cst_cast_boundaries() {
+        let mut candle = klines()[0];
+        candle.time = chrono::DateTime::parse_from_rfc3339("2025-07-09T14:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let frame = telegram_output_frame(
+            vec![sample_row()],
+            &[candle],
+            &IndicatorConfig::default().outputs,
+            Timeframe::H4,
+        )
+        .unwrap();
+        let open = frame.f64_at("iching_open", 0).unwrap().unwrap();
+        let high = frame.f64_at("iching_high", 0).unwrap().unwrap();
+        let low = frame.f64_at("iching_low", 0).unwrap().unwrap();
+        assert!(
+            high != open || low != open,
+            "final bar must include casts across CST midnight"
+        );
+    }
+
+    #[test]
     fn projector_rejects_mismatched_cardinality_as_a_computation_error() {
         let error = telegram_output_frame(
             Vec::new(),
             &klines()[..1],
             &IndicatorConfig::default().outputs,
+            Timeframe::M1,
         )
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::ComputationError);
@@ -2000,7 +2116,7 @@ mod tests {
         ];
         let candles = klines()[..rows.len()].to_vec();
         let config = only_active_outputs(&[]);
-        let frame = telegram_output_frame(rows, &candles, &config.outputs).unwrap();
+        let frame = telegram_output_frame(rows, &candles, &config.outputs, Timeframe::M1).unwrap();
 
         assert_eq!(frame.len(), 4);
         assert_eq!(
@@ -2084,7 +2200,8 @@ mod tests {
             }
             let rows = (0..length).map(|_| sample_row()).collect::<Vec<_>>();
             let config = only_active_outputs(&[]);
-            let frame = telegram_output_frame(rows, &candles, &config.outputs).unwrap();
+            let frame =
+                telegram_output_frame(rows, &candles, &config.outputs, Timeframe::M1).unwrap();
 
             assert_eq!(frame.len(), length);
             assert_eq!(
@@ -2134,18 +2251,21 @@ mod tests {
             vec![sample_row(), sample_row()],
             candles,
             &default_config.outputs,
+            Timeframe::M1,
         )
         .unwrap();
         let inactive_frame = telegram_output_frame(
             vec![sample_row(), sample_row()],
             candles,
             &inactive_config.outputs,
+            Timeframe::M1,
         )
         .unwrap();
         let leverage_frame = telegram_output_frame(
             vec![sample_row(), sample_row()],
             candles,
             &leverage_config.outputs,
+            Timeframe::M1,
         )
         .unwrap();
 
@@ -2302,9 +2422,10 @@ mod tests {
         let default_config = IndicatorConfig::default();
         let inactive_config = only_active_outputs(&[]);
         let default_frame =
-            telegram_output_frame(Vec::new(), &[], &default_config.outputs).unwrap();
+            telegram_output_frame(Vec::new(), &[], &default_config.outputs, Timeframe::M1).unwrap();
         let inactive_frame =
-            telegram_output_frame(Vec::new(), &[], &inactive_config.outputs).unwrap();
+            telegram_output_frame(Vec::new(), &[], &inactive_config.outputs, Timeframe::M1)
+                .unwrap();
 
         let default_names = [
             "open",
@@ -2410,6 +2531,7 @@ mod tests {
             vec![sample_row(), sample_row()],
             candles,
             &only_active_outputs(&["leverage"]).outputs,
+            Timeframe::M1,
         )
         .unwrap();
         assert!(matches!(
@@ -2422,6 +2544,7 @@ mod tests {
             vec![sample_row(), sample_row()],
             candles,
             &only_active_outputs(&["atr", "leverage"]).outputs,
+            Timeframe::M1,
         )
         .unwrap();
         assert!(visible_atr.column("atr").is_some());
@@ -2431,6 +2554,7 @@ mod tests {
             vec![sample_row(), sample_row()],
             candles,
             &only_active_outputs(&["atr"]).outputs,
+            Timeframe::M1,
         )
         .unwrap();
         assert!(inactive_leverage.column("__leverage_atr").is_none());
@@ -2463,9 +2587,13 @@ mod tests {
             let mut row = sample_row();
             row.atr = atr;
             let config = only_active_outputs(&["leverage"]);
-            let source =
-                telegram_output_frame(vec![row, sample_row()], &klines()[..2], &config.outputs)
-                    .unwrap();
+            let source = telegram_output_frame(
+                vec![row, sample_row()],
+                &klines()[..2],
+                &config.outputs,
+                Timeframe::M1,
+            )
+            .unwrap();
 
             assert!(source.has_column("__leverage_atr"));
             assert!(!source.has_column("atr"));
@@ -2491,6 +2619,7 @@ mod tests {
             vec![candle],
             ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap(),
             &only_active_outputs(&["leverage"]),
+            Timeframe::M1,
         )
         .await
         {
@@ -2510,6 +2639,7 @@ mod tests {
                     vec![sample_row(), sample_row()],
                     &klines()[..2],
                     &only_active_outputs(&[]).outputs,
+                    Timeframe::M1,
                 )
                 .unwrap(),
                 RawQuery::source_controlled("SELEC FROM computed()"),
@@ -2928,6 +3058,7 @@ mod tests {
             klines(),
             ValidatedTicker::new("BTCUSDT", 0.02, 0.01).unwrap(),
             config,
+            Timeframe::M1,
         )
         .await
         .unwrap()

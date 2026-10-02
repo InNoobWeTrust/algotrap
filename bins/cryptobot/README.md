@@ -69,3 +69,31 @@ The manifest expects the image to be available to the cluster and the
 `cryptobot-env` secret to contain the runtime configuration. The deployment
 templates and repository-wide operational guidance are indexed in
 [`docs/README.md`](../../docs/README.md).
+
+## I-Ching Energy pane
+
+The I-Ching Energy pane (pane 3) serializes 13 columns per bar from `iching_bar_trajectory`. The schema name, type, and column order are fixed; source-field mappings are:
+
+| JSON column | `IchingBarTrajectory` field | Cast |
+|---|---|---|
+| `iching_original_energy` | `energy_open` | opening |
+| `iching_transformed_energy` | `transformed_open` | opening |
+| `iching_mutual_energy` | `mutual_open` | opening |
+| `iching_open` | `energy_open` | opening |
+| `iching_high` | `energy_high` | intra-bar |
+| `iching_low` | `energy_low` | intra-bar |
+| `iching_close` | `energy_close` | terminal |
+| `iching_moving_line` | `moving_line_open` | **opening** |
+| `iching_transformed_close` | `transformed_close` | terminal |
+| `iching_mutual_close` | `mutual_close` | terminal |
+| `iching_mutual_high` | `mutual_high` | intra-bar |
+| `iching_mutual_low` | `mutual_low` | intra-bar |
+| `iching_mutual_mean` | `mutual_mean` | intra-bar |
+
+**`iching_moving_line` is the opening-cast moving line** (`moving_line_open: Option<u8>`), not the terminal-cast `moving_line` field. The three opening energy aliases are structurally dependent calendar coordinates, not independent market signals.
+
+**Chart series:** Original plots avg(`iching_open`+`iching_high`+`iching_low`+`iching_close`)/4. Transformed plots `iching_transformed_close` (terminal within-cast destination). Mutual band uses `iching_mutual_high`, `iching_mutual_low`, `iching_mutual_mean`.
+
+**Latest bar close:** The trajectory for the most recent observed bar uses `bar_scheduled_close_ms(kline.time, tf)` as its exclusive close; all prior bars use the next observed bar's open as their close boundary. The forming bar therefore receives a full `[open, scheduled_close)` trajectory, not a degenerate point cast; the scheduled close is a known calendar position for the timeframe, not an observed future price.
+
+**Forecast window:** T+0 is the first scheduled bar opening after the last observed anchor bar open (not the forming bar). Bar counts: 10 for M1–D3, 5 for W1, 2 for monthly. No forecast is produced when the full window has elapsed relative to the injected `as_of` time.

@@ -55,8 +55,13 @@ async fn main() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
             println!("    gap zones: {}", zones.len());
 
-            let document =
-                telegrambot::chart::fixed_chart_document(tf, df.as_ref(), ticker, zones)?;
+            let document = telegrambot::chart::fixed_chart_document(
+                tf,
+                df.as_ref(),
+                ticker,
+                zones,
+                chrono::Utc::now(),
+            )?;
             let chart_html = chartlib::render_fixed_html(&document)?;
 
             let filename = format!(

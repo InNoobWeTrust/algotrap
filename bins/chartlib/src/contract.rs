@@ -49,6 +49,17 @@ pub struct GapZone {
     pub direction: GapDirection,
 }
 
+/// Pane-3 forecast values at a scheduled bar open, in Unix milliseconds like candle `time`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForecastRecord {
+    pub time: i64,
+    pub original: f64,
+    pub transformed: f64,
+    pub mutual_high: f64,
+    pub mutual_low: f64,
+    pub mutual_mean: f64,
+}
+
 /// One ticker/timeframe payload supplied to the canonical template.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractiveDataset {
@@ -56,6 +67,8 @@ pub struct InteractiveDataset {
     pub display_symbol: String,
     pub records: Vec<ChartRecord>,
     pub gap_zones: Vec<GapZone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<Vec<ForecastRecord>>,
 }
 
 /// Metadata consumed by the template ticker picker.
@@ -230,6 +243,7 @@ mod tests {
             display_symbol: String::from("BingX:BTC-USDT"),
             records,
             gap_zones: vec![zone()],
+            forecast: None,
         }
     }
 

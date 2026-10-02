@@ -5,10 +5,11 @@ use algotrap::engine::error::MarketError;
 use algotrap::engine::frame::{SourceColumnData, SourceFrame};
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::engine::validation::ValidatedTicker;
-use algotrap::prelude::Kline;
+use algotrap::prelude::{Kline, Timeframe};
 use algotrap::query::RawQuery;
 use algotrap::query::duckdb::DuckDBQuery;
 use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord, recent_gap_zones};
+use algotrap::ta::materialize_iching_forecast;
 use algotrap::ta::ops::{GapCandidateDirection, GapCandidateInput, gap_candidate_facts};
 use algotrap::ta::prelude::{
     Atr, AtrState, BandPoint, BandReversion, BandReversionPercent, BandReversionPercentState,
@@ -19,7 +20,9 @@ use algotrap::ta::prelude::{
     body_ratio, ema, is_atr_gap, option_map2, require_output, reverse_rsi, rma, sma,
 };
 use algotrap::ta::{LeapMonthPolicy, iching_bar_trajectory, plum_blossom_signal_with_policy};
-use chartlib::{DatasetKey, GapDirection, GapZone, InteractiveDataset};
+use algotrap::time_utils::{bar_scheduled_close_ms, iching_forecast_horizon};
+use chartlib::{DatasetKey, ForecastRecord, GapDirection, GapZone, InteractiveDataset};
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use std::convert::Infallible;
 
@@ -330,6 +333,7 @@ fn map_crypto_stream_error(error: StreamPipelineError<Infallible, usize>) -> Mar
 fn crypto_output_frame(
     rows: Vec<CryptoIndicatorRow>,
     klines: &[Kline],
+    tf: Timeframe,
 ) -> Result<SourceFrame, MarketError> {
     if rows.len() != klines.len() {
         return Err(MarketError::computation(
@@ -341,7 +345,9 @@ fn crypto_output_frame(
         .iter()
         .enumerate()
         .map(|(index, kline)| {
-            let bar_close_time = klines.get(index + 1).map_or(kline.time, |next| next.time);
+            let bar_close_time = klines
+                .get(index + 1)
+                .map_or_else(|| bar_scheduled_close_ms(kline.time, tf), |next| next.time);
             iching_bar_trajectory(kline.time, bar_close_time).map_err(MarketError::from)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -455,7 +461,7 @@ fn crypto_output_frame(
             SourceColumnData::Number(
                 trajectories
                     .iter()
-                    .map(|trajectory| trajectory.moving_line.map(f64::from))
+                    .map(|trajectory| trajectory.moving_line_open.map(f64::from))
                     .collect(),
             ),
         ),
@@ -559,6 +565,7 @@ fn crypto_output_frame(
 pub async fn compute_crypto_frame(
     klines: Vec<Kline>,
     ticker: ValidatedTicker,
+    tf: Timeframe,
 ) -> Result<(Box<dyn ComputedFrame>, Vec<GapZoneRecord>), MarketError> {
     let decision_time_ms = klines.last().map(|kline| kline.time).unwrap_or(i64::MAX);
     let rows = collect_crypto_rows(&klines).await?;
@@ -567,7 +574,7 @@ pub async fn compute_crypto_frame(
             "indicator row count does not match market row count",
         ));
     }
-    let source = crypto_output_frame(rows.clone(), &klines)?;
+    let source = crypto_output_frame(rows.clone(), &klines, tf)?;
     let (sl_percent, tol_percent) = ticker.risk_percentages();
     let query = RawQuery::source_controlled(build_crypto_sql(sl_percent, tol_percent));
 
@@ -585,11 +592,40 @@ pub(crate) fn adapt_chartlib_dataset(
     display_symbol: &str,
     frame: &dyn ComputedFrame,
     zones: &[GapZoneRecord],
+    tf: Timeframe,
+    as_of: DateTime<Utc>,
 ) -> Result<InteractiveDataset, MarketError> {
+    let forecast = if frame.is_empty() {
+        None
+    } else {
+        let last_open = frame
+            .f64_at("time", frame.len() - 1)?
+            .ok_or_else(|| MarketError::computation("last chart timestamp is missing"))?
+            as i64;
+        let bars = iching_forecast_horizon(last_open, tf, as_of);
+        let forecast = materialize_iching_forecast(&bars).map_err(MarketError::from)?;
+        (!forecast.is_empty()).then(|| {
+            forecast
+                .into_iter()
+                .map(|bar| {
+                    let values = bar.rendered_pane3_values();
+                    ForecastRecord {
+                        time: bar.bar_open_ms,
+                        original: values.original,
+                        transformed: values.transformed,
+                        mutual_high: values.mutual_high,
+                        mutual_low: values.mutual_low,
+                        mutual_mean: values.mutual_mean,
+                    }
+                })
+                .collect()
+        })
+    };
     Ok(InteractiveDataset {
         key: DatasetKey::new(ticker, timeframe),
         display_symbol: display_symbol.to_owned(),
         records: frame.to_json_records()?,
+        forecast,
         gap_zones: zones
             .iter()
             .map(|zone| GapZone {
@@ -662,9 +698,52 @@ mod tests {
     use algotrap::engine::frame::SourceColumnData;
     use algotrap::engine::traits::ComputedFrame;
     use algotrap::engine::validation::ValidatedTicker;
-    use algotrap::prelude::Kline;
+    use algotrap::prelude::{Kline, Timeframe};
     use algotrap::ta::ops::{GapCandidateDirection, GapCandidateInput, gap_candidate_facts};
     use algotrap::ta::prelude::PriorState;
+
+    #[test]
+    fn forecast_serializes_separately_from_candles() {
+        let candle = klines()[0];
+        let frame = crypto_output_frame(direct_aggregate_rows(&[candle]), &[candle], Timeframe::H1)
+            .unwrap();
+        let as_of = chrono::DateTime::from_timestamp_millis(candle.time).unwrap();
+        let dataset = super::adapt_chartlib_dataset(
+            "BTC-USDT",
+            "1h",
+            "BTC",
+            &frame,
+            &[],
+            Timeframe::H1,
+            as_of,
+        )
+        .unwrap();
+        let mut without = dataset.clone();
+        without.forecast = None;
+        assert_eq!(dataset.forecast.as_ref().unwrap().len(), 10);
+        assert_eq!(
+            serde_json::to_vec(&dataset.records).unwrap(),
+            serde_json::to_vec(&without.records).unwrap()
+        );
+        assert_eq!(dataset.records.len(), 1);
+        assert!(dataset.records[0].get("original").is_none());
+        assert_eq!(
+            serde_json::to_vec(&dataset).unwrap(),
+            serde_json::to_vec(
+                &super::adapt_chartlib_dataset(
+                    "BTC-USDT",
+                    "1h",
+                    "BTC",
+                    &frame,
+                    &[],
+                    Timeframe::H1,
+                    as_of
+                )
+                .unwrap()
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn crypto_sql_is_source_controlled_and_never_embeds_ohlc_literals() {
@@ -716,10 +795,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn crossing_bar_exports_opening_moving_line() {
+        let mut candle = klines()[0];
+        candle.time = chrono::DateTime::parse_from_rfc3339("2024-02-10T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let candles = [candle];
+        let frame =
+            crypto_output_frame(direct_aggregate_rows(&candles), &candles, Timeframe::H4).unwrap();
+        assert_eq!(frame.f64_at("iching_open", 0).unwrap(), Some(33.0 - 31.5));
+        assert_eq!(
+            frame.f64_at("iching_original_energy", 0).unwrap(),
+            Some(33.0 - 31.5)
+        );
+        assert_eq!(
+            frame.f64_at("iching_transformed_energy", 0).unwrap(),
+            Some(1.0 - 31.5)
+        );
+        assert_eq!(frame.f64_at("iching_close", 0).unwrap(), Some(34.0 - 31.5));
+        assert_eq!(
+            frame.f64_at("iching_transformed_close", 0).unwrap(),
+            Some(32.0 - 31.5)
+        );
+        assert_eq!(frame.f64_at("iching_moving_line", 0).unwrap(), Some(6.0));
+    }
+
+    #[test]
+    fn latest_row_exports_full_scheduled_trajectory_for_short_and_h4_bars() {
+        let mut candle = klines()[0];
+        candle.time = chrono::DateTime::parse_from_rfc3339("2024-02-10T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        for tf in [Timeframe::M1, Timeframe::H4] {
+            let candles = [candle];
+            let frame = crypto_output_frame(direct_aggregate_rows(&candles), &candles, tf).unwrap();
+            let expected = algotrap::ta::iching_bar_trajectory(
+                candle.time,
+                algotrap::time_utils::bar_scheduled_close_ms(candle.time, tf),
+            )
+            .unwrap();
+            assert_eq!(
+                expected.moving_line,
+                Some(if tf == Timeframe::H4 { 2 } else { 6 })
+            );
+            let exports = [
+                ("iching_original_energy", Some(expected.energy_open)),
+                ("iching_transformed_energy", Some(expected.transformed_open)),
+                ("iching_mutual_energy", Some(expected.mutual_open)),
+                ("iching_open", Some(expected.energy_open)),
+                ("iching_high", Some(expected.energy_high)),
+                ("iching_low", Some(expected.energy_low)),
+                ("iching_close", Some(expected.energy_close)),
+                (
+                    "iching_moving_line",
+                    expected.moving_line_open.map(f64::from),
+                ),
+                ("iching_transformed_close", Some(expected.transformed_close)),
+                ("iching_mutual_close", Some(expected.mutual_close)),
+                ("iching_mutual_high", Some(expected.mutual_high)),
+                ("iching_mutual_low", Some(expected.mutual_low)),
+                ("iching_mutual_mean", Some(expected.mutual_mean)),
+            ];
+            assert_eq!(
+                frame
+                    .columns()
+                    .iter()
+                    .filter(|name| name.starts_with("iching_"))
+                    .count(),
+                13
+            );
+            for (name, value) in exports {
+                assert_eq!(frame.f64_at(name, 0).unwrap(), value, "{tf:?} {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn final_bar_trajectory_includes_internal_cst_cast_boundaries() {
+        let mut candle = klines()[0];
+        candle.time = chrono::DateTime::parse_from_rfc3339("2025-07-09T14:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let candles = vec![candle];
+        let frame =
+            crypto_output_frame(direct_aggregate_rows(&candles), &candles, Timeframe::H4).unwrap();
+        let open = frame.f64_at("iching_open", 0).unwrap().unwrap();
+        let high = frame.f64_at("iching_high", 0).unwrap().unwrap();
+        let low = frame.f64_at("iching_low", 0).unwrap().unwrap();
+        assert!(
+            high != open || low != open,
+            "final bar must include casts across CST midnight"
+        );
+    }
+
     #[tokio::test]
     async fn crypto_frame_preserves_presentation_schema_and_supplied_rows() {
         let klines = klines();
-        let (frame, _zones) = compute_crypto_frame(klines.clone(), ticker())
+        let (frame, _zones) = compute_crypto_frame(klines.clone(), ticker(), Timeframe::M1)
             .await
             .unwrap();
 
@@ -804,7 +977,7 @@ mod tests {
         let collection_error = collect_crypto_rows(&invalid).await.unwrap_err();
         assert_eq!(collection_error.kind, ErrorKind::ValidationError);
 
-        let compute_error = match compute_crypto_frame(invalid, ticker()).await {
+        let compute_error = match compute_crypto_frame(invalid, ticker(), Timeframe::M1).await {
             Ok(_) => panic!("invalid Kline must not produce a frame"),
             Err(error) => error,
         };
@@ -813,7 +986,7 @@ mod tests {
 
     #[test]
     fn projector_empty_preserves_all_30_names_types_and_zero_lengths() {
-        let frame = crypto_output_frame(vec![], &[]).unwrap();
+        let frame = crypto_output_frame(vec![], &[], Timeframe::M1).unwrap();
         let expected = [
             ("open", "number"),
             ("high", "number"),
@@ -871,8 +1044,12 @@ mod tests {
 
     #[test]
     fn projector_rejects_row_kline_cardinality_mismatch_with_computation_error() {
-        let error = crypto_output_frame(vec![direct_aggregate_rows(&klines()[..1]).remove(0)], &[])
-            .unwrap_err();
+        let error = crypto_output_frame(
+            vec![direct_aggregate_rows(&klines()[..1]).remove(0)],
+            &[],
+            Timeframe::M1,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::ComputationError);
         assert_eq!(
@@ -892,7 +1069,7 @@ mod tests {
             assert_rows_match(&direct[position], &collected[position]);
         }
 
-        let (frame, _zones) = compute_crypto_frame(candles.clone(), ticker())
+        let (frame, _zones) = compute_crypto_frame(candles.clone(), ticker(), Timeframe::M1)
             .await
             .unwrap();
         let expected_schema = vec![
@@ -1159,8 +1336,13 @@ mod tests {
         ];
         let trajectories = candles
             .iter()
-            .map(|candle| {
-                algotrap::ta::iching_bar_trajectory(candle.time, candle.time + 60_000).unwrap()
+            .enumerate()
+            .map(|(index, candle)| {
+                let close = candles.get(index + 1).map_or_else(
+                    || algotrap::time_utils::bar_scheduled_close_ms(candle.time, Timeframe::M1),
+                    |next| next.time,
+                );
+                algotrap::ta::iching_bar_trajectory(candle.time, close).unwrap()
             })
             .collect::<Vec<_>>();
 
@@ -1300,7 +1482,7 @@ mod tests {
                 SourceColumnData::Number(
                     trajectories
                         .iter()
-                        .map(|trajectory| trajectory.moving_line.map(f64::from))
+                        .map(|trajectory| trajectory.moving_line_open.map(f64::from))
                         .collect(),
                 ),
             ),
@@ -1395,7 +1577,7 @@ mod tests {
             ),
         ];
 
-        let frame = crypto_output_frame(rows, &candles).unwrap();
+        let frame = crypto_output_frame(rows, &candles, Timeframe::M1).unwrap();
         let expected_names = expected_columns
             .iter()
             .map(|(name, _)| name.clone())
@@ -2222,7 +2404,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let frame = crypto_output_frame(rows, &klines).unwrap();
+        let frame = crypto_output_frame(rows, &klines, Timeframe::M1).unwrap();
         let expected_names = [
             "open",
             "high",
@@ -2368,7 +2550,7 @@ mod tests {
             gap_candidate_body_top: bullish.body_top,
             gap_candidate_direction: bullish.direction,
         }];
-        let one_frame = crypto_output_frame(one_row, &one_kline).unwrap();
+        let one_frame = crypto_output_frame(one_row, &one_kline, Timeframe::M1).unwrap();
         assert_eq!(one_frame.len(), 1);
         assert_eq!(one_frame.column_names(), expected_names);
         assert_eq!(
@@ -2382,7 +2564,7 @@ mod tests {
 
     #[test]
     fn iching_replaces_rssi_sharpe_in_source_and_projection() {
-        let frame = crypto_output_frame(vec![], &[]).unwrap();
+        let frame = crypto_output_frame(vec![], &[], Timeframe::M1).unwrap();
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
@@ -2487,10 +2669,24 @@ mod tests {
                 "row {position} mutual mismatch"
             );
         }
-        let (frame, _zones) = compute_crypto_frame(candles.clone(), ticker())
+        let (frame, _zones) = compute_crypto_frame(candles.clone(), ticker(), Timeframe::H4)
             .await
             .unwrap();
         assert_eq!(frame.len(), candles.len());
+        let last = candles.len() - 1;
+        let expected = algotrap::ta::iching_bar_trajectory(
+            candles[last].time,
+            algotrap::time_utils::bar_scheduled_close_ms(candles[last].time, Timeframe::H4),
+        )
+        .unwrap();
+        assert_eq!(
+            frame.f64_at("iching_close", last).unwrap(),
+            Some(expected.energy_close)
+        );
+        assert_ne!(
+            frame.f64_at("iching_open", last).unwrap(),
+            frame.f64_at("iching_close", last).unwrap()
+        );
         for present in [
             "iching_original_energy",
             "iching_transformed_energy",
@@ -2535,7 +2731,9 @@ mod tests {
             "collection must fail on invalid timestamp rather than skip or null"
         );
         assert!(
-            compute_crypto_frame(klines, ticker()).await.is_err(),
+            compute_crypto_frame(klines, ticker(), Timeframe::M1)
+                .await
+                .is_err(),
             "compute must fail without a frame on invalid timestamp"
         );
     }
@@ -2584,7 +2782,7 @@ mod tests {
             "collection must preserve facade message rather than substitute"
         );
         assert!(
-            compute_crypto_frame(vec![failing_kline], ticker())
+            compute_crypto_frame(vec![failing_kline], ticker(), Timeframe::M1)
                 .await
                 .is_err(),
             "compute must fail without a frame on facade failure"
@@ -2846,7 +3044,7 @@ mod tests {
 
         let candles = klines();
         let rows = collect_crypto_rows(&candles).await.unwrap();
-        let source = crypto_output_frame(rows, &candles).unwrap();
+        let source = crypto_output_frame(rows, &candles, Timeframe::M1).unwrap();
         for removed in ["rssi", "rssi_ma", "rssi_direction", "rssi_color", "trust"] {
             assert!(
                 !source.column_names().contains(&removed),
@@ -2857,7 +3055,7 @@ mod tests {
                 "{removed} column must be absent from source"
             );
         }
-        let (projected, zones) = compute_crypto_frame(candles.clone(), ticker())
+        let (projected, zones) = compute_crypto_frame(candles.clone(), ticker(), Timeframe::M1)
             .await
             .unwrap();
         for removed in ["rssi", "rssi_ma", "rssi_direction", "rssi_color", "trust"] {
