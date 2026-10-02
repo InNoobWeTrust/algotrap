@@ -2,7 +2,8 @@
 
 pub use super::error::{TaError, TaErrorKind, TaResult};
 pub use super::iching::{
-    HexagramEnergy, IchingBarTrajectory, IchingSignal, LeapMonthPolicy, iching_bar_trajectory,
+    HexagramEnergy, IchingBarTrajectory, IchingForecastBar, IchingRenderedPane3Values,
+    IchingSignal, LeapMonthPolicy, iching_bar_trajectory, materialize_iching_forecast,
     plum_blossom_signal, plum_blossom_signal_with_policy,
 };
 pub use super::kernel::{Kernel, KernelStep, PriorState};

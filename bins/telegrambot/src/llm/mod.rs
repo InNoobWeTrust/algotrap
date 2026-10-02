@@ -12,7 +12,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tracing::{debug, info, warn};
 
 use crate::config::{EnvConf, TickerConf};
@@ -20,6 +20,8 @@ use crate::memory::{
     IndicatorConfig, IndicatorProposal, PeriodName, TelegramOutputName, TickerMemory,
 };
 use algotrap::engine::traits::ComputedFrame;
+use algotrap::ta::{IchingForecastBar, materialize_iching_forecast};
+use algotrap::time_utils::iching_forecast_horizon;
 
 pub use tools::{build_tools, execute_tool_call};
 
@@ -103,10 +105,10 @@ fn retryable_transport_error(error: &async_openai::error::OpenAIError) -> Option
 
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
-        if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
-            if is_retryable_io_error(io_error.kind()) {
-                return Some("transport");
-            }
+        if let Some(io_error) = cause.downcast_ref::<std::io::Error>()
+            && is_retryable_io_error(io_error.kind())
+        {
+            return Some("transport");
         }
         source = cause.source();
     }
@@ -132,6 +134,7 @@ fn is_retryable_io_error(kind: ErrorKind) -> bool {
 /// In `FullAnalysis` mode, uses all seven tools and returns the analysis text.
 /// In `AlertScan` mode, uses the same tools and parses a structured
 /// JSON response for confidence + direction.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent(
     llm_client: &OpenAIClient<OpenAIConfig>,
     conf: &EnvConf,
@@ -140,6 +143,7 @@ pub async fn run_agent(
     gap_zones: &HashMap<Timeframe, Vec<algotrap::query::gap_zones::GapZoneRecord>>,
     mode: AnalysisMode,
     memory: Option<&TickerMemory>,
+    as_of: DateTime<Utc>,
 ) -> Result<AnalysisResult, Box<dyn core::error::Error + Send + Sync>> {
     let tools = build_tools(conf)?;
 
@@ -151,8 +155,9 @@ pub async fn run_agent(
         AnalysisMode::AlertScan => ("system_alert.txt", "user_alert.txt"),
     };
 
-    let system_prompt = render_prompt(conf, ticker, system_file, memory)?;
-    let user_prompt = render_prompt(conf, ticker, user_file, memory)?;
+    let forecast = forecast_prompt_from_frames(ticker, all_dfs, as_of);
+    let system_prompt = render_prompt(conf, ticker, system_file, memory, &forecast, as_of)?;
+    let user_prompt = render_prompt(conf, ticker, user_file, memory, &forecast, as_of)?;
 
     let mut messages: Vec<ChatCompletionRequestMessage> = vec![
         ChatCompletionRequestSystemMessageArgs::default()
@@ -733,6 +738,118 @@ fn parse_alert_json(text: &str, available_timeframes: &[Timeframe]) -> AnalysisR
 
 // ─── Prompt Loading ──────────────────────────────────────────────────────────
 
+const FORECAST_HEADER: &str = "[I-CHING CALENDAR — DETERMINISTIC, NOT A MARKET SIGNAL]\nWall-clock calendrical arithmetic. Zero market input. Not a price forecast. bin=0..63 is the six-bit binary index, not King Wen numbering; orig=bin-31.5 is a coordinate, not a validated financial score; ml=terminal moving line. Values come from the terminal cast within each bar. T+0=first scheduled future bar after the observed bar; subsequent offsets count scheduled bars.";
+// The forecast portion excludes the fixed header/disclaimer. This is a
+// character-count heuristic, not a real tokenizer: 4 UTF-8 bytes ≈ 1 token.
+// It can drift for non-ASCII text; the cap is a safety bound, not a precise measurement.
+// The disclaimer is always emitted in full.
+const FORECAST_BUDGET: usize = 320;
+
+fn forecast_prompt_from_frames(
+    ticker: &TickerConf,
+    frames: &HashMap<Timeframe, Box<dyn ComputedFrame>>,
+    as_of: chrono::DateTime<Utc>,
+) -> String {
+    let forecasts = ticker
+        .tfs
+        .iter()
+        .copied()
+        .map(|tf| {
+            let bars = frames
+                .get(&tf)
+                .and_then(|frame| frame.len().checked_sub(1).map(|row| (&**frame, row)))
+                .and_then(|(frame, row)| frame.f64_at("time", row).ok().flatten())
+                .filter(|time| {
+                    time.is_finite() && *time >= i64::MIN as f64 && *time < i64::MAX as f64
+                })
+                .and_then(|time| {
+                    materialize_iching_forecast(&iching_forecast_horizon(time as i64, tf, as_of))
+                        .ok()
+                })
+                .unwrap_or_default();
+            (tf, bars)
+        })
+        .collect::<Vec<_>>();
+    render_iching_forecast(&forecasts, ticker.default_tf)
+}
+
+fn render_iching_forecast(
+    forecasts: &[(Timeframe, Vec<IchingForecastBar>)],
+    default_tf: Timeframe,
+) -> String {
+    let mut block = FORECAST_HEADER.to_string();
+    let mut lines = Vec::with_capacity(forecasts.len());
+    // Relevance order: default TF first (when configured), then other TFs in configured order.
+    let ordered = forecasts
+        .iter()
+        .filter(|(tf, _)| *tf == default_tf)
+        .chain(forecasts.iter().filter(|(tf, _)| *tf != default_tf));
+    for (tf, bars) in ordered {
+        let label = format!("TF:{tf}  ");
+        if bars.is_empty() {
+            lines.push(format!("\n{label}no forward window available"));
+            continue;
+        }
+        // A state is (terminal original hexagram index, terminal original energy,
+        // terminal moving line). The binary index is 0..63, not King Wen numbering.
+        let mut runs: Vec<(usize, usize, u8, f64, Option<u8>)> = Vec::new();
+        for (offset, bar) in bars.iter().enumerate() {
+            let energy = bar.trajectory.energy_close;
+            let state = ((energy + 31.5) as u8, energy, bar.trajectory.moving_line);
+            if let Some(last) = runs.last_mut()
+                && (last.2, last.3, last.4) == state
+            {
+                last.1 = offset;
+            } else {
+                runs.push((offset, offset, state.0, state.1, state.2));
+            }
+        }
+        let mut line = format!("\n{label}");
+        let mut shown = 0;
+        for (start, end, hex, energy, moving_line) in &runs {
+            let part = format!(
+                "T+{start}{} bin={} orig={energy:+.1} ml={}{}",
+                if end > start {
+                    format!("..T+{end}")
+                } else {
+                    String::new()
+                },
+                hex,
+                moving_line.map_or("–".to_string(), |line| line.to_string()),
+                if end > start {
+                    format!(" ×{}", end - start + 1)
+                } else {
+                    String::new()
+                },
+            );
+            if shown != 0 {
+                line.push_str("  →  ");
+            }
+            line.push_str(&part);
+            shown += 1;
+        }
+        line.push_str(&format!("  ({} bars / {shown} state runs)", bars.len()));
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        block.push_str("\nNo forward window available.");
+        return block;
+    }
+    let mut forecast_bytes = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let remaining = lines.len() - index - 1;
+        let marker = format!("\n(+{} more timeframes omitted)", remaining + 1);
+        let reserved = if remaining == 0 { 0 } else { marker.len() };
+        if forecast_bytes + line.len() + reserved > FORECAST_BUDGET * 4 {
+            block.push_str(&marker);
+            break;
+        }
+        block.push_str(line);
+        forecast_bytes += line.len();
+    }
+    block
+}
+
 /// Load a prompt template and render all placeholders.
 ///
 /// Base placeholders (all modes): `{{symbol}}`, `{{tfs}}`, `{{default_tf}}`, `{{time}}`
@@ -743,6 +860,8 @@ fn render_prompt(
     ticker: &TickerConf,
     filename: &str,
     memory: Option<&TickerMemory>,
+    forecast: &str,
+    as_of: DateTime<Utc>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
     let path = std::path::Path::new(&conf.prompts_dir).join(filename);
     let template = std::fs::read_to_string(&path)
@@ -754,10 +873,8 @@ fn render_prompt(
         .replace("{{symbol}}", &ticker.symbol)
         .replace("{{tfs}}", &timeframes)
         .replace("{{default_tf}}", &ticker.default_tf.to_string())
-        .replace(
-            "{{time}}",
-            &Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
-        );
+        .replace("{{iching_forecast}}", forecast)
+        .replace("{{time}}", &as_of.format("%Y-%m-%d %H:%M UTC").to_string());
 
     // Adaptive placeholders (only relevant for AlertScan prompt files)
     rendered = rendered
@@ -1669,6 +1786,532 @@ async fn compress_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use algotrap::engine::frame::{SourceColumnData, SourceFrame};
+
+    fn projection_fixture() -> (TickerConf, SourceFrame) {
+        let ticker = TickerConf {
+            symbol: "BTC-USDT".into(),
+            sl_percent: 0.02,
+            tol_percent: 0.01,
+            tfs: vec![Timeframe::H1],
+            default_tf: Timeframe::H1,
+        };
+        let last_open = 1_704_070_800_000.0;
+        let frame = SourceFrame::from_columns(
+            [
+                ("time", last_open),
+                ("open", 100.0),
+                ("high", 102.0),
+                ("low", 99.0),
+                ("close", 101.0),
+                ("volume", 1_000.0),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.into(), SourceColumnData::Number(vec![Some(value)])))
+            .collect(),
+        )
+        .unwrap();
+        (ticker, frame)
+    }
+
+    #[test]
+    fn single_as_of_reaches_both_paths() {
+        let (ticker, frame) = projection_fixture();
+        let as_of = DateTime::from_timestamp_millis(1_704_070_800_000).unwrap();
+        let document =
+            crate::chart::fixed_chart_document(&Timeframe::H1, &frame, &ticker, &[], as_of)
+                .unwrap();
+        let frames: HashMap<_, Box<dyn ComputedFrame>> =
+            HashMap::from([(Timeframe::H1, Box::new(frame) as Box<dyn ComputedFrame>)]);
+        let block = forecast_prompt_from_frames(&ticker, &frames, as_of);
+        let forecast = document.dataset.forecast.unwrap();
+        let llm_bars = materialize_iching_forecast(&iching_forecast_horizon(
+            1_704_070_800_000,
+            Timeframe::H1,
+            as_of,
+        ))
+        .unwrap();
+        assert_eq!(forecast.len(), llm_bars.len());
+        assert_eq!(forecast[0].time, llm_bars[0].bar_open_ms);
+        assert!(
+            block.contains(&format!("({} bars /", forecast.len())),
+            "{block}"
+        );
+        assert!(block.contains("TF:1h  T+0"), "{block}");
+    }
+
+    #[test]
+    fn chart_and_llm_agree_across_a_bar_boundary() {
+        let (ticker, frame) = projection_fixture();
+        // The tenth projected H1 bar closes at this boundary; one second later
+        // the stale-anchor guard suppresses the entire window.
+        let boundary = 1_704_070_800_000 + 11 * 3_600_000;
+        let as_of = DateTime::from_timestamp_millis(boundary - 1_000).unwrap();
+        let later = DateTime::from_timestamp_millis(boundary + 1_000).unwrap();
+        assert!(iching_forecast_horizon(1_704_070_800_000, Timeframe::H1, later).is_empty());
+        let document =
+            crate::chart::fixed_chart_document(&Timeframe::H1, &frame, &ticker, &[], as_of)
+                .unwrap();
+        let frames: HashMap<_, Box<dyn ComputedFrame>> =
+            HashMap::from([(Timeframe::H1, Box::new(frame) as Box<dyn ComputedFrame>)]);
+        let block = forecast_prompt_from_frames(&ticker, &frames, as_of);
+        let forecast = document.dataset.forecast.unwrap();
+        assert_eq!(forecast.len(), 10);
+        assert_eq!(forecast[0].time, 1_704_070_800_000 + 3_600_000);
+        assert!(block.contains("(10 bars /"), "{block}");
+        assert!(!block.contains("no forward window available"), "{block}");
+        assert_eq!(block, forecast_prompt_from_frames(&ticker, &frames, as_of));
+    }
+
+    #[test]
+    fn projection_call_sites_inject_as_of() {
+        let chart = include_str!("../chart.rs");
+        let llm = include_str!("mod.rs");
+        let main = include_str!("../main.rs");
+        let chart_path = chart
+            .split("pub fn fixed_chart_document(")
+            .nth(1)
+            .unwrap()
+            .split("fn flat_record(")
+            .next()
+            .unwrap();
+        let llm_path = llm
+            .split("pub async fn run_agent(")
+            .nth(1)
+            .unwrap()
+            .split("// ─── Result Parsing")
+            .next()
+            .unwrap();
+        let forecast_path = llm
+            .split("fn forecast_prompt_from_frames(")
+            .nth(1)
+            .unwrap()
+            .split("// ─── Memory Context Formatting")
+            .next()
+            .unwrap();
+        assert!(!chart_path.contains("Utc::now()"));
+        assert!(!llm_path.contains("Utc::now()"));
+        assert!(!forecast_path.contains("Utc::now()"));
+        assert!(main.contains("let as_of = Utc::now();"));
+        assert!(main.contains("Some(&mem),\n        as_of,"));
+        let chart_call = main
+            .split("let tf_charts = if")
+            .nth(1)
+            .unwrap()
+            .split(".await")
+            .next()
+            .unwrap();
+        assert!(chart_call.contains("&mem.indicator_config,"));
+        assert!(chart_call.contains("as_of,"));
+    }
+
+    fn forecast_bar(hex: u8, line: Option<u8>) -> IchingForecastBar {
+        let mut bar = materialize_iching_forecast(&[(1_704_067_200_000, 1_704_070_800_000)])
+            .expect("valid forecast")
+            .remove(0);
+        bar.trajectory.energy_close = f64::from(hex) - 31.5;
+        bar.trajectory.moving_line = line;
+        bar
+    }
+
+    #[test]
+    fn forecast_prompt_orders_and_deduplicates() {
+        let a = forecast_bar(34, Some(3));
+        let b = forecast_bar(19, Some(1));
+        let block = render_iching_forecast(
+            &[
+                (Timeframe::H1, vec![a.clone(), a.clone(), a, b.clone(), b]),
+                (Timeframe::H4, vec![forecast_bar(34, Some(3))]),
+            ],
+            Timeframe::H4,
+        );
+        assert!(block.find("TF:4h").unwrap() < block.find("TF:1h").unwrap());
+        assert!(block.contains("T+0..T+2 bin=34 orig=+2.5 ml=3 ×3  →  T+3..T+4 bin=19 orig=-12.5 ml=1 ×2  (5 bars / 2 state runs)"));
+        assert!(!block.contains(" h="));
+    }
+
+    #[test]
+    fn forecast_prompt_counts_nonadjacent_repeated_states_as_separate_runs() {
+        let a = forecast_bar(34, Some(3));
+        let b = forecast_bar(19, Some(1));
+        let block =
+            render_iching_forecast(&[(Timeframe::H1, vec![a.clone(), b, a])], Timeframe::H1);
+        assert!(block.contains("T+0 bin=34 orig=+2.5 ml=3  →  T+1 bin=19 orig=-12.5 ml=1  →  T+2 bin=34 orig=+2.5 ml=3  (3 bars / 3 state runs)"));
+        assert!(!block.contains("distinct states"));
+    }
+
+    #[test]
+    fn forecast_prompt_renders_actual_terminal_cast_and_offsets() {
+        let open = chrono::DateTime::parse_from_rfc3339("2024-02-10T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let duration = 4 * 60 * 60 * 1000;
+        let bars = materialize_iching_forecast(&[
+            (open, open + duration),
+            (open + duration, open + 2 * duration),
+        ])
+        .unwrap();
+        let first = &bars[0].trajectory;
+        assert_eq!(first.energy_open + 31.5, 33.0);
+        assert_eq!(first.moving_line_open, Some(6));
+        assert_eq!(first.energy_close + 31.5, 34.0);
+        assert_eq!(first.moving_line, Some(2));
+        let block = render_iching_forecast(&[(Timeframe::H4, bars.clone())], Timeframe::H4);
+        assert!(block.contains("T+0 bin=34 orig=+2.5 ml=2"));
+        assert!(!block.contains("bin=33 orig=+1.5 ml=6"));
+        for (offset, bar) in bars.iter().enumerate() {
+            let terminal = &bar.trajectory;
+            assert!(block.contains(&format!(
+                "T+{offset} bin={} orig={:+.1} ml={}",
+                (terminal.energy_close + 31.5) as u8,
+                terminal.energy_close,
+                terminal.moving_line.unwrap(),
+            )));
+        }
+    }
+
+    #[test]
+    fn forecast_prompt_binary_bounds_from_actual_calendar() {
+        let open = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let hour = 60 * 60 * 1000;
+        let intervals = (0..366 * 24)
+            .map(|offset| (open + offset * hour, open + (offset + 1) * hour))
+            .collect::<Vec<_>>();
+        let bars = materialize_iching_forecast(&intervals).unwrap();
+        for (bin, energy) in [(0, -31.5), (63, 31.5)] {
+            let bar = bars
+                .iter()
+                .find(|bar| bar.trajectory.energy_close == energy)
+                .expect("actual calendar reaches binary boundary");
+            let block =
+                render_iching_forecast(&[(Timeframe::H1, vec![bar.clone()])], Timeframe::H1);
+            assert!(block.contains(&format!("T+0 bin={bin} orig={energy:+.1}")));
+        }
+    }
+
+    #[test]
+    fn forecast_prompt_header_defines_calendar_tokens() {
+        assert_eq!(FORECAST_HEADER.lines().count(), 2);
+        for definition in [
+            "bin=0..63",
+            "binary",
+            "not King Wen",
+            "orig=bin-31.5",
+            "ml=terminal moving line",
+            "terminal cast within each bar",
+            "T+0=first scheduled future bar after the observed bar",
+            "subsequent offsets count scheduled bars",
+        ] {
+            assert!(FORECAST_HEADER.contains(definition), "missing {definition}");
+        }
+    }
+
+    #[test]
+    fn forecast_prompt_caps_and_prioritizes() {
+        let tfs = [
+            Timeframe::M1,
+            Timeframe::M5,
+            Timeframe::M15,
+            Timeframe::M30,
+            Timeframe::H1,
+            Timeframe::H2,
+            Timeframe::H4,
+            Timeframe::H6,
+            Timeframe::H8,
+            Timeframe::H12,
+            Timeframe::D1,
+            Timeframe::D3,
+            Timeframe::W1,
+            Timeframe::MOS1,
+        ];
+        let forecasts = tfs
+            .iter()
+            .map(|tf| (*tf, vec![forecast_bar(34, Some(3)); 10]))
+            .collect::<Vec<_>>();
+        let block = render_iching_forecast(&forecasts, Timeframe::H4);
+        assert!(block.len() - FORECAST_HEADER.len() <= FORECAST_BUDGET * 4);
+        assert!(block.find("TF:4h").unwrap() < block.find("TF:1m").unwrap());
+        assert!(
+            block.contains("TF:1M"),
+            "all short forecasts fit the token budget"
+        );
+    }
+
+    #[test]
+    fn forecast_block_budget_is_token_based() {
+        let forecasts = [Timeframe::M1, Timeframe::H1, Timeframe::H4, Timeframe::D1]
+            .map(|tf| (tf, vec![forecast_bar(34, Some(3)); 10]));
+        let block = render_iching_forecast(&forecasts, Timeframe::H4);
+        assert!(block.len() > 320, "regression must exceed the old byte cap");
+        assert!(block.len() - FORECAST_HEADER.len() < FORECAST_BUDGET * 4);
+        for tf in ["4h", "1m", "1h", "1d"] {
+            assert!(
+                block.contains(&format!("TF:{tf}  T+0..T+9")),
+                "{tf}: {block}"
+            );
+        }
+        assert!(!block.contains("omitted"));
+    }
+
+    #[test]
+    fn forecast_block_truncates_at_token_cap() {
+        let tfs = [
+            Timeframe::M1,
+            Timeframe::M5,
+            Timeframe::M15,
+            Timeframe::M30,
+            Timeframe::H1,
+            Timeframe::H2,
+            Timeframe::H4,
+            Timeframe::H6,
+            Timeframe::H8,
+            Timeframe::H12,
+            Timeframe::D1,
+            Timeframe::D3,
+            Timeframe::W1,
+            Timeframe::MOS1,
+        ];
+        let bars = (0..10)
+            .map(|hex| forecast_bar(20 + hex, Some(3)))
+            .collect::<Vec<_>>();
+        let forecasts = tfs.map(|tf| (tf, bars.clone()));
+        let block = render_iching_forecast(&forecasts, Timeframe::H4);
+        let lines = block.lines().skip(2).collect::<Vec<_>>();
+        let marker = lines.last().expect("omission marker");
+        let shown = lines.len() - 1;
+        assert!(shown > 0 && shown < forecasts.len());
+        assert_eq!(
+            *marker,
+            format!("(+{} more timeframes omitted)", forecasts.len() - shown)
+        );
+        assert!((block.len() - FORECAST_HEADER.len()).div_ceil(4) <= FORECAST_BUDGET);
+        let ordered = std::iter::once(&forecasts[6]).chain(
+            forecasts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 6)
+                .map(|(_, forecast)| forecast),
+        );
+        for (line, (tf, bars)) in lines[..shown].iter().zip(ordered) {
+            let full = render_iching_forecast(&[(*tf, bars.clone())], *tf);
+            assert_eq!(*line, full.lines().last().unwrap(), "partial line for {tf}");
+        }
+        assert!(block.find("TF:4h").unwrap() < block.find("TF:1m").unwrap());
+    }
+
+    #[test]
+    fn forecast_block_keeps_disclaimer_when_truncated() {
+        let bars = (0..10)
+            .map(|hex| forecast_bar(20 + hex, Some(3)))
+            .collect::<Vec<_>>();
+        let forecasts = [Timeframe::M1, Timeframe::H4, Timeframe::D1, Timeframe::W1]
+            .map(|tf| (tf, bars.clone()));
+        let block = render_iching_forecast(&forecasts, Timeframe::H4);
+        assert!(block.contains("more timeframes omitted"));
+        assert!(block.starts_with(FORECAST_HEADER));
+        assert!(block.contains(
+            "Wall-clock calendrical arithmetic. Zero market input. Not a price forecast."
+        ));
+    }
+
+    #[test]
+    fn forecast_budget_estimator_is_documented() {
+        let source = include_str!("mod.rs");
+        assert!(source.contains("character-count heuristic, not a real tokenizer"));
+        assert!(source.contains("drift for non-ASCII text"));
+        assert!(source.contains("safety bound, not a precise measurement"));
+        assert!(source.contains("FORECAST_BUDGET * 4"));
+    }
+
+    #[test]
+    fn forecast_prompt_has_no_null_or_market_claim() {
+        let block = render_iching_forecast(
+            &[(Timeframe::H4, vec![forecast_bar(34, None)])],
+            Timeframe::H4,
+        );
+        assert!(!block.contains("null"));
+        assert!(block.contains("ml=–"));
+        assert!(block.contains("Not a price forecast."));
+        assert!(!block.contains("price will"));
+    }
+
+    #[test]
+    fn iching_context_only_policy_in_all_prompt_sources() {
+        for (system, user) in [
+            (
+                include_str!("../../config/prompts/system.txt"),
+                include_str!("../../config/prompts/user.txt"),
+            ),
+            (
+                include_str!("../../config/prompts/system_alert.txt"),
+                include_str!("../../config/prompts/user_alert.txt"),
+            ),
+        ] {
+            for clause in [
+                "Historical AND future I-Ching is calendrical/structural background only",
+                "price, direction, trade entry/exit/target/stop, risk, sizing, triggers, weights, outcome evaluation or tuning",
+                "confidence increases, reductions or caps",
+                "even when independent live market evidence agrees",
+                "memory, KB, successful/failed patterns, notes, summaries and tool output",
+                "Attribution/corroboration is NOT permission for I-Ching decision influence",
+                "binary index minus 31.5",
+                "not independent market confirmations",
+                "not a future market state",
+                "iching_moving_line",
+            ] {
+                assert!(system.contains(clause), "missing {clause}");
+            }
+            assert!(user.contains("Historical AND future I-Ching"));
+            assert!(user.contains("context only"));
+            for legacy in [
+                "Confluence: same primary cast",
+                "may qualitatively raise confidence",
+                "cap confidence below the alert tier",
+                "qualitative I-Ching confluence",
+            ] {
+                assert!(!system.contains(legacy));
+                assert!(!user.contains(legacy));
+            }
+        }
+        assert!(include_str!("../../config/prompts/system.txt").contains("If your summary, rationale, or confidence justification cites a cast state from this window, name the specific LIVE indicator column and its numeric value that independently corroborates the same direction in the same sentence."));
+        assert!(include_str!("../../config/prompts/system_alert.txt").contains("If your `summary`, trade-plan rationale, or confidence justification cites a cast state from this window, name the specific LIVE indicator column and its numeric value that independently corroborates the same direction in the same sentence."));
+    }
+
+    #[test]
+    fn iching_policy_precedes_local_legacy_context() {
+        let env: HashMap<String, String> = [
+            ("TICKERS", r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"4h","default_tf":"4h"}]"#),
+            ("TELEGRAM_BOT_TOKEN", "test"), ("TELEGRAM_CHAT_ID", "-100"),
+            ("LLM_API_BASE", "http://localhost:4000/v1"), ("LLM_API_KEY", "sk-test"),
+            ("LLM_MODEL", "test-model"), ("BROWSERLESS_URL", "http://localhost:3000"),
+        ].into_iter().map(|(key, value)| (key.to_string(), value.to_string())).collect();
+        let mut conf: EnvConf = envy::from_iter(env).expect("valid config");
+        conf.prompts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config/prompts")
+            .to_string_lossy()
+            .into_owned();
+        let legacy = "Historical I-Ching success: boost confidence when Original agrees; cap confidence when Mutual conflicts.";
+        let block = render_iching_forecast(
+            &[(Timeframe::H4, vec![forecast_bar(34, Some(3))])],
+            Timeframe::H4,
+        );
+        for filename in ["system.txt", "system_alert.txt"] {
+            // Local injected-context fixture only: retain legacy text, not a model-compliance proof.
+            let rendered = render_prompt(
+                &conf,
+                &conf.tickers[0],
+                filename,
+                None,
+                &block,
+                DateTime::from_timestamp(1_704_067_200, 0).unwrap(),
+            )
+            .expect("render prompt");
+            let combined = format!(
+                "{rendered}\nInjected Memory Patterns: {legacy}\nInjected KB Context: {legacy}\nTool notes: {legacy}"
+            );
+            assert!(combined.contains(legacy));
+            assert!(combined.contains(&block));
+            assert!(!combined.contains("{{iching_forecast}}"));
+            assert!(combined.contains("These exclusions prevail over conflicting"));
+            assert!(
+                combined
+                    .contains("do not post-hoc align casts with market directions or confidence")
+            );
+        }
+    }
+
+    #[test]
+    fn forecast_placeholder_and_guardrail_in_both_modes() {
+        let env: HashMap<String, String> = [
+            ("TICKERS", r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"4h","default_tf":"4h"}]"#),
+            ("TELEGRAM_BOT_TOKEN", "test"), ("TELEGRAM_CHAT_ID", "-100"),
+            ("LLM_API_BASE", "http://localhost:4000/v1"), ("LLM_API_KEY", "sk-test"),
+            ("LLM_MODEL", "test-model"), ("BROWSERLESS_URL", "http://localhost:3000"),
+        ].into_iter().map(|(key, value)| (key.to_string(), value.to_string())).collect();
+        let mut conf: EnvConf = envy::from_iter(env).expect("valid config");
+        conf.prompts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config/prompts")
+            .to_string_lossy()
+            .into_owned();
+        let ticker = &conf.tickers[0];
+        let block = render_iching_forecast(
+            &[(Timeframe::H4, vec![forecast_bar(34, Some(3))])],
+            Timeframe::H4,
+        );
+        for filename in ["system.txt", "system_alert.txt"] {
+            let prompt = render_prompt(&conf, ticker, filename, None, &block, Utc::now())
+                .expect("render prompt");
+            assert!(prompt.contains(&block), "{filename}");
+            assert!(!prompt.contains("{{iching_forecast}}"), "{filename}");
+            assert!(
+                prompt.contains("specific LIVE indicator column and its numeric value"),
+                "{filename}"
+            );
+            assert!(
+                prompt.contains("never a standalone trade trigger"),
+                "{filename}"
+            );
+        }
+        let alert =
+            render_prompt(&conf, ticker, "system_alert.txt", None, &block, Utc::now()).unwrap();
+        assert!(alert.contains(&format!("alert tier ({:.0})", conf.tier_alert_threshold)));
+    }
+
+    #[test]
+    fn forecast_block_declares_its_determinism() {
+        let block = render_iching_forecast(
+            &[(Timeframe::H4, vec![forecast_bar(34, Some(3))])],
+            Timeframe::H4,
+        );
+        assert!(block.starts_with("[I-CHING CALENDAR — DETERMINISTIC, NOT A MARKET SIGNAL]"));
+        assert!(block.contains("Wall-clock calendrical arithmetic. Zero market input."));
+    }
+
+    #[test]
+    fn forecast_block_reports_absent_window() {
+        let block = render_iching_forecast(&[(Timeframe::H4, vec![])], Timeframe::H4);
+        assert!(block.contains("TF:4h  no forward window available"));
+        assert!(
+            render_iching_forecast(&[], Timeframe::H4).contains("No forward window available.")
+        );
+    }
+
+    #[test]
+    fn forecast_registry_still_has_seven_original_tools() {
+        let env: HashMap<String, String> = [
+            ("TICKERS", r#"[{"symbol":"BTC-USDT","sl_percent":0.1,"tol_percent":0.618,"tfs":"4h","default_tf":"4h"}]"#),
+            ("TELEGRAM_BOT_TOKEN", "test"), ("TELEGRAM_CHAT_ID", "-100"),
+            ("LLM_API_BASE", "http://localhost:4000/v1"), ("LLM_API_KEY", "sk-test"),
+            ("LLM_MODEL", "test-model"), ("BROWSERLESS_URL", "http://localhost:3000"),
+        ].into_iter().map(|(key, value)| (key.to_string(), value.to_string())).collect();
+        let conf: EnvConf = envy::from_iter(env).expect("valid config");
+        let tools = build_tools(&conf).expect("build tools");
+        assert_eq!(tools.len(), 7);
+        let mut names = tools
+            .into_iter()
+            .filter_map(|tool| match tool {
+                async_openai::types::chat::ChatCompletionTools::Function(func) => {
+                    Some(func.function.name)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "get_indicator_column",
+                "get_multi_tf_overview",
+                "get_price_action",
+                "read_kb",
+                "read_notes",
+                "write_kb",
+                "write_notes"
+            ]
+        );
+    }
 
     #[test]
     fn test_retryable_transport_errors() {

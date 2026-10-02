@@ -12,7 +12,8 @@ pub mod processor;
 
 pub use error::{TaError, TaErrorKind, TaResult};
 pub use iching::{
-    HexagramEnergy, IchingBarTrajectory, IchingSignal, LeapMonthPolicy, iching_bar_trajectory,
+    HexagramEnergy, IchingBarTrajectory, IchingForecastBar, IchingRenderedPane3Values,
+    IchingSignal, LeapMonthPolicy, iching_bar_trajectory, materialize_iching_forecast,
     plum_blossom_signal, plum_blossom_signal_with_policy,
 };
 

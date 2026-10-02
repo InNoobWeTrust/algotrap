@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
+use chrono::{DateTime, Utc};
 use core::error::Error;
 use core::time::Duration;
 use dotenv::dotenv;
@@ -169,6 +170,7 @@ async fn scan_ticker(
     llm_client: &OpenAIClient<OpenAIConfig>,
     ticker: &telegrambot::config::TickerConf,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let as_of = Utc::now();
     info!(symbol = %ticker.symbol, "Scanning ticker");
 
     // 1. Load persistent memory
@@ -211,6 +213,7 @@ async fn scan_ticker(
         gap_zones,
         llm::AnalysisMode::AlertScan,
         Some(&mem),
+        as_of,
     )
     .await?;
 
@@ -322,7 +325,15 @@ async fn scan_ticker(
 
         // Capture charts if confidence ≥ 50
         let tf_charts = if result.confidence >= 50.0 {
-            capture_ticker_charts(conf, ticker, all_dfs, gap_zones, &mem.indicator_config).await
+            capture_ticker_charts(
+                conf,
+                ticker,
+                all_dfs,
+                gap_zones,
+                &mem.indicator_config,
+                as_of,
+            )
+            .await
         } else {
             vec![]
         };
@@ -543,6 +554,7 @@ async fn capture_ticker_charts(
         Vec<algotrap::query::gap_zones::GapZoneRecord>,
     >,
     _ic: &telegrambot::memory::IndicatorConfig,
+    as_of: DateTime<Utc>,
 ) -> Vec<(String, Vec<u8>)> {
     let mut tf_charts = Vec::new();
 
@@ -553,14 +565,19 @@ async fn capture_ticker_charts(
             None => continue,
         };
         let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
-        let chart_html =
-            match telegrambot::chart::render_single_tf_chart_html(tf, df.as_ref(), ticker, zones) {
-                Ok(html) => html,
-                Err(e) => {
-                    error!(tf = %tf_label, "Failed to render chart: {e:#}");
-                    continue;
-                }
-            };
+        let chart_html = match telegrambot::chart::render_single_tf_chart_html(
+            tf,
+            df.as_ref(),
+            ticker,
+            zones,
+            as_of,
+        ) {
+            Ok(html) => html,
+            Err(e) => {
+                error!(tf = %tf_label, "Failed to render chart: {e:#}");
+                continue;
+            }
+        };
         match telegrambot::browserless::capture_chart_screenshot(&chart_html, &conf.browserless_url)
             .await
         {

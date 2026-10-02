@@ -121,6 +121,7 @@ struct InteractivePublication {
 }
 
 async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let as_of = chrono::Utc::now();
     let client = ext::bingx::BingXClient::default();
     let timeout = Duration::from_secs(conf.timeout_secs);
     let mut candidates = Vec::new();
@@ -129,7 +130,7 @@ async fn run_cycle(conf: &EnvConf) -> Result<(), Box<dyn Error + Send + Sync>> {
         eprintln!("Processing {}...", ticker.symbol);
         match tokio::time::timeout(
             timeout * conf.chart_tfs.len() as u32,
-            process_ticker(ticker, &conf.chart_tfs, &client),
+            process_ticker(ticker, &conf.chart_tfs, &client, as_of),
         )
         .await
         {
@@ -160,6 +161,7 @@ async fn process_ticker(
     ticker: &TickerConf,
     chart_tfs: &[Timeframe],
     client: &ext::bingx::BingXClient,
+    as_of: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<InteractiveDataset>, Box<dyn Error + Send + Sync>> {
     let mut ordered = Vec::with_capacity(chart_tfs.len());
     for timeframe in chart_tfs {
@@ -199,6 +201,8 @@ async fn process_ticker(
                 &display_symbol,
                 frame.as_ref(),
                 &zones,
+                timeframe,
+                as_of,
             ) {
                 Ok(dataset) => Some(dataset),
                 Err(error) => {
@@ -230,7 +234,7 @@ async fn compute_crypto_frames(
         async move {
             (
                 timeframe,
-                presentation::compute_crypto_frame(klines, validated).await,
+                presentation::compute_crypto_frame(klines, validated, timeframe).await,
             )
         }
     }))
@@ -259,10 +263,13 @@ fn build_interactive_publication(
         let mut timeframes = BTreeMap::new();
         for dataset in datasets_for_ticker {
             validate_interactive_dataset(&dataset)?;
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "candles": dataset.records,
                 "gapZones": dataset.gap_zones.iter().map(chartlib::gap_zone_to_json).collect::<Vec<_>>(),
             });
+            if let Some(forecast) = dataset.forecast {
+                payload["forecast"] = serde_json::to_value(forecast)?;
+            }
             timeframes.insert(dataset.key.timeframe, payload);
         }
         if !timeframes.is_empty() {
@@ -319,6 +326,7 @@ mod tests {
                 (String::from("close"), Value::from(100.5)),
                 (String::from("volume"), Value::from(1_000.0)),
             ])],
+            forecast: None,
             gap_zones: vec![GapZone {
                 time_ms: 1_700_000_000_000,
                 open: 100.0,
@@ -332,6 +340,54 @@ mod tests {
                 direction: GapDirection::Bullish,
             }],
         }
+    }
+
+    #[test]
+    fn forecast_serializes_separately_from_candles() {
+        let meta = RegistryEntryMeta {
+            symbol: "BTC-USDT".into(),
+            sl_percent: "2".into(),
+            tol_percent: "1.00".into(),
+            default_tf: "1h".into(),
+        };
+        let plain = dataset("1h");
+        let as_of = chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+        let bars =
+            algotrap::time_utils::iching_forecast_horizon(1_700_000_000_000, Timeframe::H1, as_of);
+        let forecast = algotrap::ta::materialize_iching_forecast(&bars).unwrap();
+        let mut with_forecast = plain.clone();
+        with_forecast.forecast = Some(
+            forecast
+                .into_iter()
+                .map(|bar| {
+                    let values = bar.rendered_pane3_values();
+                    chartlib::ForecastRecord {
+                        time: bar.bar_open_ms,
+                        original: values.original,
+                        transformed: values.transformed,
+                        mutual_high: values.mutual_high,
+                        mutual_low: values.mutual_low,
+                        mutual_mean: values.mutual_mean,
+                    }
+                })
+                .collect(),
+        );
+        let publish = |data| {
+            build_interactive_publication(vec![(meta.clone(), vec![data])], vec!["1h".into()])
+                .unwrap()
+                .datasets["BTC-USDT"]["1h"]
+                .clone()
+        };
+        let baseline = publish(plain);
+        let actual = publish(with_forecast);
+        assert!(baseline.get("forecast").is_none());
+        assert_eq!(actual["forecast"].as_array().unwrap().len(), 10);
+        assert_eq!(
+            serde_json::to_vec(&actual["candles"]).unwrap(),
+            serde_json::to_vec(&baseline["candles"]).unwrap()
+        );
+        assert_eq!(actual["candles"].as_array().unwrap().len(), 1);
+        assert!(actual["candles"][0].get("original").is_none());
     }
 
     #[tokio::test]

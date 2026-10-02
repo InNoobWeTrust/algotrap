@@ -11,7 +11,7 @@ const HOUR_MS: i64 = 60 * 60 * 1_000;
 /// - **Original (本卦)** is the evaluated present state, surfaced as an OHLC
 ///   envelope: `energy_open/high/low/close` span the distinct original energies
 ///   observed while the bar was open.
-/// - **Transformed (变卦)** is the predicted next state, surfaced at the
+/// - **Transformed (变卦)** is the within-cast moving-line destination, surfaced at the
 ///   terminal cast as `transformed_close`.
 /// - **Mutual (互卦)** is the inner structure, surfaced as an intra-bar band:
 ///   `mutual_high`/`mutual_low` bound every mutual value observed in the bar,
@@ -41,6 +41,8 @@ pub struct IchingBarTrajectory {
     pub mutual_low: f64,
     /// Average of all mutual values observed in `[open, close)`.
     pub mutual_mean: f64,
+    /// Moving line of the opening cast (one-based, bottom-to-top), unchanged by folding.
+    pub moving_line_open: Option<u8>,
     /// Moving line of the terminal cast (one-based, bottom-to-top).
     pub moving_line: Option<u8>,
 }
@@ -167,6 +169,7 @@ fn trajectory_at(time_ms: i64) -> TaResult<IchingBarTrajectory> {
         mutual_high: signal.mutual.energy,
         mutual_low: signal.mutual.energy,
         mutual_mean: signal.mutual.energy,
+        moving_line_open: signal.moving_line,
         moving_line: signal.moving_line,
     })
 }
@@ -175,6 +178,38 @@ fn trajectory_at(time_ms: i64) -> TaResult<IchingBarTrajectory> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn crossing_bar_preserves_opening_and_terminal_cast_tuples() {
+        let open = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 10, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let trajectory = iching_bar_trajectory(open, open + 4 * HOUR_MS).unwrap();
+        assert_eq!(trajectory.moving_line_open, Some(6));
+        assert_eq!(trajectory.moving_line, Some(2));
+        assert_eq!(trajectory.energy_open + 31.5, 33.0);
+        assert_eq!(trajectory.transformed_open + 31.5, 1.0);
+        assert_eq!(trajectory.energy_close + 31.5, 34.0);
+        assert_eq!(trajectory.transformed_close + 31.5, 32.0);
+        assert_eq!(
+            (trajectory.energy_open + 31.5) as u8
+                ^ (1 << (trajectory.moving_line_open.unwrap() - 1)),
+            (trajectory.transformed_open + 31.5) as u8
+        );
+        assert_eq!(
+            (trajectory.energy_close + 31.5) as u8 ^ (1 << (trajectory.moving_line.unwrap() - 1)),
+            (trajectory.transformed_close + 31.5) as u8
+        );
+    }
+
+    #[test]
+    fn zero_length_bar_keeps_identical_opening_and_terminal_lines() {
+        let open = 1_704_067_200_000;
+        let trajectory = iching_bar_trajectory(open, open).unwrap();
+        assert_eq!(trajectory.moving_line_open, trajectory.moving_line);
+        assert_eq!(trajectory, trajectory_at(open).unwrap());
+    }
 
     #[test]
     fn bar_without_internal_boundary_degenerates_to_flat_tick() {
@@ -208,6 +243,7 @@ mod tests {
         assert_eq!(trajectory.mutual_low, open_mutual);
         assert_eq!(trajectory.mutual_mean, open_mutual);
         assert_eq!(trajectory.moving_line, signal.moving_line);
+        assert_eq!(trajectory.moving_line_open, signal.moving_line);
     }
 
     #[test]
@@ -224,6 +260,7 @@ mod tests {
             .expect("long bar trajectory must succeed");
 
         assert_eq!(trajectory.energy_open, open_signal.original.energy);
+        assert_eq!(trajectory.moving_line_open, open_signal.moving_line);
         assert!(trajectory.energy_open <= trajectory.energy_high);
         assert!(trajectory.energy_low <= trajectory.energy_close);
         // The mutual band always contains the mean and spans open..close.
@@ -273,6 +310,8 @@ mod tests {
             .expect("cross-boundary bar trajectory");
 
         assert_eq!(trajectory.energy_close, boundary_signal.original.energy);
+        assert_eq!(trajectory.moving_line_open, open_signal.moving_line);
+        assert_eq!(trajectory.moving_line, boundary_signal.moving_line);
         // Exactly two observations (open + boundary) drive the mutual band.
         let open_mutual = open_signal.mutual.energy;
         let boundary_mutual = boundary_signal.mutual.energy;
@@ -299,6 +338,11 @@ mod tests {
 
         assert_eq!(trajectory.energy_close, expected.original.energy);
         assert_eq!(
+            trajectory.moving_line_open,
+            trajectory_at(open_time_ms).unwrap().moving_line
+        );
+        assert_eq!(trajectory.moving_line, expected.moving_line);
+        assert_eq!(
             trajectory.transformed_close,
             expected
                 .transformed
@@ -324,6 +368,10 @@ mod tests {
             iching_bar_trajectory(open_time_ms, close_time_ms).expect("wide-bar trajectory");
 
         // The energy domain is [-31.5, 31.5]; a real month must show a range.
+        assert_eq!(
+            trajectory.moving_line_open,
+            trajectory_at(open_time_ms).unwrap().moving_line
+        );
         assert!(trajectory.mutual_high > trajectory.mutual_low);
         assert!(trajectory.energy_high >= trajectory.energy_low);
         assert!(trajectory.mutual_low.is_finite() && trajectory.mutual_high.is_finite());
