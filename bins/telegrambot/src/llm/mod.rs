@@ -738,7 +738,7 @@ fn parse_alert_json(text: &str, available_timeframes: &[Timeframe]) -> AnalysisR
 
 // ─── Prompt Loading ──────────────────────────────────────────────────────────
 
-const FORECAST_HEADER: &str = "[I-CHING CALENDAR — DETERMINISTIC, NOT A MARKET SIGNAL]\nWall-clock calendrical arithmetic. Zero market input. Not a price forecast. bin=0..63 is the six-bit binary index, not King Wen numbering; orig=bin-31.5 is a coordinate, not a validated financial score; ml=terminal moving line. Values come from the terminal cast within each bar. T+0=first scheduled future bar after the observed bar; subsequent offsets count scheduled bars.";
+const FORECAST_HEADER: &str = "[I-CHING CALENDAR — DETERMINISTIC, NOT A MARKET SIGNAL]\nWall-clock calendrical arithmetic. Zero market input. Not a price forecast. bin=0..63 is the chosen six-bit binary Q, not King Wen numbering: bottom-to-top weights 32,16,8,4,2,1; Yin=0, Yang=1. orig=bin-31.5 is a plain centered encoding coordinate, not strength and not a validated financial score; ml=terminal moving line, physical 1=bottom, 6=top. Values come from the terminal cast within each bar, inside [open,close), not at close. A transformed gua is a within-cast line flip, not a fresh future calendar cast. T+0=first scheduled future bar after the observed bar's anchor open; subsequent offsets count scheduled bars.";
 // The forecast portion excludes the fixed header/disclaimer. This is a
 // character-count heuristic, not a real tokenizer: 4 UTF-8 bytes ≈ 1 token.
 // It can drift for non-ASCII text; the cap is a safety bound, not a precise measurement.
@@ -1954,10 +1954,10 @@ mod tests {
         let first = &bars[0].trajectory;
         assert_eq!(first.energy_open + 31.5, 33.0);
         assert_eq!(first.moving_line_open, Some(6));
-        assert_eq!(first.energy_close + 31.5, 34.0);
+        assert_eq!(first.energy_close + 31.5, 17.0);
         assert_eq!(first.moving_line, Some(2));
         let block = render_iching_forecast(&[(Timeframe::H4, bars.clone())], Timeframe::H4);
-        assert!(block.contains("T+0 bin=34 orig=+2.5 ml=2"));
+        assert!(block.contains("T+0 bin=17 orig=-14.5 ml=2"));
         assert!(!block.contains("bin=33 orig=+1.5 ml=6"));
         for (offset, bar) in bars.iter().enumerate() {
             let terminal = &bar.trajectory;
@@ -1994,6 +1994,10 @@ mod tests {
     #[test]
     fn forecast_prompt_header_defines_calendar_tokens() {
         assert_eq!(FORECAST_HEADER.lines().count(), 2);
+        assert_eq!(
+            FORECAST_HEADER.lines().next(),
+            Some("[I-CHING CALENDAR — DETERMINISTIC, NOT A MARKET SIGNAL]")
+        );
         for definition in [
             "bin=0..63",
             "binary",
@@ -2003,6 +2007,16 @@ mod tests {
             "terminal cast within each bar",
             "T+0=first scheduled future bar after the observed bar",
             "subsequent offsets count scheduled bars",
+            "binary Q",
+            "bottom-to-top weights 32,16,8,4,2,1",
+            "Yin=0, Yang=1",
+            "physical 1=bottom, 6=top",
+            "plain centered encoding coordinate, not strength",
+            "not a validated financial score",
+            "inside [open,close), not at close",
+            "within-cast line flip, not a fresh future calendar cast",
+            "observed bar's anchor open",
+            "Wall-clock calendrical arithmetic. Zero market input. Not a price forecast.",
         ] {
             assert!(FORECAST_HEADER.contains(definition), "missing {definition}");
         }

@@ -175,9 +175,191 @@ fn trajectory_at(time_ms: i64) -> TaResult<IchingBarTrajectory> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    // Independent physical cast oracle: only the calendar adapter is shared.
+    pub(crate) fn reference_observations(open: i64, close: i64) -> Vec<(i64, [u8; 3], u8)> {
+        let mut instants = vec![open];
+        let mut hour = (open.div_euclid(3_600_000) + 1) * 3_600_000;
+        while hour < close {
+            let utc = chrono::DateTime::from_timestamp_millis(hour).unwrap();
+            let cst_hour = (utc.hour() + 8) % 24;
+            if cst_hour == 0 || cst_hour % 2 == 1 {
+                instants.push(hour);
+            }
+            hour += 3_600_000;
+        }
+        let patterns = [
+            [0, 0, 0], // modulo zero means trigram 8, Kun
+            [1, 1, 1],
+            [1, 1, 0],
+            [1, 0, 1],
+            [1, 0, 0],
+            [0, 1, 1],
+            [0, 1, 0],
+            [0, 0, 1],
+        ];
+        instants
+            .into_iter()
+            .map(|instant| {
+                let input = calendar::to_plum_blossom_input(
+                    chrono::DateTime::from_timestamp_millis(instant).unwrap(),
+                    LeapMonthPolicy::Allow,
+                )
+                .unwrap();
+                let s1 = u32::from(input.year_branch)
+                    + u32::from(input.lunar_month)
+                    + u32::from(input.lunar_day);
+                let s2 = s1 + u32::from(input.hour_branch);
+                let upper = patterns[(s1 % 8) as usize];
+                let lower = patterns[(s2 % 8) as usize];
+                let original = [lower[0], lower[1], lower[2], upper[0], upper[1], upper[2]];
+                let moving_line = if s2 % 6 == 0 { 6 } else { (s2 % 6) as u8 };
+                let mut transformed = original;
+                transformed[usize::from(moving_line - 1)] ^= 1;
+                let mutual = [
+                    original[1],
+                    original[2],
+                    original[3],
+                    original[2],
+                    original[3],
+                    original[4],
+                ];
+                let coordinates = [original, transformed, mutual].map(|lines| {
+                    lines
+                        .iter()
+                        .zip([32, 16, 8, 4, 2, 1])
+                        .map(|(&line, weight)| line * weight)
+                        .sum()
+                });
+                (instant, coordinates, moving_line)
+            })
+            .collect()
+    }
+
+    pub(crate) fn reference_trajectory(open: i64, close: i64) -> IchingBarTrajectory {
+        let observations = reference_observations(open, close);
+        let (_, first, first_line) = observations[0];
+        let (_, last, last_line) = *observations.last().unwrap();
+        let original_high = observations.iter().map(|(_, q, _)| q[0]).max().unwrap();
+        let original_low = observations.iter().map(|(_, q, _)| q[0]).min().unwrap();
+        let mutual_high = observations.iter().map(|(_, q, _)| q[2]).max().unwrap();
+        let mutual_low = observations.iter().map(|(_, q, _)| q[2]).min().unwrap();
+        let mutual_sum: f64 = observations.iter().map(|(_, q, _)| f64::from(q[2])).sum();
+        IchingBarTrajectory {
+            energy_open: f64::from(first[0]) - 31.5,
+            energy_high: f64::from(original_high) - 31.5,
+            energy_low: f64::from(original_low) - 31.5,
+            energy_close: f64::from(last[0]) - 31.5,
+            transformed_open: f64::from(first[1]) - 31.5,
+            transformed_close: f64::from(last[1]) - 31.5,
+            mutual_open: f64::from(first[2]) - 31.5,
+            mutual_close: f64::from(last[2]) - 31.5,
+            mutual_high: f64::from(mutual_high) - 31.5,
+            mutual_low: f64::from(mutual_low) - 31.5,
+            mutual_mean: mutual_sum / observations.len() as f64 - 31.5,
+            moving_line_open: Some(first_line),
+            moving_line: Some(last_line),
+        }
+    }
+
+    pub(crate) fn assert_reference_trajectory(
+        actual: &IchingBarTrajectory,
+        expected: &IchingBarTrajectory,
+    ) {
+        assert_eq!(
+            [
+                actual.energy_open,
+                actual.energy_high,
+                actual.energy_low,
+                actual.energy_close,
+                actual.transformed_open,
+                actual.transformed_close,
+                actual.mutual_open,
+                actual.mutual_close,
+                actual.mutual_high,
+                actual.mutual_low
+            ],
+            [
+                expected.energy_open,
+                expected.energy_high,
+                expected.energy_low,
+                expected.energy_close,
+                expected.transformed_open,
+                expected.transformed_close,
+                expected.mutual_open,
+                expected.mutual_close,
+                expected.mutual_high,
+                expected.mutual_low
+            ],
+        );
+        assert!((actual.mutual_mean - expected.mutual_mean).abs() < 1e-12);
+        assert_eq!(actual.moving_line_open, expected.moving_line_open);
+        assert_eq!(actual.moving_line, expected.moving_line);
+    }
+
+    #[test]
+    fn physical_hour_cast_oracle_matches_every_channel_and_all_trajectory_fields() {
+        let open = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 10, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let midnight_open = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 9, 15, 30, 0)
+            .unwrap()
+            .timestamp_millis();
+        for (start, close, count) in [
+            (open, open + 4 * HOUR_MS, 3),
+            (open + HOUR_MS / 2, open + 4 * HOUR_MS, 3),
+            (midnight_open, midnight_open + 2 * HOUR_MS, 3),
+            (open, open + 3 * HOUR_MS, 2),
+            (open, open, 1),
+        ] {
+            let observations = reference_observations(start, close);
+            assert_eq!(observations.len(), count);
+            for (instant, q, line) in observations {
+                let signal = plum_blossom_signal_with_policy(
+                    chrono::DateTime::from_timestamp_millis(instant).unwrap(),
+                    LeapMonthPolicy::Allow,
+                )
+                .unwrap();
+                for (channel, expected) in
+                    [signal.original, signal.transformed.unwrap(), signal.mutual]
+                        .into_iter()
+                        .zip(q)
+                {
+                    assert_eq!(channel.hexagram, expected, "cast {instant}");
+                    assert_eq!(channel.energy, f64::from(expected) - 31.5, "cast {instant}");
+                }
+                assert_eq!(signal.moving_line, Some(line));
+            }
+            assert_reference_trajectory(
+                &iching_bar_trajectory(start, close).unwrap(),
+                &reference_trajectory(start, close),
+            );
+        }
+        let observations = reference_observations(open, open + 4 * HOUR_MS);
+        assert_eq!(
+            observations
+                .iter()
+                .map(|(_, q, _)| q[0])
+                .collect::<Vec<_>>(),
+            [33, 25, 17]
+        );
+        assert_eq!(
+            observations
+                .iter()
+                .map(|(_, q, _)| q[2])
+                .collect::<Vec<_>>(),
+            [0, 52, 32]
+        );
+        assert_eq!(
+            reference_trajectory(open, open + 4 * HOUR_MS).mutual_mean,
+            -3.5
+        );
+    }
 
     #[test]
     fn crossing_bar_preserves_opening_and_terminal_cast_tuples() {
@@ -189,16 +371,16 @@ mod tests {
         assert_eq!(trajectory.moving_line_open, Some(6));
         assert_eq!(trajectory.moving_line, Some(2));
         assert_eq!(trajectory.energy_open + 31.5, 33.0);
-        assert_eq!(trajectory.transformed_open + 31.5, 1.0);
-        assert_eq!(trajectory.energy_close + 31.5, 34.0);
-        assert_eq!(trajectory.transformed_close + 31.5, 32.0);
+        assert_eq!(trajectory.transformed_open + 31.5, 32.0);
+        assert_eq!(trajectory.energy_close + 31.5, 17.0);
+        assert_eq!(trajectory.transformed_close + 31.5, 1.0);
         assert_eq!(
             (trajectory.energy_open + 31.5) as u8
-                ^ (1 << (trajectory.moving_line_open.unwrap() - 1)),
+                ^ (1 << (6 - trajectory.moving_line_open.unwrap())),
             (trajectory.transformed_open + 31.5) as u8
         );
         assert_eq!(
-            (trajectory.energy_close + 31.5) as u8 ^ (1 << (trajectory.moving_line.unwrap() - 1)),
+            (trajectory.energy_close + 31.5) as u8 ^ (1 << (6 - trajectory.moving_line.unwrap())),
             (trajectory.transformed_close + 31.5) as u8
         );
     }
@@ -323,8 +505,12 @@ mod tests {
 
     #[test]
     fn exact_close_boundary_belongs_to_the_next_bar() {
-        let open_time_ms = 1_704_067_200_000;
-        let close_time_ms = open_time_ms + 4 * HOUR_MS;
+        // Close at CST 11:00: the branch and physical original really change.
+        let open_time_ms = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 10, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let close_time_ms = open_time_ms + 3 * HOUR_MS;
         let just_before_close_ms = close_time_ms - 1;
         let expected = plum_blossom_signal_with_policy(
             chrono::DateTime::from_timestamp_millis(just_before_close_ms)
@@ -335,6 +521,23 @@ mod tests {
 
         let trajectory =
             iching_bar_trajectory(open_time_ms, close_time_ms).expect("aligned bar trajectory");
+
+        let before = reference_observations(just_before_close_ms, just_before_close_ms)[0].1;
+        let at_close = reference_observations(close_time_ms, close_time_ms)[0].1;
+        assert_ne!(before, at_close, "close must change the physical cast");
+        assert_eq!(before[0], 25);
+        assert_eq!(at_close[0], 17);
+        assert_reference_trajectory(
+            &trajectory,
+            &reference_trajectory(open_time_ms, close_time_ms),
+        );
+        let next = iching_bar_trajectory(close_time_ms, close_time_ms + HOUR_MS).unwrap();
+        assert_reference_trajectory(
+            &next,
+            &reference_trajectory(close_time_ms, close_time_ms + HOUR_MS),
+        );
+        assert_eq!(next.energy_open, -14.5);
+        assert_ne!(trajectory.energy_close, next.energy_open);
 
         assert_eq!(trajectory.energy_close, expected.original.energy);
         assert_eq!(

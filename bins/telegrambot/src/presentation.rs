@@ -1975,12 +1975,12 @@ mod tests {
         );
         assert_eq!(
             frame.f64_at("iching_transformed_energy", 0).unwrap(),
-            Some(1.0 - 31.5)
+            Some(32.0 - 31.5)
         );
-        assert_eq!(frame.f64_at("iching_close", 0).unwrap(), Some(34.0 - 31.5));
+        assert_eq!(frame.f64_at("iching_close", 0).unwrap(), Some(17.0 - 31.5));
         assert_eq!(
             frame.f64_at("iching_transformed_close", 0).unwrap(),
-            Some(32.0 - 31.5)
+            Some(1.0 - 31.5)
         );
         assert_eq!(frame.f64_at("iching_moving_line", 0).unwrap(), Some(6.0));
     }

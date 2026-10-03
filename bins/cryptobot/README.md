@@ -72,6 +72,8 @@ templates and repository-wide operational guidance are indexed in
 
 ## I-Ching Energy pane
 
+**Coordinate:** `E = Q − 31.5` uses chosen Q with physical bottom-to-top weights `32,16,8,4,2,1` (Yang=1, Yin=0), not King Wen numbering or strength/market direction. User-approved Q replaces legacy bottom-LSB numeric values; field names, types, column order, physical casts and calendar behavior remain unchanged.
+
 The I-Ching Energy pane (pane 3) serializes 13 columns per bar from `iching_bar_trajectory`. The schema name, type, and column order are fixed; source-field mappings are:
 
 | JSON column | `IchingBarTrajectory` field | Cast |

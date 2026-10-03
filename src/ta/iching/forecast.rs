@@ -57,6 +57,53 @@ pub fn materialize_iching_forecast(bars: &[(i64, i64)]) -> TaResult<Vec<IchingFo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ta::iching::trajectory::tests::{assert_reference_trajectory, reference_trajectory};
+    use chrono::TimeZone;
+
+    #[test]
+    fn real_materialized_bars_and_all_five_pane_values_match_physical_oracle() {
+        let crossing = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 10, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let midnight = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 9, 15, 30, 0)
+            .unwrap()
+            .timestamp_millis();
+        let intervals = [
+            (crossing, crossing + 4 * 3_600_000),
+            (midnight, midnight + 2 * 3_600_000),
+            (crossing + 1_800_000, crossing + 4 * 3_600_000),
+            (crossing, crossing + 3 * 3_600_000),
+            (crossing, crossing),
+        ];
+        let bars = materialize_iching_forecast(&intervals).unwrap();
+        assert_eq!(bars.len(), intervals.len());
+        for (bar, (open, close)) in bars.iter().zip(intervals) {
+            assert_eq!((bar.bar_open_ms, bar.bar_close_ms), (open, close));
+            let expected = reference_trajectory(open, close);
+            assert_reference_trajectory(&bar.trajectory, &expected);
+            let rendered = bar.rendered_pane3_values();
+            assert_eq!(
+                rendered.original,
+                (expected.energy_open
+                    + expected.energy_high
+                    + expected.energy_low
+                    + expected.energy_close)
+                    / 4.0
+            );
+            assert_eq!(rendered.transformed, expected.transformed_close);
+            assert_eq!(rendered.mutual_high, expected.mutual_high);
+            assert_eq!(rendered.mutual_low, expected.mutual_low);
+            assert!((rendered.mutual_mean - expected.mutual_mean).abs() < 1e-12);
+        }
+        let rendered = bars[0].rendered_pane3_values();
+        assert_eq!(rendered.original, -6.5);
+        assert_eq!(rendered.transformed, -30.5);
+        assert_eq!(rendered.mutual_high, 20.5);
+        assert_eq!(rendered.mutual_low, -31.5);
+        assert_eq!(rendered.mutual_mean, -3.5);
+    }
 
     const BARS: [(i64, i64); 3] = [
         (1_704_067_200_000, 1_704_070_800_000),
