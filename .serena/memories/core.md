@@ -30,3 +30,4 @@
 - Last updated: 2026-09-30
 - Cross-memory references: `mem:conventions`, `mem:suggested_commands`, `mem:task_completion`, `mem:memory_maintenance`
 - Onboarding: not performed yet
+- Active local deployment task: `mem:tasks/kind-telegrambot-20261011/task`.
