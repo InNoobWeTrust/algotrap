@@ -326,7 +326,8 @@ mod tests {
         assert_eq!(original_hex.binary_index(), 33);
         assert_eq!(original_hex.bits_top_to_bottom(), "100001");
         let transformed_hex = original_hex.flip_line(moving).expect("line 6 valid");
-        assert_eq!(transformed_hex.binary_index(), 1);
+        assert_eq!(transformed_hex.binary_index(), 32);
+        assert_eq!(transformed_hex.bits_top_to_bottom(), "000001");
         let mutual_hex = original_hex.mutual();
         assert_eq!(mutual_hex.binary_index(), 0);
         assert_eq!(mutual_hex.bits_top_to_bottom(), "000000");
@@ -336,8 +337,8 @@ mod tests {
         assert_eq!(signal.original.energy, 1.5);
         assert_eq!(signal.moving_line, Some(6));
         let transformed = signal.transformed.expect("transformed must be Some");
-        assert_eq!(transformed.hexagram, 1);
-        assert_eq!(transformed.energy, -30.5);
+        assert_eq!(transformed.hexagram, 32);
+        assert_eq!(transformed.energy, 0.5);
         assert_eq!(signal.mutual.hexagram, 0);
         assert_eq!(signal.mutual.energy, -31.5);
         assert!(

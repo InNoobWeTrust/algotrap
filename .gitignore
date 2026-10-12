@@ -12,5 +12,6 @@ bins/cryptobot/deployment/envs/*.env
 bins/telegrambot/cluster_memory/
 bins/telegrambot/memory/
 
-# Kilo agent-harness local artifacts
+# agent-harness local artifacts
 .kilo/
+.opencode/

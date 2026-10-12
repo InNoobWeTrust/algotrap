@@ -1,20 +1,20 @@
 # Research & Technical Specification: I Ching Hexagram Datetime Calculation & Market Cycle Quantization
 
-> **Planned / Not Implemented**
+> **Research Proposal / Local Plum Blossom Q Implemented**
 >
-> This document describes a **planned** feature that does not currently exist in the
-> codebase. No `src/ta/iching`, `src/ext/lunar`, `src/iching`, or `bins/iching`
-> implementation currently exists. All module layouts, API names, data shapes,
-> snapshot schemas, verification commands, and integration paths below are
-> **proposed target state** and remain provisional until the root library contracts are stabilized and a follow-up design review is completed.
+> Current local `src/ta/iching` implements Plum Blossom casting and Q-coordinate channels;
+> the minimal future-header explanation is implemented locally. The proposed `IchingRecord`,
+> additional methods, metrics, module layouts, snapshot schemas, integration paths and
+> acceptance stages below remain **research proposals**, not a certification of current
+> contracts or deployment.
 >
-> **Blocked on:** root library stabilization (typed `Kernel`/`Processor`/`PriorState` contracts, `SourceFrame`/`QueryResultFrame` column semantics, `DuckDBQuery` projection seam, and `Kline.time` timestamp-unit resolution).
+> **Historical proposal prerequisites (not current implementation status):** root library stabilization (typed `Kernel`/`Processor`/`PriorState` contracts, `SourceFrame`/`QueryResultFrame` column semantics, `DuckDBQuery` projection seam, and `Kline.time` timestamp-unit resolution).
 >
 > **Current architecture references:** [docs/architecture.md](../../../docs/architecture.md) · [src/README.md](../../../src/README.md) · [docs/architecture/stream-and-duckdb-data-flow.md](../../../docs/architecture/stream-and-duckdb-data-flow.md)
 
-- **Target module:** `algotrap::ta::iching` (proposed)
+- **Target module:** `algotrap::ta::iching` (Plum Blossom/Q implemented locally; proposed extensions below)
 - **Category:** Technical analysis research / macro-cycle feature extraction
-- **Status:** Planned. This feature is intentionally blocked on root library stabilization. No implementation, tests, binary, or verification gates currently exist.
+- **Status:** Local Plum Blossom/Q channels implemented; additional methods, DTOs and interpretation research remain proposed. Historical stage descriptions below do not certify current acceptance or deployment.
 - **Rust dependencies:** `chrono` for UTC instants, calendar fields, and epoch conversion; `serde` with derive support and `serde_json` for typed records and nullable values.
 - **Integration path (proposed):** Pure deterministic I-Ching calculations in `src/ta` produce typed `IchingRecord` value objects outside the aggregate. The root aggregate contract currently supports only nullable Number/Boolean scalar inputs and outputs; a complete record cannot currently flow through the aggregate (documented blocker). A future reviewed bridge must flatten selected deterministic fields into scalar aggregate inputs/outputs or keep records outside the aggregate. Optional source-controlled SQL projection through `DuckDBQuery` to `QueryResultFrame`. Application/CLI owns input loading and presentation. DuckDB does not own I-Ching computation.
 
@@ -56,20 +56,38 @@ The calculator is Rust-pure and lives in `src/ta`. A complete typed `IchingRecor
 
 ## 2. Shared I Ching Representation
 
+**Status clarification (source review: 2026-10-03):** The blanket “no implementation exists” statements elsewhere in this historical proposal are stale: the current [TA contract](../../../src/ta/README.md) and [Plum Blossom core](../../../src/ta/iching/plum_blossom.rs) implement casting and binary-coordinate channels. The proposed record, experimental metrics, and acceptance stages below are not thereby adopted or verified; current behavior is authoritative in the linked module contract and source.
+
+**Current local adoption (2026-10-04):** User-approved Q now replaces legacy B; API shapes remain unchanged while numeric semantics intentionally change, without a dual codec or physical-line reversal. The 2026-10-03 source-review notes retain their historical evidence scope, including the then-unadopted Q comparison and textual Ge example; current source also contains a compiled Ge→Xian physical-cast fixture. Neither adoption nor compilation establishes universal book authority or market validity.
+
 ### 2.1 Canonical line and bit convention
 
-All methods use one convention:
+The current implementation uses this explicit **software encoding choice**, not a demonstrated universal rule of traditional books:
 
 - `line[0]` is line 1, the bottom line; `line[5]` is line 6, the top line.
 - `1` means Yang and `0` means Yin.
 - A displayed six-bit string is written **top to bottom**, `line[5] ... line[0]`, so the final character represents the bottom line.
-- The numeric binary index is little-endian with respect to the line array:
+- The chosen numeric binary index assigns bottom-to-top weights `32,16,8,4,2,1`:
 
-  $$B = \sum_{i=0}^{5} line[i] \cdot 2^i, \qquad B \in [0,63].$$
+  $$Q = \sum_{i=0}^{5} line[i] \cdot 2^{5-i}, \qquad Q \in [0,63].$$
 
-For example, Fu is bottom-to-top `[1, 0, 0, 0, 0, 0]`, displays as `000001`, and has `B = 1`. Da Zhuang is bottom-to-top `[1, 1, 1, 1, 0, 0]`, displays as `001111`, and has `B = 15`.
+For example, Fu is bottom-to-top `[1, 0, 0, 0, 0, 0]`, displays as `000001`, and has `Q = 32` (legacy B=1). Da Zhuang is bottom-to-top `[1, 1, 1, 1, 0, 0]`, displays as `001111`, and has `Q = 60` (legacy B=15).
 
 The lower trigram supplies `line[0..3]`; the upper trigram supplies `line[3..6]`. A `Trigram::lines()` interface therefore returns three bits in bottom-to-top order.
+
+The 2026-10-03 review compared then-current bottom-LSB $B = \sum_{i=0}^{5} line[i] \cdot 2^i$ with the quoted Q, which was not adopted at that time. Q is now the current local encoding; the inverse integer weights still describe the **same physical hexagram**, not reversed physical lines or King Wen numbering.
+
+| Physical hexagram | Legacy bottom-LSB `B` | Current chosen `Q` |
+|---|---:|---:|
+| Bo (剝) | 32 | 1 |
+| Fu (復) | 1 | 32 |
+| Jie (節) | 19 | 50 |
+| Tai (泰) | 7 | 56 |
+| Pi (否) | 56 | 7 |
+
+Ge `[1,0,1,1,1,0]` Q46 → Xian `[0,0,1,1,1,0]` Q14 is the same-cast physical line-1 flip, not a recoding of B46. Kun=0 and Qian=63 remain unchanged.
+
+[Current `flip_line`](../../../src/ta/iching/types.rs) changes array position `moving_line − 1`, preserving the same physical position regardless of integer encoding. An encoding mismatch alone therefore does **not** establish a wrong moving line.
 
 ### 2.2 Xiantian trigram numbering
 
@@ -163,7 +181,13 @@ Then:
 4. The transformed hexagram flips exactly that moving line.
 5. The mutual hexagram uses original lines 2, 3, 4 as its lower trigram and original lines 3, 4, 5 as its upper trigram. These line numbers are one-based and bottom-to-top.
 
-Plum Blossom is the only default method in this document that produces a moving line and transformed hexagram. The kinetic score and kinetic turn-point rule in §4 are therefore defined for this method first.
+**Primary evidence:** [卷一・年月日時起例](https://zh.wikisource.org/wiki/梅花易數/卷一#年月日時起例) supports the upper/lower sums and modulo-six moving line; [爻以六除](https://zh.wikisource.org/wiki/梅花易數/卷一#爻以六除) says “若一爻動，則看此一爻，是陽爻則變陰爻，陰爻則變陽爻”. The independent [觀梅占](https://zh.wikisource.org/wiki/梅花易數/卷一#觀梅占) example has `S1=34`, `S2=43`, moving line 1: Ge (革) → Xian (咸), lower Li → Gen with upper Dui unchanged, and mutual trigrams Qian/Xun. This is textual evidence, not a newly compiled classical test fixture.
+
+**Mutual variant pending policy:** [互卦起例](https://zh.wikisource.org/wiki/梅花易數/卷一#互卦起例) gives middle-four-line derivation but also says “又云：乾坤無互，互其變卦。” Current structural mutual derivation is unconditional and returns Qian/Kun themselves at those endpoints; it does not implement that alternative. The variant remains an unresolved policy choice, not a universal blocker or an adopted fallback.
+
+**One-cast interpretation:** 體 denotes the subject and 用 the affair; [卷三・體用互變之訣](https://zh.wikisource.org/wiki/梅花易數/卷三#體用互變之訣) says “用為占之即應，互為中間之應，變為事占之終應”. Mutual is therefore not “past energy”, and Transformed is the final response within that cast, not an actual new cast at a later calendar instant. Separate future calendar casts remain chronological/ascending (§4.4); these passages do not support mandatory future `63→0` traversal.
+
+Plum Blossom is the only default method in this document that produces a moving line and transformed hexagram. The experimental kinetic score and kinetic turn-point rule in §4 are therefore defined for this method first.
 
 ### 3.2 Astronomical Gua Qi and the Twelve Sovereigns
 
@@ -263,11 +287,21 @@ For wheel floating-point boundaries, use the same `epsilon = 1e-12°` policy: af
 
 ### 4.1 Polarity and binary metrics
 
+**Production versus experiment:** Current local `HexagramEnergy` enforces `E = Q − 31.5` for Original, Mutual, and Transformed. This is a custom binary coordinate, not traditional 卦氣 or a validated measure of market psychology, liquidity, or direction; the Yang-count and weighted formulas below differ from production and remain experimental, not an adopted final interpretation model.
+
+**Historical coordinate scope:** The following 2026-10-03 evidence note concerns the then-used legacy B formula, not the current choice of Q weights.
+
+**Evidence boundary (2026-10-03):** No pinpoint book source for `E = B − 31.5` was found in the inspected texts; this does not establish universal absence or predictive impossibility. [卷一・卦氣旺](https://zh.wikisource.org/wiki/梅花易數/卷一#卦氣旺) describes seasonal element strength (Wood/spring, Fire/summer, Metal/autumn, Water/winter), while [卷二・體用總訣](https://zh.wikisource.org/wiki/梅花易數/卷二#體用總訣) uses relational five-element and seasonal judgments, not this binary centering formula.
+
+**Line-sensitive, not higher-is-better:** Line order matters, but a higher line is not automatically more positive or more energetic; interpretation is contextual. [周易・乾](https://zh.wikisource.org/wiki/周易/乾) contrasts “初九：潛龍勿用”, “九五：飛龍在天”, and “上九：亢龍，有悔”, countering universal higher-is-better semantics without supplying a numerical line-weight table.
+
+**Unresolved research hypothesis:** With user co-design and empirical validation, line-sensitive activation/restraint and coherence/stability versus instability could be compared with observable participation, fear, confidence, and stress. No weights, scales, causal claim, bullish/bearish mapping, or trade rule is selected; a calendar-derived feature is not measured liquidity or sentiment. Minimal Q/physical-line/calendar explanation is now implemented in the local Telegram future header and system Read-Guides; psychological semantic transparency remains a desired future requirement, not implemented interpretation. The existing [context-only policy](../../../bins/telegrambot/README.md#i-ching-context-and-prompt-policy) remains in force; any interpretation change requires separate decision, implementation and validation.
+
 For `y_i ∈ {0,1}` in bottom-to-top order:
 
 $$P_{unweighted} = \frac{\sum_{i=1}^{6} y_i - 3}{3} \in [-1,1].$$
 
-The research default weighted metric uses the explicit bottom-to-top weights:
+The experimental weighted candidate (not an adopted final model) uses these explicit bottom-to-top weights:
 
 ```text
 w = [0.10, 0.20, 0.15, 0.15, 0.30, 0.10]
@@ -277,7 +311,7 @@ The weights sum to 1.0 and define:
 
 $$P_{weighted} = \sum_{i=1}^{6} w_i(2y_i - 1) \in [-1,1].$$
 
-The binary index is `B` from §2.1. A percentage display, if needed by a consumer, is `100 * B / 63`; it is presentation-only and is not a second state definition.
+The current binary index is `Q` from §2.1. A percentage display `100 * Q / 63` remains an **unadopted presentation proposal**, not a shipped metric or a second state definition.
 
 ### 4.2 Optional Wu Xing research metric
 
@@ -333,7 +367,7 @@ The Hilbert-transform PLV implementation is **deferred**. It may be designed onl
 
 ### 5.1 Target module boundaries
 
-The target layout is a plan, not a claim that these modules currently exist:
+The target layout is a historical proposal, not a current module inventory; existing Plum Blossom/Q source does not imply adoption of the entire layout:
 
 ```text
 src/ta/iching/                 (proposed — pure core, no I/O)
@@ -419,7 +453,7 @@ The `computed()` virtual table function is the standard DuckDB adapter entry poi
 
 ## 6. Staged Implementation and Machine-Verifiable Acceptance
 
-> **All stages below are planned.** No implementation currently exists. All verification commands, gate descriptions, and status annotations describe proposed future acceptance criteria.
+> **All stages below are historical proposed acceptance criteria.** Local Plum Blossom/Q implementation exists, but these stage descriptions, verification commands and status annotations are not current execution evidence.
 
 ### Stage 0 — Domain and contract freeze (method-scoped)
 
@@ -552,10 +586,13 @@ PLV/Hilbert work remains deferred until the numerical method and dependency are 
 
 ### 7.2 Classical Sinological & I Ching Numerology Systems (§2.1–§2.3, §3.1–§3.3, §4.2)
 
+**Source provenance (2026-10-03):** The targeted primary passages linked in §§3.1 and 4.1 come from one public Wikisource transcription, not a critical edition. Da Liu and Nielsen titles are established by catalog metadata, but relevant full book pages were not retrieved; the broad annotations below are not pinpoint verification of this document's formulas. The missing bibliography behind quote markers `[1–34]` was unavailable; no source mapping is inferred.
+
 - **Nielsen, Bent (2003).** *A Companion to Yi Jing Numerology and Cosmology: Chinese Studies of Images and Numbers from Han (202 BCE–220 CE) to Song (960–1279 CE)*. London: RoutledgeCurzon. ISBN: 978-0700716081.
   - *Annotation:* Comprehensive academic reference on *Xiangshu* (象數) Yixue, documenting the historical mechanics of Han Dynasty *Gua Qi* (卦氣, Meng Xi and Jing Fang), the Twelve Sovereign/Tidal Hexagrams (十二辟卦 / 十二消息卦), mutual hexagrams (互卦), and Five Elements (五行) interactions.
-- **Liu, Da (1979).** *I Ching Numerology: Based on Shao Yung's Classic Plum Blossom Numerology*. San Francisco: Harper & Row / Routledge & Kegan Paul. ISBN: 978-0710002440.
-  - *Annotation:* Primary English reference for Plum Blossom (*Mei Hua Yi Shu* 梅花易數) calculation rules, modular arithmetic for trigram derivation ($S_1 \pmod 8$, $S_2 \pmod 8$), moving lines ($S2 \pmod 6$), and transformed hexagrams.
+- **Liu, Da (1979).** *I Ching Numerology: Based on Shao Yung's Classic Plum Blossom Numerology*. Harper & Row. **ISBN-10: 0060616687.** [Catalog record OL4551179M](https://openlibrary.org/books/OL4551179M.json).
+  - **Catalog correction:** The previously listed ISBN `9780710002440` resolves instead to *Matthew Arnold, prose writings: the critical heritage* (1979, Routledge): [mismatched ISBN record](https://openlibrary.org/isbn/9780710002440.json). These catalog endpoints returned HTTP 200 in the source review; metadata verifies the bibliographic correction, not the calculation rules on unretrieved book pages.
+  - **Scope:** English-language Plum Blossom numerology reference; specific page support for this document's sums, moving-line formula, or energy coordinate remains unverified. The direct primary passages above supply the targeted casting evidence.
 - **Birdwhistell, Anne D. (1989).** *Transition to Neo-Confucianism: Shao Yung on Knowledge and Symbols of Reality*. Stanford, CA: Stanford University Press. ISBN: 978-0804715508.
   - *Annotation:* Analyzes Shao Yong's (邵雍, 1011–1077 CE) cosmology and the structural logic of the Prior-to-Heaven (Xiantian 先天) trigram sequence and the *Huangji Jingshi* (皇極經世).
 - **Smith, Richard J. (2008).** *Fathoming the Cosmos and Ordering the World: The Yijing (I Ching) and Its Evolution in China*. Charlottesville: University of Virginia Press. ISBN: 978-0813927053.

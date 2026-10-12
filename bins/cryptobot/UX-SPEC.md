@@ -39,7 +39,9 @@ Pane 3 packs three semantically distinct layers on the shared energy scale:
 ## 3. I-Ching pane presentation contract
 
 Pane 3 uses one compact in-pane watermark identifying the three layer roles. The pane watermark names each channel with its authoritative 卦 character (本, 变, 互) to preserve the source tradition.
-The I-Ching values use the natural range `[-31.5,31.5]` and align to candle
+The I-Ching values are centered encoding coordinates `E = Q − 31.5`, not strength
+or market direction: chosen Q uses physical bottom-to-top weights `32,16,8,4,2,1`
+(Yang=1, Yin=0), not King Wen numbering. They use the range `[-31.5,31.5]` and align to candle
 time in Unix seconds. The bar interval is right-half-open: a cast at the next
 bar's opening boundary belongs only to that next bar.
 

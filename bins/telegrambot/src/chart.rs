@@ -1,11 +1,14 @@
 use algotrap::engine::traits::ComputedFrame;
 use algotrap::prelude::Timeframe;
 use algotrap::query::gap_zones::{GapZoneDirection, GapZoneRecord};
+use algotrap::ta::materialize_iching_forecast;
 use algotrap::ta::prelude::{LeapMonthPolicy, plum_blossom_signal_with_policy};
+use algotrap::time_utils::iching_forecast_horizon;
 use chartlib::{
     ChartRecord, DatasetKey, DocumentKind, FIXED_DOCUMENT_SCHEMA_VERSION, FixedChartDocument,
-    GapDirection, GapZone, InteractiveDataset,
+    ForecastRecord, GapDirection, GapZone, InteractiveDataset,
 };
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::config::TickerConf;
@@ -16,10 +19,46 @@ pub fn fixed_chart_document(
     df: &dyn ComputedFrame,
     ticker: &TickerConf,
     gap_zones: &[GapZoneRecord],
+    as_of: DateTime<Utc>,
+) -> Result<FixedChartDocument, Box<dyn core::error::Error + Send + Sync>> {
+    fixed_chart_document_at(tf, df, ticker, gap_zones, as_of)
+}
+
+fn fixed_chart_document_at(
+    tf: &Timeframe,
+    df: &dyn ComputedFrame,
+    ticker: &TickerConf,
+    gap_zones: &[GapZoneRecord],
+    as_of: DateTime<Utc>,
 ) -> Result<FixedChartDocument, Box<dyn core::error::Error + Send + Sync>> {
     let records = (0..df.len())
         .map(|row| flat_record(df, row))
         .collect::<Result<Vec<_>, _>>()?;
+    let forecast = if let Some(last) = records.last() {
+        let last_open = last["time"]
+            .as_f64()
+            .ok_or("last chart timestamp is missing")? as i64;
+        let bars = iching_forecast_horizon(last_open, *tf, as_of);
+        let forecast = materialize_iching_forecast(&bars)?;
+        (!forecast.is_empty()).then(|| {
+            forecast
+                .into_iter()
+                .map(|bar| {
+                    let values = bar.rendered_pane3_values();
+                    ForecastRecord {
+                        time: bar.bar_open_ms,
+                        original: values.original,
+                        transformed: values.transformed,
+                        mutual_high: values.mutual_high,
+                        mutual_low: values.mutual_low,
+                        mutual_mean: values.mutual_mean,
+                    }
+                })
+                .collect()
+        })
+    } else {
+        None
+    };
     let gap_zones = gap_zones
         .iter()
         .map(|zone| GapZone {
@@ -49,6 +88,7 @@ pub fn fixed_chart_document(
             display_symbol: format!("BingX:{}", ticker.symbol),
             records,
             gap_zones,
+            forecast,
         },
     })
 }
@@ -59,8 +99,9 @@ pub fn render_single_tf_chart_html(
     df: &dyn ComputedFrame,
     ticker: &TickerConf,
     gap_zones: &[GapZoneRecord],
+    as_of: DateTime<Utc>,
 ) -> Result<String, Box<dyn core::error::Error + Send + Sync>> {
-    let document = fixed_chart_document(tf, df, ticker, gap_zones)?;
+    let document = fixed_chart_document(tf, df, ticker, gap_zones, as_of)?;
     chartlib::render_fixed_html(&document).map_err(Into::into)
 }
 
@@ -253,9 +294,65 @@ mod chart_tests {
     }
 
     #[test]
-    fn adapter_preserves_flat_records_and_directional_warmup_null() {
+    fn forecast_serializes_separately_from_candles() {
+        let as_of = chrono::DateTime::from_timestamp_millis(1_704_070_800_000).unwrap();
         let document =
-            fixed_chart_document(&Timeframe::H1, &frame(), &ticker(), &[]).expect("document");
+            fixed_chart_document(&Timeframe::H1, &frame(), &ticker(), &[], as_of).unwrap();
+        let mut plain = document.clone();
+        plain.dataset.forecast = None;
+        let actual = serde_json::to_value(&document.dataset).unwrap();
+        let baseline = serde_json::to_value(&plain.dataset).unwrap();
+        assert_eq!(actual["forecast"].as_array().unwrap().len(), 10);
+        assert!(baseline.get("forecast").is_none());
+        assert_eq!(
+            serde_json::to_vec(&actual["records"]).unwrap(),
+            serde_json::to_vec(&baseline["records"]).unwrap()
+        );
+        assert!(
+            document
+                .dataset
+                .records
+                .iter()
+                .all(|record| !record.contains_key("original"))
+        );
+        assert_eq!(
+            serde_json::to_vec(&document).unwrap(),
+            serde_json::to_vec(
+                &fixed_chart_document(&Timeframe::H1, &frame(), &ticker(), &[], as_of).unwrap()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn fixed_document_keeps_market_records_unchanged() {
+        let as_of = chrono::DateTime::from_timestamp_millis(1_704_070_800_000).unwrap();
+        let document =
+            fixed_chart_document(&Timeframe::H1, &frame(), &ticker(), &[], as_of).unwrap();
+        let expected = (0..frame().len())
+            .map(|row| flat_record(&frame(), row).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(document.dataset.records, expected);
+        assert_eq!(document.dataset.forecast.as_ref().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn forecast_counts_match_timeframe_horizons() {
+        let as_of = chrono::DateTime::from_timestamp_millis(1_704_070_800_000).unwrap();
+        for (tf, count) in [
+            (Timeframe::H1, 10),
+            (Timeframe::W1, 5),
+            (Timeframe::MOS1, 2),
+        ] {
+            let document = fixed_chart_document(&tf, &frame(), &ticker(), &[], as_of).unwrap();
+            assert_eq!(document.dataset.forecast.unwrap().len(), count);
+        }
+    }
+
+    #[test]
+    fn adapter_preserves_flat_records_and_directional_warmup_null() {
+        let document = fixed_chart_document(&Timeframe::H1, &frame(), &ticker(), &[], Utc::now())
+            .expect("document");
         assert_eq!(document.dataset.records.len(), 2);
         assert_eq!(
             document.dataset.records[0]["structure_power_direction"],
@@ -300,7 +397,7 @@ mod chart_tests {
             ),
         ])
         .expect("source frame");
-        let document = fixed_chart_document(&Timeframe::H1, &frame, &ticker(), &[])
+        let document = fixed_chart_document(&Timeframe::H1, &frame, &ticker(), &[], Utc::now())
             .expect("leap-month render");
         assert!(
             document.dataset.records[0]["iching_original_energy"].is_number(),
@@ -311,7 +408,8 @@ mod chart_tests {
     #[test]
     fn fixed_render_uses_shared_canonical_template() {
         let html =
-            render_single_tf_chart_html(&Timeframe::H1, &frame(), &ticker(), &[]).expect("render");
+            render_single_tf_chart_html(&Timeframe::H1, &frame(), &ticker(), &[], Utc::now())
+                .expect("render");
         assert!(html.contains("chartlib-fixed"));
         assert!(html.contains("LightweightCharts.createChart"));
         assert!(html.contains("ICHING") || html.contains("I-Ching"));
@@ -328,7 +426,7 @@ mod chart_tests {
             ("open".into(), SourceColumnData::Number(vec![Some(100.0)])),
         ])
         .expect("source frame");
-        let error = fixed_chart_document(&Timeframe::H1, &frame, &ticker(), &[])
+        let error = fixed_chart_document(&Timeframe::H1, &frame, &ticker(), &[], Utc::now())
             .expect_err("missing close");
         assert!(error.to_string().contains("required chart value high"));
     }

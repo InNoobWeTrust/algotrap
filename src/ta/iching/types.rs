@@ -18,7 +18,8 @@ pub enum LeapMonthPolicy {
 /// `energy == hexagram as f64 - 31.5` is mechanically enforced at construction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HexagramEnergy {
-    /// Canonical six-bit hexagram value B = Σ line[i]·2ⁱ. Range 0..=63.
+    /// Six-bit coordinate Q = Σ line[i]·2^(5−i), bottom weight 32, top weight 1.
+    /// Range 0..=63; Yang=1, Yin=0; not a King Wen number.
     pub hexagram: u8,
     /// Hexagram value centered around the six-bit range midpoint, in [-31.5, +31.5].
     /// Equal to `hexagram as f64 - 31.5`.
@@ -131,12 +132,13 @@ impl Hexagram {
         }
     }
 
-    /// Canonical six-bit value B = Σ line[i]·2ⁱ. Range 0..=63.
+    /// Six-bit coordinate Q = Σ line[i]·2^(5−i). Range 0..=63.
+    /// Physical lines remain bottom-first: bottom weight 32, top weight 1.
     pub fn binary_index(self) -> u8 {
         let mut b: u8 = 0;
         for (i, &line) in self.lines.iter().enumerate() {
             if line == 1 {
-                b |= 1 << i;
+                b |= 1 << (5 - i);
             }
         }
         b
@@ -155,7 +157,8 @@ impl Hexagram {
         )
     }
 
-    /// Reconstruct from a canonical index 0..=63.
+    /// Reconstruct bottom-first physical lines from Q in 0..=63.
+    /// Q's highest bit is the bottom line; its lowest bit is the top line.
     /// Returns `TaError::validation` if `b > 63`.
     pub fn from_binary_index(b: u8) -> crate::ta::TaResult<Self> {
         if b > 63 {
@@ -165,12 +168,12 @@ impl Hexagram {
         }
         Ok(Self {
             lines: [
-                b & 1,
-                (b >> 1) & 1,
-                (b >> 2) & 1,
-                (b >> 3) & 1,
-                (b >> 4) & 1,
                 (b >> 5) & 1,
+                (b >> 4) & 1,
+                (b >> 3) & 1,
+                (b >> 2) & 1,
+                (b >> 1) & 1,
+                b & 1,
             ],
         })
     }
@@ -201,6 +204,79 @@ impl Hexagram {
 mod tests {
     use super::*;
     use crate::ta::TaErrorKind;
+
+    fn reference_q(lines: [u8; 6]) -> u8 {
+        lines
+            .iter()
+            .zip([32, 16, 8, 4, 2, 1])
+            .map(|(&line, weight)| line * weight)
+            .sum()
+    }
+
+    #[test]
+    fn named_physical_gua_use_q_coordinates() {
+        for (name, lines, q) in [
+            ("Kun", [0, 0, 0, 0, 0, 0], 0),
+            ("Bo", [0, 0, 0, 0, 0, 1], 1),
+            ("Fu", [1, 0, 0, 0, 0, 0], 32),
+            ("Jie", [1, 1, 0, 0, 1, 0], 50),
+            ("Qian", [1, 1, 1, 1, 1, 1], 63),
+            ("Tai", [1, 1, 1, 0, 0, 0], 56),
+            ("Pi", [0, 0, 0, 1, 1, 1], 7),
+            ("Jiji", [1, 0, 1, 0, 1, 0], 42),
+            ("Weiji", [0, 1, 0, 1, 0, 1], 21),
+        ] {
+            let hexagram = Hexagram { lines };
+            assert_eq!(reference_q(lines), q, "literal fixture {name}");
+            assert_eq!(hexagram.binary_index(), q, "encoding {name}");
+            assert_eq!(
+                Hexagram::from_binary_index(q).unwrap().lines,
+                lines,
+                "{name}"
+            );
+            let display: String = lines
+                .iter()
+                .rev()
+                .map(|line| char::from(b'0' + line))
+                .collect();
+            assert_eq!(hexagram.bits_top_to_bottom(), display, "display {name}");
+        }
+    }
+
+    #[test]
+    fn all_64_physical_arrays_match_q_codec_and_display() {
+        for pattern in 0..64u8 {
+            // Enumerate physical arrays, independently of the production decoder.
+            let lines = std::array::from_fn(|i| (pattern >> i) & 1);
+            let hexagram = Hexagram { lines };
+            let q = reference_q(lines);
+            assert_eq!(hexagram.binary_index(), q, "physical {lines:?}");
+            assert_eq!(Hexagram::from_binary_index(q).unwrap().lines, lines);
+            let display: String = lines
+                .iter()
+                .rev()
+                .map(|line| char::from(b'0' + line))
+                .collect();
+            assert_eq!(hexagram.bits_top_to_bottom(), display);
+        }
+    }
+
+    #[test]
+    fn all_384_physical_flips_match_q_weights() {
+        for pattern in 0..64u8 {
+            let lines = std::array::from_fn(|i| (pattern >> i) & 1);
+            let hexagram = Hexagram { lines };
+            for k in 1..=6u8 {
+                let mut expected = lines;
+                expected[usize::from(k - 1)] ^= 1;
+                let flipped = hexagram.flip_line(k).unwrap();
+                assert_eq!(flipped.lines, expected, "physical {lines:?}, line {k}");
+                assert_eq!(flipped.binary_index(), reference_q(expected));
+                assert_eq!(reference_q(expected), reference_q(lines) ^ (1 << (6 - k)));
+                assert_eq!(flipped.flip_line(k).unwrap(), hexagram);
+            }
+        }
+    }
 
     #[test]
     fn hexagram_energy_new_boundary_values() {
@@ -301,10 +377,10 @@ mod tests {
         let qian = Trigram::from_num(1).expect("Qian is valid");
         let kun = Trigram::from_num(8).expect("Kun is valid");
         let lower_qian_upper_kun = Hexagram::from_trigrams(kun, qian);
-        assert_eq!(lower_qian_upper_kun.binary_index(), 7);
+        assert_eq!(lower_qian_upper_kun.binary_index(), 56);
         assert_eq!(lower_qian_upper_kun.bits_top_to_bottom(), "000111");
         let lower_kun_upper_qian = Hexagram::from_trigrams(qian, kun);
-        assert_eq!(lower_kun_upper_qian.binary_index(), 56);
+        assert_eq!(lower_kun_upper_qian.binary_index(), 7);
         assert_eq!(lower_kun_upper_qian.bits_top_to_bottom(), "111000");
     }
 
@@ -321,12 +397,12 @@ mod tests {
             );
             let expected = format!(
                 "{}{}{}{}{}{}",
-                (b >> 5) & 1,
-                (b >> 4) & 1,
-                (b >> 3) & 1,
-                (b >> 2) & 1,
+                b & 1,
                 (b >> 1) & 1,
-                b & 1
+                (b >> 2) & 1,
+                (b >> 3) & 1,
+                (b >> 4) & 1,
+                (b >> 5) & 1
             );
             assert_eq!(bits, expected, "top-to-bottom order for {b}");
         }
@@ -347,17 +423,17 @@ mod tests {
     fn hexagram_flip_line_bottom_and_top() {
         let all_yin = Hexagram::from_binary_index(0).expect("0 is valid");
         let flipped_bottom = all_yin.flip_line(1).expect("line 1 is valid");
-        assert_eq!(flipped_bottom.binary_index(), 1);
+        assert_eq!(flipped_bottom.binary_index(), 32);
         assert_eq!(flipped_bottom.bits_top_to_bottom(), "000001");
         let flipped_top = all_yin.flip_line(6).expect("line 6 is valid");
-        assert_eq!(flipped_top.binary_index(), 32);
+        assert_eq!(flipped_top.binary_index(), 1);
         assert_eq!(flipped_top.bits_top_to_bottom(), "100000");
 
         let all_yang = Hexagram::from_binary_index(63).expect("63 is valid");
         let yang_flip_bottom = all_yang.flip_line(1).expect("line 1 is valid");
-        assert_eq!(yang_flip_bottom.binary_index(), 62);
+        assert_eq!(yang_flip_bottom.binary_index(), 31);
         let yang_flip_top = all_yang.flip_line(6).expect("line 6 is valid");
-        assert_eq!(yang_flip_top.binary_index(), 31);
+        assert_eq!(yang_flip_top.binary_index(), 62);
     }
 
     #[test]
@@ -371,13 +447,14 @@ mod tests {
 
     #[test]
     fn hexagram_mutual_mapping() {
-        // Original bottom->top [1,0,1,0,1,0] (index 21).
-        let original = Hexagram::from_binary_index(21).expect("21 is valid");
+        // Jiji bottom->top [1,0,1,0,1,0] (Q42).
+        let original = Hexagram::from_binary_index(42).expect("42 is valid");
+        assert_eq!(original.lines, [1, 0, 1, 0, 1, 0]);
         let lower = Trigram::from_lines([0, 1, 0]).expect("binary lines");
         let upper = Trigram::from_lines([1, 0, 1]).expect("binary lines");
         let expected = Hexagram::from_trigrams(upper, lower);
         assert_eq!(original.mutual(), expected);
-        assert_eq!(original.mutual().binary_index(), 42);
+        assert_eq!(original.mutual().binary_index(), 21);
         assert_eq!(original.mutual().bits_top_to_bottom(), "101010");
 
         // Qian and Kun are mutual-stable.

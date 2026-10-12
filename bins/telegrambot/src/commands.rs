@@ -474,6 +474,7 @@ async fn run_manual_analysis(
     let data = data::fetch_all_data(&state.bingx, ticker, &ic).await?;
     let all_dfs = &data.dfs;
     let gap_zones = &data.gap_zones;
+    let as_of = chrono::Utc::now();
 
     // 2. Capture chart screenshots for all TFs
     let mut tf_charts: Vec<(String, Vec<u8>)> = Vec::new();
@@ -484,14 +485,19 @@ async fn run_manual_analysis(
             None => continue,
         };
         let zones = gap_zones.get(tf).map(Vec::as_slice).unwrap_or(&[]);
-        let chart_html =
-            match crate::chart::render_single_tf_chart_html(tf, df.as_ref(), ticker, zones) {
-                Ok(html) => html,
-                Err(e) => {
-                    error!(tf = %tf_label, "Failed to render chart: {e:#}");
-                    continue;
-                }
-            };
+        let chart_html = match crate::chart::render_single_tf_chart_html(
+            tf,
+            df.as_ref(),
+            ticker,
+            zones,
+            as_of,
+        ) {
+            Ok(html) => html,
+            Err(e) => {
+                error!(tf = %tf_label, "Failed to render chart: {e:#}");
+                continue;
+            }
+        };
         match crate::browserless::capture_chart_screenshot(&chart_html, &state.conf.browserless_url)
             .await
         {
@@ -514,6 +520,7 @@ async fn run_manual_analysis(
         gap_zones,
         llm::AnalysisMode::FullAnalysis,
         None,
+        as_of,
     )
     .await?;
 

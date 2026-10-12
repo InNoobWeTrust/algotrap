@@ -74,6 +74,7 @@ async fn main() -> Result<std::process::ExitCode, Box<dyn core::error::Error + S
             gap_zones,
             llm::AnalysisMode::AlertScan,
             Some(&mem),
+            chrono::Utc::now(),
         )
         .await;
         let result = match result {

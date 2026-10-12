@@ -48,13 +48,14 @@ pub fn render_fixed_html(document: &FixedChartDocument) -> Result<String, ChartC
     html = html.replacen("</head>", &format!("{PICKER_HIDE_CSS}</head>"), 1);
 
     let mut timeframes = Map::new();
-    timeframes.insert(
-        dataset.key.timeframe.clone(),
-        serde_json::json!({
-            "candles": dataset.records,
-            "gapZones": dataset.gap_zones.iter().map(gap_zone_to_json).collect::<Vec<_>>(),
-        }),
-    );
+    let mut payload = serde_json::json!({
+        "candles": dataset.records,
+        "gapZones": dataset.gap_zones.iter().map(gap_zone_to_json).collect::<Vec<_>>(),
+    });
+    if let Some(forecast) = &dataset.forecast {
+        payload["forecast"] = serde_json::to_value(forecast).map_err(ChartContractError::json)?;
+    }
+    timeframes.insert(dataset.key.timeframe.clone(), payload);
     let payload =
         serde_json::to_string(&Value::Object(timeframes)).map_err(ChartContractError::json)?;
     let path = serde_json::to_string(&format!("data/{}.json", dataset.key.ticker))
@@ -113,7 +114,7 @@ mod tests {
         }
         for label in [
             "本卦 I-Ching Original average",
-            "变卦 Transformed projection",
+            "变卦目的 Within-Cast Destination",
             "互卦 Mutual inner band + mean",
         ] {
             assert!(INTERACTIVE_TEMPLATE.contains(label));
@@ -139,12 +140,12 @@ mod tests {
             INTERACTIVE_TEMPLATE.contains("color: 'rgba(79, 195, 247, 0.95)'"),
             "original average line must be near-opaque foreground above the muted mutual background"
         );
-        // Transformed (derived prediction): dashed + more transparent orange so
+        // Transformed (within-cast destination): dashed + more transparent orange so
         // the foreground Original average stays dominant.
         assert!(
             INTERACTIVE_TEMPLATE
                 .contains("rgba(255, 183, 77, 0.40)', lineWidth: 2, lineStyle: 2, lineType: 1"),
-            "transformed must be dashed (lineStyle: 2) and transparent to signal prediction"
+            "transformed must be dashed (lineStyle: 2) and transparent to distinguish the within-cast destination"
         );
         // Mutual: BaselineSeries with zero-split so each fill segment stays
         // inside its own side of 0 and reads as positive or negative.
@@ -164,20 +165,19 @@ mod tests {
             "const ichingBoundaryOptions = {\n            baseValue: { type: 'price', price: 0 },"
         ));
         for token in [
-            "topLineColor: 'rgba(38, 166, 154, 0.25)'",
-            "topFillColor1: 'rgba(38, 166, 154, 0.12)'",
-            "bottomLineColor: 'rgba(239, 83, 80, 0.25)'",
-            "bottomFillColor2: 'rgba(239, 83, 80, 0.12)'",
+            "topLineColor: 'rgba(38, 166, 154, 0.40)'",
+            "topFillColor1: 'rgba(38, 166, 154, 0.15)'",
+            "bottomLineColor: 'rgba(239, 83, 80, 0.40)'",
+            "bottomFillColor2: 'rgba(239, 83, 80, 0.15)'",
         ] {
             assert!(INTERACTIVE_TEMPLATE.contains(token));
         }
-        // Mean is line-only (fills 0.00) with a slightly lighter line so it
-        // reads on the wash but stays below the Transformed dashed line
-        // (0.40/2px) in visual weight.
+        // Mean is line-only (fills 0.00) and stays below the Transformed
+        // dashed line (0.40/2px) in visual weight.
         for token in [
-            "topLineColor: 'rgba(110, 231, 183, 0.35)'",
+            "topLineColor: 'rgba(110, 231, 183, 0.40)'",
             "topFillColor1: 'rgba(45, 218, 178, 0.00)'",
-            "bottomLineColor: 'rgba(252, 165, 165, 0.35)'",
+            "bottomLineColor: 'rgba(252, 165, 165, 0.40)'",
             "bottomFillColor2: 'rgba(255, 110, 118, 0.00)'",
         ] {
             assert!(INTERACTIVE_TEMPLATE.contains(token));
@@ -318,12 +318,441 @@ mod tests {
                     body_ratio: None,
                     direction: GapDirection::Bullish,
                 }],
+                forecast: None,
             },
         };
         let html = render_fixed_html(&document).expect("render fixed document");
         assert!(html.contains("chartlib-fixed"));
         assert!(html.contains("LightweightCharts.createChart"));
         assert!(html.contains("gapZones"));
+    }
+
+    #[test]
+    fn forecast_is_forwarded_and_absence_still_renders() {
+        let registry = ChartRegistry {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            tickers: serde_json::json!([{"symbol":"BTC-USDT","sl_percent":"0","tol_percent":"0","default_tf":"1h"}]),
+            chart_tfs: serde_json::json!(["1h"]),
+        };
+        // Interactive mode fetches the separately published dataset; it embeds only registry metadata.
+        assert!(
+            render_interactive_html(&registry)
+                .unwrap()
+                .contains("data/${symbol}.json")
+        );
+        let mut document = FixedChartDocument {
+            schema_version: FIXED_DOCUMENT_SCHEMA_VERSION,
+            kind: DocumentKind::FixedDocument,
+            title: "BTC".into(),
+            subtitle: None,
+            dataset: InteractiveDataset {
+                key: DatasetKey::new("BTC-USDT", "1h"),
+                display_symbol: "BTC".into(),
+                records: vec![ChartRecord::from_iter([(
+                    "time".into(),
+                    Value::from(1_i64),
+                )])],
+                gap_zones: vec![],
+                forecast: None,
+            },
+        };
+        let without = render_fixed_html(&document).unwrap();
+        assert!(!without.contains("\"forecast\":"));
+        document.dataset.forecast = Some(vec![crate::ForecastRecord {
+            time: 3_600_001,
+            original: 1.0,
+            transformed: 2.0,
+            mutual_high: 3.0,
+            mutual_low: 4.0,
+            mutual_mean: 5.0,
+        }]);
+        let with = render_fixed_html(&document).unwrap();
+        assert!(with.contains("\"forecast\":[{"));
+        assert!(with.contains("\"time\":3600001"));
+    }
+
+    #[test]
+    fn forecast_never_enters_candles() {
+        let update = INTERACTIVE_TEMPLATE
+            .split("const onIntervalUpdate = (tf) => {")
+            .nth(1)
+            .unwrap();
+        let market_series = update.split("const forecast = ").next().unwrap();
+        assert!(market_series.contains("candlestickSeries.setData(data);"));
+        assert!(!market_series.contains("forecastPoints"));
+        let projected_series = update
+            .split("const forecastPoints = ")
+            .nth(1)
+            .unwrap()
+            .split("const markers = [];")
+            .next()
+            .unwrap();
+        for line in projected_series
+            .lines()
+            .filter(|line| line.contains("Series.setData("))
+        {
+            assert!(
+                line.contains("iching"),
+                "forecast path must stay in pane 3: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn forecast_reuses_five_series() {
+        let declarations = INTERACTIVE_TEMPLATE
+            .lines()
+            .filter(|line| {
+                line.contains("const iching") && line.contains("Series = chart.addSeries(")
+            })
+            .count();
+        assert_eq!(declarations, 5);
+        for name in [
+            "Original",
+            "Transformed",
+            "MutualHigh",
+            "MutualLow",
+            "MutualMean",
+        ] {
+            assert!(INTERACTIVE_TEMPLATE.contains(&format!("iching{name}Series.setData([")));
+        }
+    }
+
+    #[test]
+    fn forecast_range_updates_on_interval() {
+        let update = INTERACTIVE_TEMPLATE
+            .split("const onIntervalUpdate = (tf) => {")
+            .nth(1)
+            .unwrap()
+            .split("// ─── Layout")
+            .next()
+            .unwrap();
+        assert!(update.contains("updateVisibleRange(forecast);"));
+        let range = INTERACTIVE_TEMPLATE
+            .split("const updateVisibleRange = (forecast) => {")
+            .nth(1)
+            .unwrap()
+            .split("const onIntervalUpdate")
+            .next()
+            .unwrap();
+        assert!(range.contains("timeToIndex("));
+        assert!(range.contains("setVisibleLogicalRange({ from: len - 128,"));
+        assert!(range.contains("forecast[forecast.length - 1].time"));
+        assert!(range.contains("pane3Horizon().wide"));
+        assert!(range.contains("len - 40"));
+        assert!(range.contains("const to = lastIndex === null ? len + 5 : lastIndex + 5"));
+    }
+
+    #[test]
+    fn now_boundary_uses_no_forbidden_tokens() {
+        assert!(!INTERACTIVE_TEMPLATE.contains("ctx.stroke"));
+        assert!(!INTERACTIVE_TEMPLATE.contains("setLineDash"));
+        assert!(INTERACTIVE_TEMPLATE.contains("ichingNowDivider"));
+        assert!(INTERACTIVE_TEMPLATE.contains("timeToCoordinate(this.time)"));
+        assert!(INTERACTIVE_TEMPLATE.contains("fillRect("));
+        assert!(INTERACTIVE_TEMPLATE.contains("fillText('NOW'"));
+    }
+
+    #[test]
+    fn flat_forecast_has_explanation() {
+        assert!(INTERACTIVE_TEMPLATE.contains("forecast.every(d =>"));
+        assert!(INTERACTIVE_TEMPLATE.contains("d.original === forecast[0].original"));
+        assert!(INTERACTIVE_TEMPLATE.contains("No cast change in this window"));
+        assert!(INTERACTIVE_TEMPLATE.contains("flatForecast"));
+    }
+
+    #[test]
+    fn missing_forecast_key_renders_unchanged() {
+        assert!(
+            INTERACTIVE_TEMPLATE.contains("Array.isArray(tfData.forecast) ? tfData.forecast : []")
+        );
+        assert_eq!(INTERACTIVE_TEMPLATE.matches("tfData.forecast").count(), 2);
+        assert!(INTERACTIVE_TEMPLATE.contains("hasForecast = forecast.length > 0"));
+        assert!(INTERACTIVE_TEMPLATE.contains("candlestickSeries.setData(data);"));
+    }
+
+    #[test]
+    fn horizon_label_present() {
+        assert_eq!(
+            INTERACTIVE_TEMPLATE
+                .matches("Signal Horizon · 卦象时窗")
+                .count(),
+            1
+        );
+        let pane3_watermark = INTERACTIVE_TEMPLATE
+            .split("LightweightCharts.createTextWatermark(chart.panes()[3]")
+            .nth(1)
+            .unwrap()
+            .split("// ─── TF update")
+            .next()
+            .unwrap();
+        assert!(pane3_watermark.contains("Signal Horizon · 卦象时窗"));
+        assert!(pane3_watermark.contains("Calendrical cast schedule · not a price forecast"));
+    }
+
+    #[test]
+    fn forecast_watermark_has_one_horizon_line_and_three_legend_lines() {
+        let pane3 = INTERACTIVE_TEMPLATE
+            .split("...(hasForecast ? [")
+            .nth(1)
+            .unwrap()
+            .split("                    ],\n                },")
+            .next()
+            .unwrap();
+        let horizon = pane3.split("] : []),").next().unwrap();
+        assert_eq!(horizon.matches("text:").count(), 1);
+        let layout = INTERACTIVE_TEMPLATE
+            .split("const pane3Horizon = () => {")
+            .nth(1)
+            .unwrap()
+            .split("const watermarkUpdate")
+            .next()
+            .unwrap();
+        assert!(layout.contains("Signal Horizon · 卦象时窗"));
+        assert!(layout.contains("Calendrical cast schedule · not a price forecast"));
+        assert!(layout.contains("flatForecast ? ' · No cast change in this window' : ''"));
+        assert!(horizon.contains("text: horizon.text"));
+        assert!(!horizon.contains("text: 'Calendrical cast schedule"));
+        assert!(!horizon.contains("text: 'No cast change"));
+        assert!(horizon.contains("fontSize: 12"));
+        assert_eq!(pane3.matches("text:").count(), 4);
+    }
+
+    #[test]
+    fn horizon_uses_measured_fit_and_safe_shortest_fallback() {
+        let layout = INTERACTIVE_TEMPLATE
+            .split("const pane3Horizon = () => {")
+            .nth(1)
+            .unwrap()
+            .split("const watermarkUpdate")
+            .next()
+            .unwrap();
+        assert!(layout.contains("const paneWidth = pane3PlotWidth()"));
+        assert!(layout.contains("context.measureText(candidate).width <= paneWidth - 8"));
+        assert!(layout.contains("candidates.find(candidate =>"));
+        assert!(layout.contains("?? candidates[2]"));
+        assert!(layout.contains("context && Number.isFinite(paneWidth) ? candidates.find"));
+        assert!(
+            layout.contains("horizonContext.font = `12px ${chart.options().layout.fontFamily}`")
+        );
+        assert!(layout.contains("horizonContext?.font.includes('12px')"));
+        assert!(layout.contains("Number.isFinite(sampleWidth) && sampleWidth > 0"));
+        assert!(!layout.contains("paneWidth >= 520"));
+        assert!(!layout.contains("paneWidth >= 380"));
+        let longest = layout.find("`${prefix} · Calendrical cast schedule · not a price forecast${flatForecast ? ' · No cast change in this window' : ''}`").unwrap();
+        let middle = layout
+            .find("`${prefix} · calendar · not a forecast${flatForecast ? ' · no change' : ''}`")
+            .unwrap();
+        let shortest = layout
+            .find("`Calendar · 卦象时窗${flatForecast ? ' · flat' : ''}`")
+            .unwrap();
+        assert!(longest < middle && middle < shortest);
+        let prefix = "Signal Horizon · 卦象时窗";
+        let wide_body = " · Calendrical cast schedule · not a price forecast";
+        let flat_note = " · No cast change in this window";
+        assert!(layout.contains(&format!("const prefix = '{prefix}'")));
+        assert!(layout.contains(wide_body));
+        assert!(layout.contains(flat_note));
+        assert_eq!(
+            format!("{prefix}{wide_body}"),
+            "Signal Horizon · 卦象时窗 · Calendrical cast schedule · not a price forecast"
+        );
+        assert_eq!(
+            format!("{prefix}{wide_body}{flat_note}"),
+            "Signal Horizon · 卦象时窗 · Calendrical cast schedule · not a price forecast · No cast change in this window"
+        );
+        assert!(layout.contains("const wide = context !== null && Number.isFinite(paneWidth) && context.measureText(candidates[0]).width <= paneWidth - 8"));
+    }
+
+    #[test]
+    fn horizon_candidates_retain_calendar_meaning_with_conservative_phone_budget() {
+        let candidates = INTERACTIVE_TEMPLATE
+            .split("const candidates = [")
+            .nth(1)
+            .unwrap()
+            .split("];")
+            .next()
+            .unwrap();
+        assert!(!candidates.contains("`${prefix} · not a forecast"));
+        assert!(!candidates.contains("`${prefix}${flatForecast"));
+        for flat in [false, true] {
+            let actual: Vec<String> = candidates
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix('`'))
+                .map(|line| {
+                    line.trim_end_matches("`,")
+                        .replace("${prefix}", "Signal Horizon · 卦象时窗")
+                        .replace(
+                            "${flatForecast ? ' · No cast change in this window' : ''}",
+                            if flat {
+                                " · No cast change in this window"
+                            } else {
+                                ""
+                            },
+                        )
+                        .replace(
+                            "${flatForecast ? ' · no change' : ''}",
+                            if flat { " · no change" } else { "" },
+                        )
+                        .replace(
+                            "${flatForecast ? ' · flat' : ''}",
+                            if flat { " · flat" } else { "" },
+                        )
+                })
+                .collect();
+            let expected = if flat {
+                [
+                    "Signal Horizon · 卦象时窗 · Calendrical cast schedule · not a price forecast · No cast change in this window",
+                    "Signal Horizon · 卦象时窗 · calendar · not a forecast · no change",
+                    "Calendar · 卦象时窗 · flat",
+                ]
+            } else {
+                [
+                    "Signal Horizon · 卦象时窗 · Calendrical cast schedule · not a price forecast",
+                    "Signal Horizon · 卦象时窗 · calendar · not a forecast",
+                    "Calendar · 卦象时窗",
+                ]
+            };
+            assert_eq!(actual, expected);
+            assert!(actual.iter().all(|text| {
+                let text = text.to_lowercase();
+                text.contains("calendar") || text.contains("calendrical")
+            }));
+            // Conservative 12px-font model: ASCII 9px, CJK/punctuation 12px.
+            // This is not proof of actual browser typography or canvas fit.
+            let widths: Vec<usize> = actual
+                .iter()
+                .map(|text| {
+                    text.chars()
+                        .map(|c| if c.is_ascii() { 9 } else { 12 })
+                        .sum()
+                })
+                .collect();
+            assert!(widths[0] > widths[1] && widths[1] > widths[2]);
+            assert!(widths[2] <= 280 - 8);
+        }
+    }
+
+    #[test]
+    fn horizon_plot_width_rejects_invalid_sources_and_subtracts_measured_axis() {
+        let width = INTERACTIVE_TEMPLATE
+            .split("const pane3PlotWidth = () => {")
+            .nth(1)
+            .unwrap()
+            .split("const pane3Horizon")
+            .next()
+            .unwrap();
+        assert!(width.contains("const pane = chart.panes()[3]"));
+        assert!(width.contains("pane.getWidth?.()"));
+        assert!(width.contains("Number.isFinite(apiWidth) && apiWidth > 0"));
+        assert!(width.contains("pane.getHTMLElement?.()"));
+        assert!(width.contains("querySelector('canvas')"));
+        assert!(width.contains("Number.isFinite(canvasWidth) && canvasWidth > 0"));
+        assert!(width.contains("ichingOriginalSeries.priceScale().width()"));
+        assert!(width.contains("Number.isFinite(axisWidth) && axisWidth > 0"));
+        assert!(width.contains("container.clientWidth - axisWidth"));
+        assert!(width.contains("Number.isFinite(plotWidth) && plotWidth > 0"));
+        assert!(width.contains("return null;"));
+        assert!(!width.contains("?? container.clientWidth"));
+        assert!(!width.contains("return container.clientWidth"));
+    }
+
+    #[test]
+    fn pane_height_and_range_share_measured_wide_threshold() {
+        let resize = INTERACTIVE_TEMPLATE
+            .split("const onSizeUpdate = () => {")
+            .nth(1)
+            .unwrap()
+            .split("const resizeObserver")
+            .next()
+            .unwrap();
+        assert!(resize.contains("pane3Horizon().wide"));
+        assert!(resize.contains("containerHeight * 0.60"));
+        assert!(resize.contains("containerHeight * 0.48"));
+        assert!(resize.contains("watermarkUpdate();"));
+    }
+
+    #[test]
+    fn projected_lines_have_alpha_floor_and_are_dimmer_than_history() {
+        let projection = INTERACTIVE_TEMPLATE
+            .split("const forecastPoints = ")
+            .nth(1)
+            .unwrap()
+            .split("hasForecast = forecast.length > 0")
+            .next()
+            .unwrap();
+        let historical = INTERACTIVE_TEMPLATE
+            .split("// A pane primitive")
+            .next()
+            .unwrap();
+        let alpha = |line: &str| -> f64 {
+            line.split("rgba(")
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap()
+                .rsplit(',')
+                .next()
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let line = |source: &str, token: &str| -> f64 {
+            alpha(source.lines().find(|line| line.contains(token)).unwrap())
+        };
+        assert_eq!(
+            projection
+                .lines()
+                .filter(|line| line.contains("LineColor: 'rgba(") || line.contains("color: 'rgba("))
+                .count(),
+            6,
+            "all projected line colors must be checked (two mutual sides share the high/low options)"
+        );
+        for (historical_token, projected_token) in [
+            ("color: 'rgba(79, 195, 247", "color: 'rgba(79, 195, 247"),
+            ("color: 'rgba(255, 183, 77", "color: 'rgba(255, 183, 77"),
+            (
+                "topLineColor: 'rgba(38, 166, 154",
+                "topLineColor: 'rgba(38, 166, 154",
+            ),
+            (
+                "bottomLineColor: 'rgba(239, 83, 80",
+                "bottomLineColor: 'rgba(239, 83, 80",
+            ),
+            (
+                "topLineColor: 'rgba(110, 231, 183",
+                "topLineColor: 'rgba(110, 231, 183",
+            ),
+            (
+                "bottomLineColor: 'rgba(252, 165, 165",
+                "bottomLineColor: 'rgba(252, 165, 165",
+            ),
+        ] {
+            let historic_alpha = line(historical, historical_token);
+            let projected_alpha = line(projection, projected_token);
+            assert!(
+                projected_alpha >= 0.30,
+                "{projected_token}: {projected_alpha}"
+            );
+            assert!(
+                projected_alpha < historic_alpha,
+                "{projected_token}: {projected_alpha} >= {historic_alpha}"
+            );
+        }
+        for series in [
+            "Original",
+            "Transformed",
+            "MutualHigh",
+            "MutualLow",
+            "MutualMean",
+        ] {
+            assert!(projection.contains(&format!("iching{series}Series.setData([")));
+        }
+        assert!(projection.contains("...projectedMutualColors"));
+        // Transparent fill stops intentionally remain below the projected line floor.
+        assert!(projection.contains("topFillColor1: 'rgba(38, 166, 154, 0.09)'"));
     }
 
     #[test]
@@ -341,6 +770,7 @@ mod tests {
                     Value::from(1_i64),
                 )])],
                 gap_zones: vec![],
+                forecast: None,
             },
         };
         let html = render_fixed_html(&document).expect("render fixed");
@@ -460,6 +890,7 @@ mod tests {
                     Value::from(1_i64),
                 )])],
                 gap_zones: vec![],
+                forecast: None,
             },
         };
         let html = render_fixed_html(&document).expect("render fixed");

@@ -72,9 +72,14 @@ pub async fn process_data(
     ic: &crate::memory::IndicatorConfig,
 ) -> Result<Box<dyn ComputedFrame>, MarketError> {
     let validated_ticker = validated_ticker(ticker)?;
-    crate::presentation::compute_telegram_frame(klines.to_vec(), validated_ticker, ic)
-        .await
-        .map(|(frame, _)| frame)
+    crate::presentation::compute_telegram_frame(
+        klines.to_vec(),
+        validated_ticker,
+        ic,
+        ticker.default_tf,
+    )
+    .await
+    .map(|(frame, _)| frame)
 }
 
 async fn compute_telegram_frames(
@@ -100,7 +105,13 @@ async fn compute_telegram_frames(
         async move {
             (
                 timeframe,
-                crate::presentation::compute_telegram_frame(klines, validated_ticker, ic).await,
+                crate::presentation::compute_telegram_frame(
+                    klines,
+                    validated_ticker,
+                    ic,
+                    timeframe,
+                )
+                .await,
             )
         }
     });
@@ -176,7 +187,15 @@ mod tests {
         assert_eq!(data.dfs.len(), 2);
         assert!(!data.dfs.contains_key(&Timeframe::M1));
         for (timeframe, klines) in [(Timeframe::H1, valid_1h), (Timeframe::M5, valid_5m)] {
-            let expected = process_data(&klines, &ticker, &indicators).await.unwrap();
+            let expected = crate::presentation::compute_telegram_frame(
+                klines,
+                validated_ticker(&ticker).unwrap(),
+                &indicators,
+                timeframe,
+            )
+            .await
+            .unwrap()
+            .0;
             assert_eq!(
                 data.dfs[&timeframe].to_json_records().unwrap(),
                 expected.to_json_records().unwrap(),

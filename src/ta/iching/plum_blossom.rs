@@ -104,6 +104,56 @@ mod tests {
     use super::*;
     use crate::ta::TaErrorKind;
 
+    fn assert_physical_channels(
+        input: PlumBlossomInput,
+        moving_line: u8,
+        physical: [[u8; 6]; 3],
+        coordinates: [u8; 3],
+    ) {
+        let record = cast(input).expect("valid fixture");
+        let result = compute_channels(input).expect("valid fixture");
+        assert_eq!(record.moving_line, moving_line);
+        assert_eq!(result.moving_line, moving_line);
+        for ((actual, channel), (lines, q)) in [
+            (record.hexagram, result.original),
+            (record.transformed, result.transformed),
+            (record.mutual, result.mutual),
+        ]
+        .into_iter()
+        .zip(physical.into_iter().zip(coordinates))
+        {
+            let reference: u8 = lines
+                .iter()
+                .zip([32, 16, 8, 4, 2, 1])
+                .map(|(&l, w)| l * w)
+                .sum();
+            assert_eq!(reference, q);
+            assert_eq!(actual, q, "physical {lines:?}");
+            assert_eq!(channel.hexagram, q);
+            assert_eq!(channel.energy, f64::from(q) - 31.5);
+            let expected = Hexagram::from_trigrams(
+                Trigram::from_lines([lines[3], lines[4], lines[5]]).unwrap(),
+                Trigram::from_lines([lines[0], lines[1], lines[2]]).unwrap(),
+            );
+            assert_eq!(Hexagram::from_binary_index(actual).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn classical_ge_to_xian_physical_cast_and_channels() {
+        assert_physical_channels(
+            PlumBlossomInput {
+                year_branch: 5,
+                lunar_month: 12,
+                lunar_day: 17,
+                hour_branch: 9,
+            },
+            1,
+            [[1, 0, 1, 1, 1, 0], [0, 0, 1, 1, 1, 0], [0, 1, 1, 1, 1, 1]],
+            [46, 14, 31],
+        );
+    }
+
     fn fixtures_per_moving_line() -> [(PlumBlossomInput, u8); 6] {
         [
             (
@@ -175,22 +225,12 @@ mod tests {
         };
         let record = cast(input).expect("min fixture is valid");
         assert_eq!(record.moving_line, 4);
-        let upper = Trigram::from_num(3).expect("3 is Li");
-        let lower = Trigram::from_num(4).expect("4 is Zhen");
-        let expected_hex = Hexagram::from_trigrams(upper, lower).binary_index();
-        assert_eq!(record.hexagram, expected_hex);
-        assert_eq!(record.hexagram, 41);
-        let expected_transformed = Hexagram::from_binary_index(expected_hex)
-            .expect("0..=63 is valid")
-            .flip_line(4)
-            .expect("line 4 is valid")
-            .binary_index();
-        assert_eq!(record.transformed, expected_transformed);
-        let expected_mutual = Hexagram::from_binary_index(expected_hex)
-            .expect("0..=63 is valid")
-            .mutual()
-            .binary_index();
-        assert_eq!(record.mutual, expected_mutual);
+        assert_physical_channels(
+            input,
+            4,
+            [[1, 0, 0, 1, 0, 1], [1, 0, 0, 0, 0, 1], [0, 0, 1, 0, 1, 0]],
+            [37, 33, 10],
+        );
     }
 
     #[test]
@@ -205,22 +245,12 @@ mod tests {
         };
         let record = cast(input).expect("max fixture is valid");
         assert_eq!(record.moving_line, 6);
-        let upper = Trigram::from_num(6).expect("6 is Kan");
-        let lower = Trigram::from_num(2).expect("2 is Dui");
-        let expected_hex = Hexagram::from_trigrams(upper, lower).binary_index();
-        assert_eq!(record.hexagram, expected_hex);
-        assert_eq!(record.hexagram, 19);
-        let expected_transformed = Hexagram::from_binary_index(expected_hex)
-            .expect("0..=63 is valid")
-            .flip_line(6)
-            .expect("line 6 is valid")
-            .binary_index();
-        assert_eq!(record.transformed, expected_transformed);
-        let expected_mutual = Hexagram::from_binary_index(expected_hex)
-            .expect("0..=63 is valid")
-            .mutual()
-            .binary_index();
-        assert_eq!(record.mutual, expected_mutual);
+        assert_physical_channels(
+            input,
+            6,
+            [[1, 1, 0, 0, 1, 0], [1, 1, 0, 0, 1, 1], [1, 0, 0, 0, 0, 1]],
+            [50, 51, 33],
+        );
     }
 
     #[test]
@@ -420,7 +450,7 @@ mod tests {
     #[test]
     fn compute_channels_fixed_input_matches_manual_channels() {
         // Fixed input: year=1, month=1, day=1, hour=1 -> S1=3, S2=4
-        // -> hexagram 41 (hand-verified in cast_min_fixture_matches_hand_computed).
+        // -> Shihe Q37 (hand-verified in cast_min_fixture_matches_hand_computed).
         let input = PlumBlossomInput {
             year_branch: 1,
             lunar_month: 1,
@@ -428,7 +458,7 @@ mod tests {
             hour_branch: 1,
         };
         let record = cast(input).expect("fixture is valid");
-        assert_eq!(record.hexagram, 41);
+        assert_eq!(record.hexagram, 37);
         let result = compute_channels(input).expect("fixture is valid");
         let expected_original = HexagramEnergy::new(record.hexagram).expect("0..=63 is valid");
         let expected_transformed =
@@ -441,6 +471,11 @@ mod tests {
         assert_eq!(result.transformed.energy, record.transformed as f64 - 31.5);
         assert_eq!(result.mutual.energy, record.mutual as f64 - 31.5);
         assert_eq!(result.moving_line, 4);
+        assert_eq!(result.original.energy, 5.5);
+        assert_eq!(result.transformed.hexagram, 33);
+        assert_eq!(result.transformed.energy, 1.5);
+        assert_eq!(result.mutual.hexagram, 10);
+        assert_eq!(result.mutual.energy, -21.5);
     }
 
     #[test]

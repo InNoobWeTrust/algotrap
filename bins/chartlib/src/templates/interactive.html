@@ -413,19 +413,19 @@
         // two boundary lines" is impossible: each BaselineSeries fills its
         // line to zero, so fill overlap is NOT the inner range — the inner
         // range is the subtraction (area between the stepped high/low lines).
-        // Hence the band edges are drawn as visible stepped lines (0.80/1px)
-        // while fills stay equal and modest (0.12→0.00) as pure sign wash:
+        // Hence the band edges are drawn as visible stepped lines (0.40/1px)
+        // while fills stay equal and modest (0.15→0.00) as pure sign wash:
         //   - above zero -> cool TradingView teal-green #26A69A (positive),
         //   - below zero -> hot TradingView coral-red #EF5350 (negative).
         // Mean is line-only (fills 0.00) so it never muddies the wash.
         const ichingBoundaryOptions = {
             baseValue: { type: 'price', price: 0 },
-            topLineColor: 'rgba(38, 166, 154, 0.25)',
-            topFillColor1: 'rgba(38, 166, 154, 0.12)',
+            topLineColor: 'rgba(38, 166, 154, 0.40)',
+            topFillColor1: 'rgba(38, 166, 154, 0.15)',
             topFillColor2: 'rgba(38, 166, 154, 0.00)',
-            bottomLineColor: 'rgba(239, 83, 80, 0.25)',
+            bottomLineColor: 'rgba(239, 83, 80, 0.40)',
             bottomFillColor1: 'rgba(239, 83, 80, 0.00)',
-            bottomFillColor2: 'rgba(239, 83, 80, 0.12)',
+            bottomFillColor2: 'rgba(239, 83, 80, 0.15)',
             lineWidth: 1,
             lineType: 1,
             priceLineVisible: false,
@@ -440,14 +440,14 @@
         const ichingMutualMeanSeries = chart.addSeries(LightweightCharts.BaselineSeries, {
             baseValue: { type: 'price', price: 0 },
             // Mean line: slightly lighter than the band wash so it reads on
-            // top of the fills, but capped at 0.35/1px so it stays below the
+            // top of the fills, but capped at 0.40/1px so it stays below the
             // Transformed dashed line (0.40/2px) in visual weight. Fills are
             // 0.00 (line-only) so the high/low overlap alone defines the
             // inner-range highlight.
-            topLineColor: 'rgba(110, 231, 183, 0.35)',
+            topLineColor: 'rgba(110, 231, 183, 0.40)',
             topFillColor1: 'rgba(45, 218, 178, 0.00)',
             topFillColor2: 'rgba(45, 218, 178, 0.00)',
-            bottomLineColor: 'rgba(252, 165, 165, 0.35)',
+            bottomLineColor: 'rgba(252, 165, 165, 0.40)',
             bottomFillColor1: 'rgba(255, 110, 118, 0.00)',
             bottomFillColor2: 'rgba(255, 110, 118, 0.00)',
             lineWidth: 1,
@@ -455,6 +455,35 @@
             priceLineVisible: false,
             crosshairMarkerVisible: false,
         }, 3);
+        // A pane primitive keeps the NOW divider vertical at the exact first future time.
+        // Two points with the same time in a LineSeries violate LWC's unique-time rule.
+        class IchingNowDivider {
+            constructor() { this.time = null; }
+            attached({ chart, requestUpdate }) {
+                this.chart = chart;
+                this.requestUpdate = requestUpdate;
+            }
+            detached() { this.chart = null; this.requestUpdate = null; }
+            paneViews() {
+                return [{ renderer: () => ({ draw: target => {
+                    if (this.time === null || !this.chart) return;
+                    target.useBitmapCoordinateSpace(scope => {
+                        const x = this.chart.timeScale().timeToCoordinate(this.time);
+                        if (x === null) return;
+                        const px = Math.round(x * scope.horizontalPixelRatio);
+                        const ctx = scope.context;
+                        ctx.fillStyle = 'rgba(178, 181, 190, 0.55)';
+                        ctx.fillRect(px, 0, Math.max(1, Math.round(scope.horizontalPixelRatio)), scope.bitmapSize.height);
+                        ctx.fillStyle = 'rgba(221, 221, 221, 0.8)';
+                        ctx.font = `${Math.round(11 * scope.verticalPixelRatio)}px sans-serif`;
+                        ctx.fillText('NOW', px + 4 * scope.horizontalPixelRatio, 16 * scope.verticalPixelRatio);
+                    });
+                } }) }];
+            }
+            setTime(time) { this.time = time; this.requestUpdate?.(); }
+        }
+        const ichingNowDivider = new IchingNowDivider();
+        ichingOriginalSeries.attachPrimitive(ichingNowDivider);
         const markersSeries = LightweightCharts.createSeriesMarkers(candlestickSeries, []);
         const textWatermarks = [
             // Pane 0 title sits top-right, beside the top-left picker overlay,
@@ -478,7 +507,40 @@
         ];
 
         // ─── Watermark update ─────────────────────────────────────────
+        let hasForecast = false;
+        let flatForecast = false;
+        const horizonContext = document.createElement('canvas').getContext('2d');
+        const pane3PlotWidth = () => {
+            const pane = chart.panes()[3];
+            const apiWidth = pane.getWidth?.();
+            if (Number.isFinite(apiWidth) && apiWidth > 0) return apiWidth;
+            const canvasWidth = pane.getHTMLElement?.()?.querySelector('canvas')?.getBoundingClientRect().width;
+            if (Number.isFinite(canvasWidth) && canvasWidth > 0) return canvasWidth;
+            const axisWidth = ichingOriginalSeries.priceScale().width();
+            if (Number.isFinite(axisWidth) && axisWidth > 0) {
+                const plotWidth = container.clientWidth - axisWidth;
+                if (Number.isFinite(plotWidth) && plotWidth > 0) return plotWidth;
+            }
+            return null;
+        };
+        const pane3Horizon = () => {
+            const paneWidth = pane3PlotWidth();
+            const prefix = 'Signal Horizon · 卦象时窗';
+            const candidates = [
+                `${prefix} · Calendrical cast schedule · not a price forecast${flatForecast ? ' · No cast change in this window' : ''}`,
+                `${prefix} · calendar · not a forecast${flatForecast ? ' · no change' : ''}`,
+                `Calendar · 卦象时窗${flatForecast ? ' · flat' : ''}`,
+            ];
+            if (horizonContext) horizonContext.font = `12px ${chart.options().layout.fontFamily}`;
+            const sampleWidth = horizonContext?.measureText(candidates[2]).width;
+            const context = horizonContext?.font.includes('12px') && Number.isFinite(sampleWidth) && sampleWidth > 0
+                ? horizonContext : null;
+            const wide = context !== null && Number.isFinite(paneWidth) && context.measureText(candidates[0]).width <= paneWidth - 8;
+            const text = (context && Number.isFinite(paneWidth) ? candidates.find(candidate => context.measureText(candidate).width <= paneWidth - 8) : null) ?? candidates[2];
+            return { text, wide };
+        };
         const watermarkUpdate = () => {
+            const horizon = pane3Horizon();
             const tf = tf_btns.value || container.dataset.tf || chartTfs[0];
             const lastBar = dataset[tf]?.candles?.slice(-1)[0];
             if (lastBar) {
@@ -517,13 +579,20 @@
                 },
                 {
                     lines: [
+                        ...(hasForecast ? [
+                            {
+                                text: horizon.text,
+                                color: 'rgba(178, 181, 190, 0.8)',
+                                fontSize: 12,
+                            },
+                        ] : []),
                         {
                             text: '本卦 I-Ching Original average',
                             color: '#4FC3F7',
                             fontSize: 13,
                         },
                         {
-                            text: '变卦 Transformed projection',
+                            text: '变卦目的 Within-Cast Destination',
                             color: '#FFB74D',
                             fontSize: 13,
                         },
@@ -541,6 +610,18 @@
         }
 
         // ─── TF update ────────────────────────────────────────────────
+        const updateVisibleRange = (forecast) => {
+            const len = chart.panes()[0].getSeries()[0].data().length;
+            const lastIndex = forecast.length > 0
+                ? chart.timeScale().timeToIndex(Math.floor(forecast[forecast.length - 1].time / 1000))
+                : null;
+            const to = lastIndex === null ? len + 5 : lastIndex + 5;
+            if (pane3Horizon().wide) {
+                chart.timeScale().setVisibleLogicalRange({ from: len - 128, to });
+            } else {
+                chart.timeScale().setVisibleLogicalRange({ from: len - 40, to });
+            }
+        };
         const onIntervalUpdate = (tf) => {
             const tfData = dataset[tf];
             if (!tfData) return;
@@ -611,26 +692,59 @@
                 value: d.atr_reversion_percent,
                 color: d.atr_reversion_percent_color,
             })));
-            ichingOriginalSeries.setData(data.map(d => ({
-                time: d.time,
-                value: (d.iching_open + d.iching_high + d.iching_low + d.iching_close) / 4,
-            })).filter(p => Number.isFinite(p.value)));
-            ichingTransformedSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.iching_transformed_close,
-            })));
-            ichingMutualHighSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.iching_mutual_high,
-            })));
-            ichingMutualLowSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.iching_mutual_low,
-            })));
-            ichingMutualMeanSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.iching_mutual_mean,
-            })));
+            const forecast = Array.isArray(tfData.forecast) ? tfData.forecast : [];
+            const forecastPoints = forecast.map(d => ({ ...d, time: Math.floor(d.time / 1000) }));
+            // Projected line alpha is 60% of history with a 0.30 visibility floor;
+            // historical lines stay above that floor. Nonzero fills are 60% of
+            // history and may be lighter than the lines (zero stops stay clear).
+            ichingOriginalSeries.setData([
+                ...data.map(d => ({
+                    time: d.time,
+                    value: (d.iching_open + d.iching_high + d.iching_low + d.iching_close) / 4,
+                })).filter(p => Number.isFinite(p.value)),
+                ...forecastPoints.map(d => ({ time: d.time, value: d.original, color: 'rgba(79, 195, 247, 0.57)' })),
+            ]);
+            ichingTransformedSeries.setData([
+                ...data.map(d => ({ time: d.time, value: d.iching_transformed_close })),
+                ...forecastPoints.map(d => ({ time: d.time, value: d.transformed, color: 'rgba(255, 183, 77, 0.30)' })),
+            ]);
+            const projectedMutualColors = {
+                topLineColor: 'rgba(38, 166, 154, 0.30)',
+                topFillColor1: 'rgba(38, 166, 154, 0.09)',
+                topFillColor2: 'rgba(38, 166, 154, 0.00)',
+                bottomLineColor: 'rgba(239, 83, 80, 0.30)',
+                bottomFillColor1: 'rgba(239, 83, 80, 0.00)',
+                bottomFillColor2: 'rgba(239, 83, 80, 0.09)',
+            };
+            ichingMutualHighSeries.setData([
+                ...data.map(d => ({ time: d.time, value: d.iching_mutual_high })),
+                ...forecastPoints.map(d => ({ time: d.time, value: d.mutual_high, ...projectedMutualColors })),
+            ]);
+            ichingMutualLowSeries.setData([
+                ...data.map(d => ({ time: d.time, value: d.iching_mutual_low })),
+                ...forecastPoints.map(d => ({ time: d.time, value: d.mutual_low, ...projectedMutualColors })),
+            ]);
+            ichingMutualMeanSeries.setData([
+                ...data.map(d => ({ time: d.time, value: d.iching_mutual_mean })),
+                ...forecastPoints.map(d => ({
+                    time: d.time,
+                    value: d.mutual_mean,
+                    topLineColor: 'rgba(110, 231, 183, 0.30)',
+                    bottomLineColor: 'rgba(252, 165, 165, 0.30)',
+                    topFillColor1: 'rgba(45, 218, 178, 0.00)',
+                    topFillColor2: 'rgba(45, 218, 178, 0.00)',
+                    bottomFillColor1: 'rgba(255, 110, 118, 0.00)',
+                    bottomFillColor2: 'rgba(255, 110, 118, 0.00)',
+                })),
+            ]);
+            hasForecast = forecast.length > 0;
+            flatForecast = hasForecast && forecast.every(d =>
+                d.original === forecast[0].original &&
+                d.transformed === forecast[0].transformed &&
+                d.mutual_high === forecast[0].mutual_high &&
+                d.mutual_low === forecast[0].mutual_low &&
+                d.mutual_mean === forecast[0].mutual_mean);
+            ichingNowDivider.setTime(hasForecast ? forecastPoints[0].time : null);
             const markers = [];
             // ATR Climax circles
             data.forEach(d => {
@@ -666,16 +780,21 @@
                 candlestickSeries.attachPrimitive(window._gapPrimitive);
             }
 
+            updateVisibleRange(forecast);
             watermarkUpdate();
         }
 
         // ─── Layout ───────────────────────────────────────────────────
         const onSizeUpdate = () => {
-            const tmpSeries = chart.panes()[0].getSeries()[0];
-            const len = tmpSeries.data().length;
-            chart.timeScale().setVisibleLogicalRange({ from: len - 128, to: len + 5 });
+            const tf = tf_btns.value || container.dataset.tf || chartTfs[0];
+            const forecast = dataset[tf]?.forecast;
+            updateVisibleRange(Array.isArray(forecast) ? forecast : []);
             const containerHeight = document.getElementById("container").getClientRects()[0].height;
-            chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
+            if (pane3Horizon().wide) {
+                chart.panes()[0].setHeight(Math.floor(containerHeight * 0.60));
+            } else {
+                chart.panes()[0].setHeight(Math.floor(containerHeight * 0.48));
+            }
             watermarkUpdate();
         }
         const resizeObserver = new ResizeObserver((entries) => {

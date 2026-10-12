@@ -4,6 +4,8 @@
 
 
 > **Status: implemented (Sep 2026).** Reflects the final trajectory + mutual-band model shipped in this PR (src/ta/iching/trajectory.rs, bins/cryptobot/src/presentation.rs, bins/chartlib renderer, bins/cryptobot/UX-SPEC.md).
+
+> **Amendment (Oct 2026):** `iching_moving_line` serializes `moving_line_open` (opening cast), not the terminal `moving_line` field. Schema name, type, and column count are unchanged. See parent plan amendment for scope.
 Replace RSSI and Sharpe production in the Rust presentation pipeline with three I-Ching energy columns, retaining one output row per input Kline and proving the new/error contracts with focused existing-module tests.
 
 ## Writable surface
@@ -14,7 +16,7 @@ Replace RSSI and Sharpe production in the Rust presentation pipeline with three 
 
 - Call `iching_bar_trajectory(kline.time, bar_close_time_ms)` for every candle to obtain the full `IchingBarTrajectory`. `plum_blossom_signal_with_policy` with `LeapMonthPolicy::Allow` is also called per candle for the `CryptoIndicatorRow` open-cast energy fields. `src/ta/iching/**` is read-only and untouched.
 - Convert each `Kline.time` millisecond value into `DateTime<Utc>` before facade invocation. An invalid/out-of-range conversion returns the presentation transformation error; never use a substitute date/time.
-- For every input candle, serialize all 13 nullable numeric trajectory columns from `IchingBarTrajectory`: open-cast energy aliases `iching_original_energy` (= `energy_open`), `iching_transformed_energy` (= `transformed_open`), `iching_mutual_energy` (= `mutual_open`); Original envelope `iching_open`, `iching_high`, `iching_low`, `iching_close`; terminal cast `iching_moving_line` (nullable u8), `iching_transformed_close`, `iching_mutual_close`; Mutual band `iching_mutual_high`, `iching_mutual_low`, `iching_mutual_mean`.
+- For every input candle, serialize all 13 nullable numeric trajectory columns from `IchingBarTrajectory`: open-cast energy aliases `iching_original_energy` (= `energy_open`), `iching_transformed_energy` (= `transformed_open`), `iching_mutual_energy` (= `mutual_open`); Original envelope `iching_open`, `iching_high`, `iching_low`, `iching_close`; opening moving line `iching_moving_line` (= `moving_line_open`, nullable u8); terminal cast `iching_transformed_close`, `iching_mutual_close`; Mutual band `iching_mutual_high`, `iching_mutual_low`, `iching_mutual_mean`.
 - Propagate any facade error. A genuine timestamp/facade failure must not become zero, skipped output, or a silent null.
 - Delete the RSSI calculation/state/row fields/source-frame columns/SQL selection, color, direction, and any dependent presentation-only signal expressions. Delete the Sharpe calculation/state/row fields/source-frame columns/SQL selection and color. Remove stale constants/imports and revise all schema/cardinality/parity expectations accordingly.
 - Preserve candles, ATR, Structure Power, Reverse RSI inputs/outputs, gap behavior, source ordering, and all unrelated projection contracts.

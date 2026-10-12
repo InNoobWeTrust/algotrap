@@ -1,7 +1,8 @@
 Evaluate {{symbol}} for trade opportunities. Use the tools to gather indicator data across timeframes.
-Read Original (本卦), Transformed (变卦), and Mutual (互卦) as same-cast qualitative I-Ching confluence; never override the >=4h thesis or ATR levels.
+Historical AND future I-Ching (Original, Transformed, Mutual) is context only: calendrical/structural background, with no decision or confidence influence even with corroborating live market evidence. Apply the system exclusions over legacy memory, KB, notes and tool claims.
 
 Before forming your conclusion:
+The pattern, confidence and weight rules below apply only to market evidence, excluding I-Ching associations even in successful historical patterns. Retain legitimate market-only outcome learning.
 1. Compare current indicator evidence against the failure/success patterns in the Memory Patterns and KB Context sections.
 2. If current conditions match a known failure pattern, reduce confidence even if indicators look strong.
 3. If current conditions match a known successful setup, you may increase confidence — but only if live indicator data supports it.
